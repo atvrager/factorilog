@@ -1,0 +1,51 @@
+# Foundry PDK core. Synthesis (solver) in Python; place-and-route stays in
+# OpenROAD. The reference/ scripts are prior art, not part of the build.
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Python sources, for the workspace-wide lint and type checks.
+filegroup(
+    name = "py_srcs",
+    srcs = glob(["*.py"]),
+)
+
+py_library(
+    name = "pdk_lib",
+    srcs = [
+        "blueprint.py",
+        "pdk.py",
+        "solve.py",
+    ],
+    deps = [
+        "@pip//numpy",
+        "@pip//scipy",
+    ],
+)
+
+py_binary(
+    name = "solve",
+    srcs = ["solve.py"],
+    main = "solve.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "solve_test",
+    size = "small",
+    srcs = ["test_solve.py"],
+    args = ["$(location //test:fixture)"],
+    data = ["//test:fixture"],
+    main = "test_solve.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "pdk_smoke_test",
+    size = "small",
+    srcs = ["test_pdk.py"],
+    args = ["$(location //test:fixture)"],
+    data = ["//test:fixture"],
+    main = "test_pdk.py",
+    deps = [":pdk_lib"],
+)

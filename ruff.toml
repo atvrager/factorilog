@@ -1,0 +1,37 @@
+# ruff configuration for the Python tooling.
+#
+# `bazel test //tools:ruff_test` runs `ruff check` and `ruff format --check`
+# over every Python file in the workspace.
+
+target-version = "py311"
+line-length = 100
+extend-exclude = ["reference"]
+
+[lint]
+select = [
+    "ANN", # annotations
+    "ARG", # unused arguments
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # import order
+    "PERF",# performance
+    "PTH", # pathlib
+    "RET", # return statements
+    "RUF", # ruff-specific
+    "SIM", # simplify
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "ANN401", # the code may use Any for a genuinely untyped value
+    "E501",   # line length is the formatter's job
+]
+
+[lint.per-file-ignores]
+# The vendored research scripts are prior art, not maintained code.
+"reference/*" = ["ALL"]
+# The solver came from the research phase unannotated. Port it to the PDK
+# types gradually instead of annotating 400 lines in one pass.
+"foundry/solve.py" = ["ANN", "PTH", "E741"]

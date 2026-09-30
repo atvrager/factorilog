@@ -1,0 +1,63 @@
+# Dev tooling: the ASD-STE100 prose linter, its rule regression tests, and
+# the Python lint and type checks.
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "requirements_lock.txt",
+    "requirements.in",
+])
+
+filegroup(
+    name = "py_srcs",
+    srcs = glob(["*.py"]),
+)
+
+py_binary(
+    name = "ste_lint",
+    srcs = ["ste-lint.py"],
+    main = "ste-lint.py",
+)
+
+py_test(
+    name = "ste_lint_test",
+    size = "small",
+    srcs = [
+        "ste-lint.py",
+        "test-ste-lint.py",
+    ],
+    main = "test-ste-lint.py",
+)
+
+sh_test(
+    name = "ruff_test",
+    size = "small",
+    srcs = ["run_ruff.sh"],
+    args = [
+        "$(location @ruff//:bin)",
+        "$(location //:ruff.toml)",
+    ],
+    data = [
+        "@ruff//:bin",
+        "//:ruff.toml",
+        "//foundry:py_srcs",
+        "//reference:py_srcs",
+        "//tools:py_srcs",
+    ],
+)
+
+sh_test(
+    name = "ty_test",
+    size = "small",
+    srcs = ["run_ty.sh"],
+    args = [
+        "$(location @ty//:bin)",
+    ],
+    data = [
+        "@ty//:bin",
+        "//foundry:py_srcs",
+        "//tools:py_srcs",
+    ],
+)

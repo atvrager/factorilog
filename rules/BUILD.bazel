@@ -1,0 +1,4 @@
+# Bazel rules and repository extensions.
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["lint_tools.bzl"])

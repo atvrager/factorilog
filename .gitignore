@@ -1,0 +1,6 @@
+# Bazel symlinks
+/bazel-*
+
+__pycache__/
+*.pyc
+.venv/

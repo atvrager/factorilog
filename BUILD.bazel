@@ -1,0 +1,25 @@
+# Factorilog: a Foundry PDK for Factorio, driving OpenROAD.
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "MODULE.bazel",
+    ".bazelversion",
+    "ruff.toml",
+])
+
+# Prose that the STE linter covers.
+filegroup(
+    name = "docs",
+    srcs = glob(
+        ["**/*.md"],
+        exclude = ["reference/**"],
+    ),
+)
+
+test_suite(
+    name = "all",
+    tests = [
+        "//foundry:solve_test",
+        "//tools:ste_lint_test",
+    ],
+)

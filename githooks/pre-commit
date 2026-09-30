@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# pre-commit - ASD-STE100 prose lint on the added lines of staged files.
+# Linter: tools/ste-lint.py, vendored from Shoumei-RTL verification/.
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ "${STE_LINT_DISABLE:-0}" = "1" ]; then
+    exit 0
+fi
+
+if ! python3 tools/ste-lint.py --diff; then
+    echo "pre-commit: fix the prose findings above, or set STE_LINT_DISABLE=1" >&2
+    exit 1
+fi

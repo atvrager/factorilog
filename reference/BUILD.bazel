@@ -1,0 +1,8 @@
+# Prior art from the research phase: hand-rolled place-and-route in Python.
+# Not part of the build; kept for measured constants and geometry ideas.
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "py_srcs",
+    srcs = glob(["*.py"]),
+)
