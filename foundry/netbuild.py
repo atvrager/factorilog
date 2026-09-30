@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lef
+import liberty
 import netlist
 import pdk
 import solve
@@ -69,11 +70,14 @@ def main() -> int:
     Path("netlist.v").write_text(text)
     Path("cells.v").write_text(netlist.emit_cells_v(nl))
 
-    lef_text = lef.write_lef(tech, list(nl.cells.values()), "tech.lef")
-    problems = lef.check_lef(list(nl.cells.values()), lef_text)
+    cells = [*nl.cells.values(), netlist.merge_cell()]
+    lef_text = lef.write_lef(tech, cells, "tech.lef")
+    lib_text = liberty.write_liberty(cells, "tech.lib")
+    problems = lef.check_lef(cells, lef_text)
+    problems += liberty.check_liberty(cells, lib_text)
     if problems:
         for problem in problems:
-            print(f"lef: {problem}", file=sys.stderr)
+            print(f"pdk: {problem}", file=sys.stderr)
         return 1
 
     sidecar = {
@@ -98,7 +102,7 @@ def main() -> int:
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1
     print(
-        f"netlist.v + cells.v + netlist.json + tech.lef: "
+        f"netlist.v + cells.v + netlist.json + tech.lef + tech.lib: "
         f"{len(nl.instances)} instances, {len(nl.cells)} cells, "
         f"{len(nl.nets)} nets"
     )

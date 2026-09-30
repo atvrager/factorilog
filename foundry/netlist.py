@@ -28,6 +28,26 @@ import solve
 MERGE_CELL = "belt_merge2"
 
 
+def merge_cell() -> dict[str, Any]:
+    """The merge cell as a PDK cell record.
+
+    The splitter footprint is 1.8 x 0.8 tiles in the dump; the record
+    snaps it to the tile grid, 2 x 1. Two inputs, one output, and no
+    crafting rate.
+    """
+    return {
+        "cell": MERGE_CELL,
+        "machine": "splitter",
+        "recipe": "merge2",
+        "width": 2,
+        "height": 1,
+        "watts": 0.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a", "b"],
+        "outputs": ["y"],
+    }
+
+
 def sanitize(name: str) -> str:
     """Item or machine name -> Verilog identifier."""
     return name.replace("-", "_").replace(".", "__")

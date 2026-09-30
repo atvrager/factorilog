@@ -9,9 +9,14 @@ Factorio factories and IC designs share a shape:
 | --- | --- |
 | cell | building, specialized by recipe |
 | cell library | the PDK: every (building, recipe) macro |
+| cell delay | craft time: energy_required over crafting_speed |
+| cell area | tile footprint, and one day the material build cost |
+| capacitance | the load a machine puts on its feed belt |
+| capacitor | a chest: capacity in slots times stack size |
 | routing layer | surface, underground tunnel pair, pipe run |
 | layer change | one underground-belt or pipe-to-ground pair |
 | track | belt, pipe, rail |
+| corners | beacon and module settings: no beacons is the slow corner |
 | power grid | pole and substation network |
 | netlist | recipe graph, one wire per material |
 | tape-out | blueprint exchange string |
@@ -53,7 +58,8 @@ graph LR
 | `foundry/blueprint.py` | The exchange-string codec. |
 | `foundry/netlist.py` | Plan to instances and nets, flat Verilog, cell stubs. |
 | `foundry/lef.py` | LEF writer: macros, layers, vias, checker. |
-| `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`. |
+| `foundry/liberty.py` | Liberty stubs: area, pins, power, timing arcs. |
+| `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`, `tech.lib`. |
 | `flow/factorilog.tcl` | The OpenROAD stage: read, link, write DEF. |
 | `flow/orfs.sh` | Runs the stage in the `openroad/orfs` container. |
 | `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
@@ -81,29 +87,44 @@ python3 foundry/make_fixture.py \
 The fixture comes from one `factorio --dump-data` run. `bazel test` needs
 no game and no network.
 
-`netbuild` writes `foundry/netlist.v`, `foundry/cells.v`, and
-`foundry/tech.lef`. All are generated, so git ignores them: the Verilog
-feeds OpenROAD, the LEF holds the masters, the JSON sidecar carries the
-rates and lane data that place-and-route reads.
+`netbuild` writes `foundry/netlist.v`, `foundry/cells.v`, `foundry/tech.lef`,
+and `foundry/tech.lib`. Git ignores all of them. The Verilog feeds
+OpenROAD, the LEF holds the masters, the Liberty stubs hold the timing
+view, and the JSON sidecar carries the rates and lane data that
+place-and-route reads.
+
+## Regenerating the PDK
+
+Two inputs feed one command. A new game version reruns both.
+
+1.  `factorio --dump-data` writes the prototype dump. Nearly every PDK
+    number comes from here: footprints, belt speeds, tunnel spans, pole
+    reach, machine speed and power, splitter geometry.
+2.  The probe mod measures the four numbers the dump lacks. Those are
+    the pipe-to-ground span, the inserter swing rate under load, fluid
+    flow against pipe length, and train acceleration. They live in one
+    measurements file with a game version stamp.
+3.  `bazel run //foundry:netbuild` merges the two and writes the PDK and
+    the netlist. The PDK is a build product, never a hand-edited file.
 
 The OpenROAD stage runs in the prebuilt `openroad/orfs` container, no
 build step:
 
 ```
-flow/orfs.sh    # read_lef, read_verilog, link_design, write_def
+flow/orfs.sh    # read_liberty, read_lef, read_verilog, link, write_def
 ```
 
 ## Status
 
 Working: synthesis on the hermetic fixture. A 60 packs-per-minute demand
 solves with zero balance error and lowers to a flat netlist: 1220
-instances, 1248 nets, 12 ports. The LEF carries 39 masters, layers M1
-to M3, and vias with spans. OpenROAD reads the LEF, links the design,
-and writes the DEF. The codec round-trips.
+instances, 1248 nets, 12 ports. The PDK carries 39 masters with LEF
+geometry, Liberty stubs, and three routing layers. OpenROAD reads both,
+links the design, and writes the DEF with no warnings.
 
-Next, in order: Liberty stubs per cell (STA, resizer, CTS), the
-floorplan and place stages, the DEF-to-entities bridge, trains as a
-track layer.
+Next, in order: the floorplan and place stages in `factorilog.tcl`, the
+Liberty timing tables from measured craft times, the DEF-to-entities
+bridge, trains as a track layer.
 
 ## Prose
 

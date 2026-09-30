@@ -6,6 +6,7 @@ foundry/netlist.v
 foundry/cells.v
 foundry/netlist.json
 foundry/tech.lef
+foundry/tech.lib
 foundry/probe.def
 foundry/factory.def
 

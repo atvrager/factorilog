@@ -211,14 +211,14 @@ def merge_lines() -> list[str]:
         "    DIRECTION INPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT -0.500 -0.500 0.500 0.500 ;",
+        "      RECT -0.500 -0.500 0.500 0.000 ;",
         "    END",
         "  END b",
         "  PIN y",
         "    DIRECTION OUTPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT 1.000 -0.500 2.000 0.500 ;",
+        "      RECT 0.000 -0.500 1.000 0.500 ;",
         "    END",
         "  END y",
         f"END {name}",
@@ -232,6 +232,8 @@ def write_lef(p: pdk.Pdk, cells: list[dict[str, Any]], path: str) -> str:
     lines.append("")
     lines.extend(merge_lines())
     for cell in sorted(cells, key=lambda c: c["cell"]):
+        if cell["cell"] == netlist.MERGE_CELL:
+            continue  # merge_lines emitted it with splitter geometry
         lines.append("")
         lines.extend(macro_lines(cell))
     lines.append("")

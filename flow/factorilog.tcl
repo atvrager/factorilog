@@ -7,6 +7,7 @@
 # Run from foundry/ (see flow/orfs.sh):
 #   openroad -no_init -exit flow/factorilog.tcl
 
+read_liberty tech.lib
 read_lef tech.lef
 read_verilog netlist.v
 link_design factory
