@@ -51,6 +51,10 @@ LAYER_FLUID = "M3"
 # The tunnel pair works as the layer change of M2. A pipe-to-ground pair
 # works as the layer change of M3.
 
+# Pipe-to-ground span, tiles. The prototype dump carries no max_distance
+# for it, unlike underground belts. One measurement in game fills this.
+PIPE_TO_GROUND_SPAN = 11
+
 
 def items_per_second(speed: float | str) -> float:
     """Belt prototype speed -> items per second on one lane."""
@@ -130,7 +134,10 @@ class Pdk:
                     "via": "tunnel-pair",
                     "tiers": self.belt_tiers(),
                 },
-                LAYER_FLUID: {"via": "pipe-to-ground"},
+                LAYER_FLUID: {
+                    "via": "pipe-to-ground",
+                    "span": PIPE_TO_GROUND_SPAN,
+                },
             },
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
             "inserters": {

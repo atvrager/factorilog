@@ -45,6 +45,8 @@ TABLES = [
     "inserter",
     "electric-pole",
     "storage-tank",
+    "pipe",
+    "pipe-to-ground",
 ]
 TRANSPORT_TABLES = frozenset(TABLES[9:])
 
