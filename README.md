@@ -51,6 +51,8 @@ graph LR
 | `foundry/solve.py` | The netlister. Recipe graph to LP to rates. |
 | `foundry/pdk.py` | The tech layer: cells, layers, measured numbers. |
 | `foundry/blueprint.py` | The exchange-string codec. |
+| `foundry/netlist.py` | Plan to instances and nets. |
+| `foundry/netbuild.py` | Dump and demand to `netlist.v` + sidecar. |
 | `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
 | `foundry/test_solve.py` | Solver tests on the fixture. |
 | `foundry/test_pdk.py` | Smoke test: dump to plan to cells to blueprint. |
@@ -66,6 +68,8 @@ bazel run //foundry:solve -- item electronic-circuit 3000 \
     --dump test/data/dump-fixture.json            # a plan
 bazel run //foundry:solve -- tech rocket-silo 60 \
     --dump test/data/dump-fixture.json            # science for a run
+bazel run //foundry:netbuild -- test/data/dump-fixture.json --spc 60
+                                                  # netlist.v + sidecar
 python3 foundry/make_fixture.py \
     ~/.factorio/script-output/data-raw-dump.json \
     test/data/dump-fixture.json                   # refresh the fixture
@@ -73,6 +77,10 @@ python3 foundry/make_fixture.py \
 
 The fixture comes from one `factorio --dump-data` run. `bazel test` needs
 no game and no network.
+
+`netbuild` writes `foundry/netlist.v` and `foundry/netlist.json`. Both are
+generated, so git ignores them: the Verilog feeds OpenROAD, the JSON
+sidecar carries the rates and lane data that place-and-route reads.
 
 ## Status
 

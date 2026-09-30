@@ -89,12 +89,14 @@ def build(data: solve.Data, demand: dict[str, float], allowed: set[str]) -> Netl
             raise RuntimeError(f"no cell for {machine} running {recipe}")
         nl.cells[cell["cell"]] = cell
         count = max(1, math.ceil(plan_count.get(recipe, 1.0)))
+        # Each instance of the fleet takes an equal share of the recipe.
+        share = rate / count
         for index in range(count):
             inst = Instance(
                 f"u_{sanitize(recipe)}_{index + 1}",
                 cell["cell"],
                 recipe,
-                rate,
+                share,
                 cell["crafts_per_minute"],
             )
             nl.instances.append(inst)

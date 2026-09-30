@@ -49,8 +49,11 @@ class NetlistTest(unittest.TestCase):
             if i.recipe == "automation-science-pack" and i.cell_key != netlist.MERGE_CELL
         ]
         self.assertEqual(len(packs), 4)
+        # The fleet shares the recipe rate: 60/min over 4 machines.
         for inst in packs:
-            self.assertAlmostEqual(inst.plan_rate, 60.0, places=4)
+            self.assertAlmostEqual(inst.plan_rate, 15.0, places=4)
+            self.assertAlmostEqual(inst.rated, 15.0, places=4)
+            self.assertLessEqual(inst.plan_rate, inst.rated + 1e-9)
 
     def test_raw_items_are_inputs(self) -> None:
         names = [netlist.sanitize(m) for m in self.nl.inputs]

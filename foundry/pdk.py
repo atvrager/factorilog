@@ -107,6 +107,8 @@ class Pdk:
         recipe_proto = self.data.recipes[recipe]
         speed = float(proto.get("crafting_speed", 1.0))
         seconds = solve.Data.craft_seconds(recipe_proto)
+        # One machine crafts speed * 60 / craft_seconds per minute. The
+        # solver's count formula is the inverse of this number.
         return {
             "cell": f"{machine}.{recipe}",
             "machine": machine,
@@ -114,7 +116,7 @@ class Pdk:
             "width": width,
             "height": height,
             "watts": watts_of(proto.get("energy_usage", 0)),
-            "crafts_per_minute": 60.0 / speed / seconds,
+            "crafts_per_minute": 60.0 * speed / seconds,
             "inputs": [solve.name_of(e) for e in solve.Data.ingredients_of(recipe_proto)],
             "outputs": [solve.name_of(e) for e in solve.Data.results_of(recipe_proto)],
         }

@@ -1,6 +1,10 @@
 # Bazel symlinks
 /bazel-*
 
+# Generated netlist outputs
+foundry/netlist.v
+foundry/netlist.json
+
 __pycache__/
 *.pyc
 .venv/
