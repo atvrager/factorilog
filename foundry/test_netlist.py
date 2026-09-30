@@ -39,6 +39,7 @@ class NetlistTest(unittest.TestCase):
         cls.nl = netlist.build(cls.data, demand, cls.allowed)
         cls.plans = netlist.merge_plans_of(cls.nl)
         cls.text = netlist.emit_verilog(cls.nl, cls.plans)
+        cls.cells_text = netlist.emit_cells_v(cls.nl)
 
     def test_machine_instances_match_plan(self) -> None:
         # 60 packs/min needs 4 assemblers at 15/min rated. Merge cells do
@@ -67,14 +68,22 @@ class NetlistTest(unittest.TestCase):
     def test_verilog_parses_and_elaborates(self) -> None:
         if not HAVE_PYSLANG:
             self.skipTest("pyslang not installed")
-        tree = SyntaxTree.fromText(self.text)
-        errors = [d for d in tree.diagnostics if d.isError]
-        self.assertEqual(errors, [], _report(tree.sourceManager, errors))
+        errors = [d for d in SyntaxTree.fromText(self.text).diagnostics if d.isError]
+        self.assertEqual(errors, [], _report(None, errors))
+        errors = [d for d in SyntaxTree.fromText(self.cells_text).diagnostics if d.isError]
+        self.assertEqual(errors, [], _report(None, errors))
+        # The netlist instantiates the library cells. Elaborate together.
         compilation = Compilation()
-        compilation.addSyntaxTree(tree)
+        compilation.addSyntaxTree(SyntaxTree.fromText(self.cells_text))
+        compilation.addSyntaxTree(SyntaxTree.fromText(self.text))
         all_diags = list(compilation.getAllDiagnostics())
         errors = [d for d in all_diags if d.isError if hasattr(d, "isError")]
         self.assertEqual(errors, [], _report(compilation.sourceManager, errors))
+
+    def test_netlist_is_flat(self) -> None:
+        """The design netlist holds the top module only."""
+        modules = [line for line in self.text.splitlines() if line.startswith("module ")]
+        self.assertEqual(modules, [f"module {self.nl.label} ("])
 
 
 def _report(manager: Any, diags: list) -> str:

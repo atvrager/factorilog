@@ -66,8 +66,8 @@ def main() -> int:
     nl = netlist.build(data, demand, allowed)
     plans = netlist.merge_plans_of(nl)
     text = netlist.emit_verilog(nl, plans)
-    out = Path("netlist.v")
-    out.write_text(text)
+    Path("netlist.v").write_text(text)
+    Path("cells.v").write_text(netlist.emit_cells_v(nl))
 
     lef_text = lef.write_lef(tech, list(nl.cells.values()), "tech.lef")
     problems = lef.check_lef(list(nl.cells.values()), lef_text)
@@ -98,8 +98,9 @@ def main() -> int:
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1
     print(
-        f"netlist.v + netlist.json + tech.lef: {len(nl.instances)} instances, "
-        f"{len(nl.cells)} cells, {len(nl.nets)} nets"
+        f"netlist.v + cells.v + netlist.json + tech.lef: "
+        f"{len(nl.instances)} instances, {len(nl.cells)} cells, "
+        f"{len(nl.nets)} nets"
     )
     for key, count in sorted(counts.items()):
         print(f"  {count:3} x {key}")

@@ -20,12 +20,12 @@ Factorio factories and IC designs share a shape:
 
 ```mermaid
 graph LR
-  D[dump JSON<br/>factorio --dump-data] --> P[PDK<br/>tech layers, cells]
+  D[dump JSON<br/>factorio --dump-data] --> P[PDK<br/>tech.lef, cells.v]
   D --> S[netlister<br/>LP over recipe graph]
-  S --> N[netlist<br/>Verilog-compatible]
-  P --> O[OpenROAD flow<br/>TCL]
+  S --> N[netlist.v<br/>flat, LEF masters]
+  P --> O[OpenROAD flow<br/>TCL, ORFS container]
   N --> O
-  O --> DEF[DEF output]
+  O --> DEF[factory.def]
   DEF --> B[bridge<br/>DEF to entities]
   B --> E[blueprint string]
   E --> G[game]
@@ -51,8 +51,11 @@ graph LR
 | `foundry/solve.py` | The netlister. Recipe graph to LP to rates. |
 | `foundry/pdk.py` | The tech layer: cells, layers, measured numbers. |
 | `foundry/blueprint.py` | The exchange-string codec. |
-| `foundry/netlist.py` | Plan to instances and nets. |
-| `foundry/netbuild.py` | Dump and demand to `netlist.v` + sidecar. |
+| `foundry/netlist.py` | Plan to instances and nets, flat Verilog, cell stubs. |
+| `foundry/lef.py` | LEF writer: macros, layers, vias, checker. |
+| `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`. |
+| `flow/factorilog.tcl` | The OpenROAD stage: read, link, write DEF. |
+| `flow/orfs.sh` | Runs the stage in the `openroad/orfs` container. |
 | `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
 | `foundry/test_solve.py` | Solver tests on the fixture. |
 | `foundry/test_pdk.py` | Smoke test: dump to plan to cells to blueprint. |
@@ -78,18 +81,29 @@ python3 foundry/make_fixture.py \
 The fixture comes from one `factorio --dump-data` run. `bazel test` needs
 no game and no network.
 
-`netbuild` writes `foundry/netlist.v` and `foundry/netlist.json`. Both are
-generated, so git ignores them: the Verilog feeds OpenROAD, the JSON
-sidecar carries the rates and lane data that place-and-route reads.
+`netbuild` writes `foundry/netlist.v`, `foundry/cells.v`, and
+`foundry/tech.lef`. All are generated, so git ignores them: the Verilog
+feeds OpenROAD, the LEF holds the masters, the JSON sidecar carries the
+rates and lane data that place-and-route reads.
+
+The OpenROAD stage runs in the prebuilt `openroad/orfs` container, no
+build step:
+
+```
+flow/orfs.sh    # read_lef, read_verilog, link_design, write_def
+```
 
 ## Status
 
 Working: synthesis on the hermetic fixture. A 60 packs-per-minute demand
-solves with zero balance error. The PDK reads cells and layer data. The
-codec round-trips.
+solves with zero balance error and lowers to a flat netlist: 1220
+instances, 1248 nets, 12 ports. The LEF carries 39 masters, layers M1
+to M3, and vias with spans. OpenROAD reads the LEF, links the design,
+and writes the DEF. The codec round-trips.
 
-Next, in order: LEF/DEF writer from the PDK cells, OpenROAD flow skeleton,
-DEF-to-entities bridge, trains as a track layer.
+Next, in order: Liberty stubs per cell (STA, resizer, CTS), the
+floorplan and place stages, the DEF-to-entities bridge, trains as a
+track layer.
 
 ## Prose
 

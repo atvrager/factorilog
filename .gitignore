@@ -3,8 +3,11 @@
 
 # Generated netlist outputs
 foundry/netlist.v
+foundry/cells.v
 foundry/netlist.json
 foundry/tech.lef
+foundry/probe.def
+foundry/factory.def
 
 __pycache__/
 *.pyc
