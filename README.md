@@ -25,28 +25,36 @@ Factorio factories and IC designs share a shape:
 
 ```mermaid
 graph LR
-  D[dump JSON<br/>factorio --dump-data] --> P[PDK<br/>tech.lef, cells.v]
+  D[dump JSON<br/>factorio --dump-data] --> P[PDK<br/>tech.lef, tech.lib]
   D --> S[netlister<br/>LP over recipe graph]
   S --> N[netlist.v<br/>flat, LEF masters]
-  P --> O[OpenROAD flow<br/>TCL, ORFS container]
-  N --> O
-  O --> DEF[factory.def]
+  P --> F[OpenROAD floorplan<br/>die, rows, tracks]
+  N --> F
+  F --> I[io<br/>inputs and outputs on the edge]
+  I --> G[place<br/>global, legalize, check]
+  G --> DEF[factory.def]
+  DEF --> V[verify<br/>reload, recheck]
   DEF --> B[bridge<br/>DEF to entities]
   B --> E[blueprint string]
-  E --> G[game]
+  E --> H[game]
 ```
 
 1.  Synthesis. The netlister reads the prototype dump and solves a linear
     program over the recipe graph. Demand in, recipe rates and machine
     counts out. This is the Yosys step of the flow.
-2.  The PDK. One library of macros: footprint, ports, power, per
+2.  The PDK. One library of macros: footprint, ports, power, timing, per
     (building, recipe). Layer stack: M1 surface, M2 tunnel pairs, M3
     fluids. Game-measured numbers: belt capacity, tunnel span, inserter
     reach, pole reach. No invented constants.
-3.  Place and route. OpenROAD. The PDK speaks LEF and DEF, the flow runs
-    as TCL, and the netlist is Verilog-compatible. This repo writes none
-    of those algorithms.
-4.  The bridge. DEF placement and routes become game entities. The
+3.  Floorplan, io, place. OpenROAD. The die holds the block area at 28
+    percent fill, the rows sit on the tile grid, and legalization keeps
+    a two tile lane between block columns, enough for one belt and one
+    inserter. The placement check is fatal on any violation.
+4.  Verify. The flow reads `factory.def` back and repeats the checks, so
+    the bridge never consumes a file OpenROAD cannot reload.
+5.  Route. Not yet. The next stage: belts, tunnels, and pipes on the
+    three layers.
+6.  The bridge. DEF placement and routes become game entities. The
     blueprint codec is 40 lines: JSON, zlib, base64.
 
 ## Layout
@@ -60,8 +68,9 @@ graph LR
 | `foundry/lef.py` | LEF writer: macros, layers, vias, checker. |
 | `foundry/liberty.py` | Liberty stubs: area, pins, power, timing arcs. |
 | `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`, `tech.lib`. |
-| `flow/factorilog.tcl` | The OpenROAD stage: read, link, write DEF. |
-| `flow/orfs.sh` | Runs the stage in the `openroad/orfs` container. |
+| `flow/factorilog.tcl` | The OpenROAD stages: floorplan, io, place, write DEF. |
+| `flow/verify_def.tcl` | Reads the DEF back and repeats the checks. |
+| `flow/orfs.sh` | Runs a stage in the `openroad/orfs` container. |
 | `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
 | `foundry/test_solve.py` | Solver tests on the fixture. |
 | `foundry/test_pdk.py` | Smoke test: dump to plan to cells to blueprint. |
@@ -79,6 +88,8 @@ bazel run //foundry:solve -- tech rocket-silo 60 \
     --dump test/data/dump-fixture.json            # science for a run
 bazel run //foundry:netbuild -- test/data/dump-fixture.json --spc 60
                                                   # netlist.v + sidecar
+flow/orfs.sh                        # floorplan, io, place
+flow/orfs.sh flow/verify_def.tcl    # read the DEF back
 python3 foundry/make_fixture.py \
     ~/.factorio/script-output/data-raw-dump.json \
     test/data/dump-fixture.json                   # refresh the fixture
@@ -116,15 +127,17 @@ flow/orfs.sh    # read_liberty, read_lef, read_verilog, link, write_def
 
 ## Status
 
-Working: synthesis on the hermetic fixture. A 60 packs-per-minute demand
-solves with zero balance error and lowers to a flat netlist: 1220
-instances, 1248 nets, 12 ports. The PDK carries 39 masters with LEF
-geometry, Liberty stubs, and three routing layers. OpenROAD reads both,
-links the design, and writes the DEF with no warnings.
+Working: synthesis and placement on the hermetic fixture. A 60
+packs-per-minute demand solves with zero balance error and lowers to a
+flat netlist: 1220 instances, 1248 nets, 12 ports. The PDK carries 39
+masters with LEF geometry and Liberty stubs. OpenROAD sizes a 166 by
+166 tile die, places all 1220 blocks on the tile grid with no overlap
+and a two tile lane between block columns, and writes `factory.def`.
+The flow runs with no warnings.
 
-Next, in order: the floorplan and place stages in `factorilog.tcl`, the
-Liberty timing tables from measured craft times, the DEF-to-entities
-bridge, trains as a track layer.
+Next, in order: the route stage (belts, tunnels, pipes), the Liberty
+timing tables from measured craft times, the DEF-to-entities bridge
+with the blueprint string, trains as a track layer.
 
 ## Prose
 
