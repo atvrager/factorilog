@@ -21,7 +21,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lef
 import netlist
+import pdk
 import solve
 
 # The science packs of the 60 SPM reference demand.
@@ -59,12 +61,20 @@ def main() -> int:
     else:
         demand = parse_demand(args.demand)
     data = solve.Data(args.dump)
+    tech = pdk.Pdk(data)
     allowed = data.allowed_recipes(["nauvis"])
     nl = netlist.build(data, demand, allowed)
     plans = netlist.merge_plans_of(nl)
     text = netlist.emit_verilog(nl, plans)
     out = Path("netlist.v")
     out.write_text(text)
+
+    lef_text = lef.write_lef(tech, list(nl.cells.values()), "tech.lef")
+    problems = lef.check_lef(list(nl.cells.values()), lef_text)
+    if problems:
+        for problem in problems:
+            print(f"lef: {problem}", file=sys.stderr)
+        return 1
 
     sidecar = {
         "demand": demand,
@@ -88,7 +98,7 @@ def main() -> int:
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1
     print(
-        f"netlist.v + netlist.json: {len(nl.instances)} instances, "
+        f"netlist.v + netlist.json + tech.lef: {len(nl.instances)} instances, "
         f"{len(nl.cells)} cells, {len(nl.nets)} nets"
     )
     for key, count in sorted(counts.items()):

@@ -4,6 +4,7 @@
 # Generated netlist outputs
 foundry/netlist.v
 foundry/netlist.json
+foundry/tech.lef
 
 __pycache__/
 *.pyc
