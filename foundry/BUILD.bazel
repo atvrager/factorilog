@@ -14,13 +14,22 @@ py_library(
     name = "pdk_lib",
     srcs = [
         "blueprint.py",
+        "netlist.py",
         "pdk.py",
         "solve.py",
     ],
     deps = [
         "@pip//numpy",
+        "@pip//pyslang",
         "@pip//scipy",
     ],
+)
+
+py_binary(
+    name = "netbuild",
+    srcs = ["netbuild.py"],
+    main = "netbuild.py",
+    deps = [":pdk_lib"],
 )
 
 py_binary(
@@ -47,5 +56,15 @@ py_test(
     args = ["$(location //test:fixture)"],
     data = ["//test:fixture"],
     main = "test_pdk.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "netlist_test",
+    size = "small",
+    srcs = ["test_netlist.py"],
+    args = ["$(location //test:fixture)"],
+    data = ["//test:fixture"],
+    main = "test_netlist.py",
     deps = [":pdk_lib"],
 )

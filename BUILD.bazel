@@ -19,6 +19,8 @@ filegroup(
 test_suite(
     name = "all",
     tests = [
+        "//foundry:netlist_test",
+        "//foundry:pdk_smoke_test",
         "//foundry:solve_test",
         "//tools:ste_lint_test",
     ],
