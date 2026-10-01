@@ -51,3 +51,22 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "circuit_telemetry_test",
+    size = "medium",
+    srcs = ["test_circuit_telemetry.py"],
+    data = ["//test:fixture"],
+    local = True,
+    main = "test_circuit_telemetry.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//flow:check_blueprint_lib",
+        "//foundry:pdk_lib",
+    ],
+)
+

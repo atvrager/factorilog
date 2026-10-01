@@ -112,6 +112,8 @@ def cell_lines(cell: dict[str, Any]) -> list[str]:
         ]
         if cell["inputs"]:
             pin_lines.append(f'      function : "{netlist.sanitize(cell["inputs"][0])}" ;')
+        else:
+            pin_lines.append('      function : "1" ;')
         pin_lines.extend(
             [
                 f"      max_capacitance : {MAX_CAPACITANCE} ;",

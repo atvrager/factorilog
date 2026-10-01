@@ -214,6 +214,12 @@ def emit_verilog(nl: Netlist, merge_plans: dict[str, list[tuple[str, str, str, s
                     continue
                 declared.add(wire)
                 out.append(f"  wire {wire};")
+    for inst in nl.instances:
+        if inst.cell_key == pdk.ARITHMETIC_COMBINATOR_CELL:
+            c_out_wire = f"c_out_{sanitize(inst.recipe)}"
+            if c_out_wire not in declared:
+                declared.add(c_out_wire)
+                out.append(f"  wire {c_out_wire};")
     out.append("")
     for inst in nl.instances:
         if inst.cell_key == MERGE_CELL:
@@ -221,6 +227,19 @@ def emit_verilog(nl: Netlist, merge_plans: dict[str, list[tuple[str, str, str, s
             entry = next(e for e in plan if e[0] == inst.name)
             _name, a_wire, b_wire, y_wire = entry
             out.append(f"  {MERGE_CELL} {inst.name} (.a({a_wire}), .b({b_wire}), .y({y_wire}));")
+            continue
+        if inst.cell_key == pdk.DISPLAY_PANEL_CELL:
+            mat_wire = sanitize(inst.recipe)
+            out.append(f"  // telemetry display monitor for {inst.recipe}")
+            out.append(f"  {pdk.DISPLAY_PANEL_CELL} {inst.name} (.a({mat_wire}));")
+            continue
+        if inst.cell_key == pdk.ARITHMETIC_COMBINATOR_CELL:
+            mat_wire = sanitize(inst.recipe)
+            c_out_wire = f"c_out_{mat_wire}"
+            out.append(f"  // telemetry accumulator counter for {inst.recipe}")
+            out.append(
+                f"  {pdk.ARITHMETIC_COMBINATOR_CELL} {inst.name} (.a({mat_wire}), .y({c_out_wire}));"
+            )
             continue
         cell = nl.cells[inst.cell_key]
         module = sanitize(inst.cell_key)
@@ -237,6 +256,79 @@ def emit_verilog(nl: Netlist, merge_plans: dict[str, list[tuple[str, str, str, s
         out.append("  );")
     out.append("endmodule")
     return "\n".join(out) + "\n"
+
+
+def insert_telemetry(
+    nl: Netlist,
+    tap_scope: str = "io,merges",
+    enable_display: bool = True,
+    enable_circuit: bool = False,
+    merge_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Insert telemetry tap points and readout cells into the netlist.
+
+    tap_scope can be a comma-separated list of scopes:
+      - 'io': input and output boundary nets
+      - 'merges': multi-driver nets that use splitters
+      - 'all': every net in the netlist
+      - 'none': disable telemetry
+      - or specific material names.
+    """
+    scopes = {s.strip().lower() for s in tap_scope.split(",") if s.strip()}
+    if "none" in scopes or (not enable_display and not enable_circuit):
+        return []
+
+    tapped_materials: set[str] = set()
+    if "all" in scopes:
+        tapped_materials.update(nl.nets.keys())
+    else:
+        if "io" in scopes:
+            tapped_materials.update(nl.inputs)
+            tapped_materials.update(nl.outputs)
+        if "merges" in scopes and merge_plans:
+            tapped_materials.update(merge_plans.keys())
+        for s in scopes:
+            for m in nl.nets:
+                if s == m.lower() or s == sanitize(m).lower():
+                    tapped_materials.add(m)
+
+    if not tapped_materials:
+        return []
+
+    if enable_display:
+        disp_cell = pdk.display_panel_cell()
+        nl.cells[disp_cell["cell"]] = disp_cell
+    if enable_circuit:
+        acc_cell = pdk.arithmetic_combinator_cell()
+        nl.cells[acc_cell["cell"]] = acc_cell
+
+    records: list[dict[str, Any]] = []
+    for mat in sorted(tapped_materials):
+        if mat not in nl.nets:
+            continue
+        bare = sanitize(mat)
+        disp_name = None
+        circ_name = None
+
+        if enable_display:
+            disp_name = f"u_disp_{bare}"
+            nl.instances.append(Instance(disp_name, pdk.DISPLAY_PANEL_CELL, mat, 0.0, 0.0))
+            nl.net(mat).sinks.append(disp_name)
+
+        if enable_circuit:
+            circ_name = f"u_acc_{bare}"
+            nl.instances.append(Instance(circ_name, pdk.ARITHMETIC_COMBINATOR_CELL, mat, 0.0, 0.0))
+            nl.net(mat).sinks.append(circ_name)
+
+        records.append(
+            {
+                "material": mat,
+                "display_instance": disp_name,
+                "circuit_instance": circ_name,
+            }
+        )
+
+    return records
 
 
 def emit_cells_v(nl: Netlist) -> str:

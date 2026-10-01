@@ -159,16 +159,18 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     entities: list[dict[str, Any]] = []
     occupied_positions: set[tuple[float, float]] = set()
 
+    grid_entities: dict[tuple[float, float], dict[str, Any]] = {}
+
     def add_entity(
         name: str,
         x: float,
         y: float,
         direction: int | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         pos_key = (round(x, 2), round(y, 2))
         if pos_key in occupied_positions:
-            return
+            return grid_entities.get(pos_key, {})
         occupied_positions.add(pos_key)
         entity: dict[str, Any] = {
             "name": name,
@@ -179,6 +181,8 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
         if extra:
             entity.update(extra)
         entities.append(entity)
+        grid_entities[pos_key] = entity
+        return entity
 
     fluids = set(netlist_data.get("fluids", []))
 
@@ -190,6 +194,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
         return layer in ("M3", "M4")
 
     # 1. Place components
+    inst_to_entity: dict[str, dict[str, Any]] = {}
     for comp in def_data.get("components", []):
         cname = comp["name"]
         macro = comp["macro"]
@@ -210,7 +215,8 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 cw, ch = 1, 2
                 center_x, center_y = gx + 0.5, gy + 1.0
                 direction = DIRECTION_WEST if orient == "S" else DIRECTION_EAST
-            add_entity("splitter", center_x, center_y, direction=direction)
+            ent = add_entity("splitter", center_x, center_y, direction=direction)
+            inst_to_entity[cname] = ent
             for tx in range(cw):
                 for ty in range(ch):
                     occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
@@ -225,23 +231,82 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 cw, ch = 1, 2
                 center_x, center_y = gx + 0.5, gy + 1.0
                 direction = DIRECTION_SOUTH if orient == "S" else DIRECTION_NORTH
-            add_entity("pump", center_x, center_y, direction=direction)
+            ent = add_entity("pump", center_x, center_y, direction=direction)
+            inst_to_entity[cname] = ent
             for tx in range(cw):
                 for ty in range(ch):
                     occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+        elif macro == "display_panel" or cell_id == "display_panel":
+            center_x, center_y = gx + 0.5, gy + 0.5
+            mat = inst.get("recipe", "")
+            extra = {"text": mat}
+            if mat:
+                extra["custom_icon"] = {"type": "item", "name": mat}
+            ent = add_entity(
+                "display-panel", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
+            )
+            inst_to_entity[cname] = ent
+            occupied_positions.add((round(gx + 0.5, 2), round(gy + 0.5, 2)))
+        elif macro == "arithmetic_combinator" or cell_id == "arithmetic_combinator":
+            cw, ch = 1, 2
+            center_x, center_y = gx + 0.5, gy + 1.0
+            extra = {
+                "control_behavior": {
+                    "arithmetic_conditions": {
+                        "first_signal": {"type": "virtual", "name": "signal-each"},
+                        "operation": "+",
+                        "second_constant": 0,
+                        "output_signal": {"type": "virtual", "name": "signal-each"},
+                    }
+                }
+            }
+            ent = add_entity(
+                "arithmetic-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
+            )
+            inst_to_entity[cname] = ent
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+        elif macro == "decider_combinator" or cell_id == "decider_combinator":
+            cw, ch = 1, 2
+            center_x, center_y = gx + 0.5, gy + 1.0
+            extra = {
+                "control_behavior": {
+                    "decider_conditions": {
+                        "first_signal": {"type": "virtual", "name": "signal-each"},
+                        "comparator": ">",
+                        "constant": 0,
+                        "output_signal": {"type": "virtual", "name": "signal-each"},
+                        "copy_count_from_input": True,
+                    }
+                }
+            }
+            ent = add_entity(
+                "decider-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
+            )
+            inst_to_entity[cname] = ent
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+        elif macro == "constant_combinator" or cell_id == "constant_combinator":
+            center_x, center_y = gx + 0.5, gy + 0.5
+            ent = add_entity("constant-combinator", center_x, center_y, direction=DIRECTION_NORTH)
+            inst_to_entity[cname] = ent
+            occupied_positions.add((round(gx + 0.5, 2), round(gy + 0.5, 2)))
         else:
             cw = int(cell.get("width", 3))
             ch = int(cell.get("height", 3))
             machine = cell.get("machine", "assembling-machine-3")
             recipe = inst.get("recipe", cell.get("recipe", ""))
             extra = {"recipe": recipe} if recipe else None
-            add_entity(
+            ent = add_entity(
                 machine,
                 gx + cw / 2.0,
                 gy + ch / 2.0,
                 direction=DIRECTION_NORTH,
                 extra=extra,
             )
+            inst_to_entity[cname] = ent
             for tx in range(cw):
                 for ty in range(ch):
                     occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
@@ -390,8 +455,14 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         for w in net.get("wires", []):
-            p1 = (round(math.floor(w["x1"] * scale) + 0.5, 2), round(math.floor(w["y1"] * scale) + 0.5, 2))
-            p2 = (round(math.floor(w["x2"] * scale) + 0.5, 2), round(math.floor(w["y2"] * scale) + 0.5, 2))
+            p1 = (
+                round(math.floor(w["x1"] * scale) + 0.5, 2),
+                round(math.floor(w["y1"] * scale) + 0.5, 2),
+            )
+            p2 = (
+                round(math.floor(w["x2"] * scale) + 0.5, 2),
+                round(math.floor(w["y2"] * scale) + 0.5, 2),
+            )
             axis = "H" if p1[1] == p2[1] else "V"
             perp_conn[(nname, p1)].add(axis)
             perp_conn[(nname, p2)].add(axis)
@@ -401,8 +472,12 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     tile_to_nets: dict[tuple[float, float], set[str]] = collections.defaultdict(set)
     underground_entities: list[dict[str, Any]] = []
 
-    m3_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = collections.defaultdict(dict)
-    m4_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = collections.defaultdict(dict)
+    m3_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = (
+        collections.defaultdict(dict)
+    )
+    m4_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = (
+        collections.defaultdict(dict)
+    )
 
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
@@ -461,9 +536,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         is_fluid = is_fluid_wire(net, "M3")
-        blocked_tiles = {
-            pos for pos, nets in tile_to_nets.items() if any(n != nname for n in nets)
-        }
+        blocked_tiles = {pos for pos, nets in tile_to_nets.items() if any(n != nname for n in nets)}
 
         # Process horizontal runs (M3)
         for cy, segs in m3_runs_by_net.get(nname, {}).items():
@@ -496,9 +569,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                         cur = round(cur + step, 2)
                 else:
                     max_allowed_span = 10 if is_fluid else 11
-                    hops = segment_run(
-                        ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles
-                    )
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(h_start, cy)].add(nname)
                         tile_to_nets[(h_end, cy)].add(nname)
@@ -506,18 +577,36 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                             d_in = DIRECTION_WEST if d == DIRECTION_EAST else DIRECTION_EAST
                             d_out = DIRECTION_EAST if d == DIRECTION_EAST else DIRECTION_WEST
                             underground_entities.append(
-                                {"name": "pipe-to-ground", "position": {"x": h_start, "y": cy}, "direction": d_in}
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": h_start, "y": cy},
+                                    "direction": d_in,
+                                }
                             )
                             underground_entities.append(
-                                {"name": "pipe-to-ground", "position": {"x": h_end, "y": cy}, "direction": d_out}
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": h_end, "y": cy},
+                                    "direction": d_out,
+                                }
                             )
                         else:
                             ent_name = choose_belt_tier(h_span)
                             underground_entities.append(
-                                {"name": ent_name, "position": {"x": h_start, "y": cy}, "direction": d, "type": "input"}
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": h_start, "y": cy},
+                                    "direction": d,
+                                    "type": "input",
+                                }
                             )
                             underground_entities.append(
-                                {"name": ent_name, "position": {"x": h_end, "y": cy}, "direction": d, "type": "output"}
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": h_end, "y": cy},
+                                    "direction": d,
+                                    "type": "output",
+                                }
                             )
 
         # Process vertical runs (M4)
@@ -551,9 +640,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                         cur = round(cur + step, 2)
                 else:
                     max_allowed_span = 10 if is_fluid else 11
-                    hops = segment_run(
-                        ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles
-                    )
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(cx, h_start)].add(nname)
                         tile_to_nets[(cx, h_end)].add(nname)
@@ -561,18 +648,36 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                             d_in = DIRECTION_NORTH if d == DIRECTION_SOUTH else DIRECTION_SOUTH
                             d_out = DIRECTION_SOUTH if d == DIRECTION_SOUTH else DIRECTION_NORTH
                             underground_entities.append(
-                                {"name": "pipe-to-ground", "position": {"x": cx, "y": h_start}, "direction": d_in}
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": cx, "y": h_start},
+                                    "direction": d_in,
+                                }
                             )
                             underground_entities.append(
-                                {"name": "pipe-to-ground", "position": {"x": cx, "y": h_end}, "direction": d_out}
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": cx, "y": h_end},
+                                    "direction": d_out,
+                                }
                             )
                         else:
                             ent_name = choose_belt_tier(h_span)
                             underground_entities.append(
-                                {"name": ent_name, "position": {"x": cx, "y": h_start}, "direction": d, "type": "input"}
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": cx, "y": h_start},
+                                    "direction": d,
+                                    "type": "input",
+                                }
                             )
                             underground_entities.append(
-                                {"name": ent_name, "position": {"x": cx, "y": h_end}, "direction": d, "type": "output"}
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": cx, "y": h_end},
+                                    "direction": d,
+                                    "type": "output",
+                                }
                             )
     net_map = {n.get("name", ""): n for n in def_data.get("nets", [])}
 
@@ -638,7 +743,10 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                     valid_span = True
                     for s in range(-bspan + 1, fspan):
                         it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                        if it in net_surface_tiles[candidate] and net_surface_tiles[candidate][it] != d:
+                        if (
+                            it in net_surface_tiles[candidate]
+                            and net_surface_tiles[candidate][it] != d
+                        ):
                             valid_span = False
                             break
                     if not valid_span:
@@ -669,18 +777,36 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
             else:
                 d_in, d_out = DIRECTION_SOUTH, DIRECTION_NORTH
             underground_entities.append(
-                {"name": "pipe-to-ground", "position": {"x": in_pos[0], "y": in_pos[1]}, "direction": d_in}
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": in_pos[0], "y": in_pos[1]},
+                    "direction": d_in,
+                }
             )
             underground_entities.append(
-                {"name": "pipe-to-ground", "position": {"x": out_pos[0], "y": out_pos[1]}, "direction": d_out}
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": out_pos[0], "y": out_pos[1]},
+                    "direction": d_out,
+                }
             )
         else:
             ent_name = choose_belt_tier(span)
             underground_entities.append(
-                {"name": ent_name, "position": {"x": in_pos[0], "y": in_pos[1]}, "direction": d, "type": "input"}
+                {
+                    "name": ent_name,
+                    "position": {"x": in_pos[0], "y": in_pos[1]},
+                    "direction": d,
+                    "type": "input",
+                }
             )
             underground_entities.append(
-                {"name": ent_name, "position": {"x": out_pos[0], "y": out_pos[1]}, "direction": d, "type": "output"}
+                {
+                    "name": ent_name,
+                    "position": {"x": out_pos[0], "y": out_pos[1]},
+                    "direction": d,
+                    "type": "output",
+                }
             )
 
     # 5. Place all underground entities
@@ -718,7 +844,9 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 if diff in (4, 12):
                     tdx, tdy = DIR_STEPS.get(td, (0, 0))
                     behind_pos = (round(tpos[0] - tdx, 2), round(tpos[1] - tdy, 2))
-                    if behind_pos in grid_ents and "transport-belt" in grid_ents[behind_pos].get("name", ""):
+                    if behind_pos in grid_ents and "transport-belt" in grid_ents[behind_pos].get(
+                        "name", ""
+                    ):
                         from_nets = tile_to_nets.get(pos, set())
                         target_nets = tile_to_nets.get(tpos, set())
                         if from_nets and target_nets and not from_nets.intersection(target_nets):
@@ -729,9 +857,94 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                                     ent["direction"] = cand_d
                                     break
 
+    # 8. Wire circuit telemetry connections
+    def connect_wire(
+        ent_a: dict[str, Any], port_a: int, ent_b: dict[str, Any], port_b: int, color: str
+    ) -> None:
+        conns_a = (
+            ent_a.setdefault("connections", {}).setdefault(str(port_a), {}).setdefault(color, [])
+        )
+        conns_b = (
+            ent_b.setdefault("connections", {}).setdefault(str(port_b), {}).setdefault(color, [])
+        )
+        conns_a.append({"_target": ent_b, "circuit_id": port_b})
+        conns_b.append({"_target": ent_a, "circuit_id": port_a})
+
+    for rec in netlist_data.get("telemetry", []):
+        mat = rec.get("material", "")
+        disp_name = rec.get("display_instance")
+        circ_name = rec.get("circuit_instance")
+        disp_ent = inst_to_entity.get(disp_name) if disp_name else None
+        circ_ent = inst_to_entity.get(circ_name) if circ_name else None
+
+        ref_pos = None
+        if disp_ent:
+            ref_pos = (disp_ent["position"]["x"], disp_ent["position"]["y"])
+        elif circ_ent:
+            ref_pos = (circ_ent["position"]["x"], circ_ent["position"]["y"])
+
+        if not ref_pos:
+            continue
+
+        mat_bare = mat.replace("-", "_").replace(".", "__")
+        candidate_tiles = set(net_surface_tiles.get(mat, {}).keys())
+        candidate_tiles.update(net_surface_tiles.get(mat_bare, {}).keys())
+
+        best_ent = None
+        best_dist = 1e9
+        for pos_tile in candidate_tiles:
+            cand = grid_entities.get(pos_tile)
+            if cand and "transport-belt" in cand.get("name", ""):
+                cand_dist = math.hypot(pos_tile[0] - ref_pos[0], pos_tile[1] - ref_pos[1])
+                if cand_dist < best_dist:
+                    best_dist = cand_dist
+                    best_ent = cand
+
+        if best_ent is None:
+            for inst_name, cand in inst_to_entity.items():
+                if cand.get("name") == "splitter":
+                    inst_obj = inst_map.get(inst_name, {})
+                    if inst_obj.get("recipe") == mat:
+                        cand_dist = math.hypot(
+                            cand["position"]["x"] - ref_pos[0], cand["position"]["y"] - ref_pos[1]
+                        )
+                        if cand_dist < best_dist:
+                            best_dist = cand_dist
+                            best_ent = cand
+
+        if best_ent is not None:
+            best_ent.setdefault("control_behavior", {})["circuit_read_hand_contents"] = True
+            best_ent["control_behavior"]["circuit_contents_read_mode"] = 0
+
+            if disp_ent and not circ_ent:
+                connect_wire(best_ent, 1, disp_ent, 1, "red")
+            elif circ_ent and not disp_ent:
+                connect_wire(best_ent, 1, circ_ent, 1, "red")
+                connect_wire(circ_ent, 2, circ_ent, 1, "green")
+            elif disp_ent and circ_ent:
+                connect_wire(best_ent, 1, circ_ent, 1, "red")
+                connect_wire(circ_ent, 2, circ_ent, 1, "green")
+                connect_wire(circ_ent, 2, disp_ent, 1, "red")
+
     # Assign 1-based sequential entity numbers
     for idx, ent in enumerate(entities, 1):
         ent["entity_number"] = idx
+
+    # Resolve wire connections to entity_id
+    for ent in entities:
+        for colors in ent.get("connections", {}).values():
+            for color, links in list(colors.items()):
+                resolved_links = []
+                for link in links:
+                    target = link.get("_target")
+                    cid = link.get("circuit_id", 1)
+                    if target and "entity_number" in target:
+                        resolved_links.append(
+                            {"entity_id": target["entity_number"], "circuit_id": cid}
+                        )
+                    elif "entity_id" in link:
+                        resolved_links.append(link)
+                colors[color] = resolved_links
 
     return entities
 

@@ -65,6 +65,78 @@ LAYER_SURFACE_V = "M2"
 LAYER_TUNNEL = "M3"
 LAYER_TUNNEL_V = "M4"
 LAYER_FLUID = "M3"
+LAYER_CIRCUIT_RED = "M5"
+LAYER_CIRCUIT_GREEN = "M6"
+
+DISPLAY_PANEL_CELL = "display_panel"
+ARITHMETIC_COMBINATOR_CELL = "arithmetic_combinator"
+DECIDER_COMBINATOR_CELL = "decider_combinator"
+CONSTANT_COMBINATOR_CELL = "constant_combinator"
+
+
+def display_panel_cell() -> dict[str, Any]:
+    """The display panel cell as a PDK macro record."""
+    return {
+        "cell": DISPLAY_PANEL_CELL,
+        "machine": "display-panel",
+        "recipe": "display",
+        "width": 1,
+        "height": 1,
+        "watts": 0.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a"],
+        "outputs": [],
+        "circuit_cell": True,
+    }
+
+
+def arithmetic_combinator_cell() -> dict[str, Any]:
+    """The arithmetic combinator cell as a PDK macro record."""
+    return {
+        "cell": ARITHMETIC_COMBINATOR_CELL,
+        "machine": "arithmetic-combinator",
+        "recipe": "accumulate",
+        "width": 1,
+        "height": 2,
+        "watts": 1000.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a"],
+        "outputs": ["y"],
+        "circuit_cell": True,
+    }
+
+
+def decider_combinator_cell() -> dict[str, Any]:
+    """The decider combinator cell as a PDK macro record."""
+    return {
+        "cell": DECIDER_COMBINATOR_CELL,
+        "machine": "decider-combinator",
+        "recipe": "condition",
+        "width": 1,
+        "height": 2,
+        "watts": 1000.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a"],
+        "outputs": ["y"],
+        "circuit_cell": True,
+    }
+
+
+def constant_combinator_cell() -> dict[str, Any]:
+    """The constant combinator cell as a PDK macro record."""
+    return {
+        "cell": CONSTANT_COMBINATOR_CELL,
+        "machine": "constant-combinator",
+        "recipe": "constant",
+        "width": 1,
+        "height": 1,
+        "watts": 0.0,
+        "crafts_per_minute": 0.0,
+        "inputs": [],
+        "outputs": ["y"],
+        "circuit_cell": True,
+    }
+
 
 # Pipe-to-ground span, tiles. The prototype dump carries no max_distance
 # for it, unlike underground belts. One measurement in game fills this.
@@ -152,6 +224,8 @@ class Pdk:
                     "span": PIPE_TO_GROUND_SPAN,
                 },
                 LAYER_TUNNEL_V: {"via": "tunnel-turn"},
+                LAYER_CIRCUIT_RED: {"via": "circuit-drop"},
+                LAYER_CIRCUIT_GREEN: {"via": "circuit-turn"},
             },
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
             "inserters": {name: inserter_spec(proto) for name, proto in self.inserters.items()},

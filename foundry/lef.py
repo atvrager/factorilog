@@ -45,17 +45,19 @@ def _input_pin_rect(
     """Calculate input pin layer and bounds on the macro grid."""
     width = cell["width"]
     height = cell["height"]
+    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
+    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
     if total <= height:
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
-        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+        return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     if idx < height:
         cy = idx + 0.5
-        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+        return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     tile_x = 1 + ((idx - height) % max(1, width - 1))
     cx = tile_x + 0.5
-    return pdk.LAYER_SURFACE_V, cx - 0.25, float(height) - 0.5, cx + 0.25, float(height)
+    return v_layer, cx - 0.25, float(height) - 0.5, cx + 0.25, float(height)
 
 
 def _output_pin_rect(
@@ -64,27 +66,29 @@ def _output_pin_rect(
     """Calculate output pin layer and bounds on the macro grid."""
     width = cell["width"]
     height = cell["height"]
+    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
+    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
     w = float(width)
     h = float(height)
     if total <= height:
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
-        return pdk.LAYER_SURFACE, w - 0.5, cy - 0.25, w, cy + 0.25
+        return h_layer, w - 0.5, cy - 0.25, w, cy + 0.25
     if idx < height:
         cy = idx + 0.5
-        return pdk.LAYER_SURFACE, w - 0.5, cy - 0.25, w, cy + 0.25
+        return h_layer, w - 0.5, cy - 0.25, w, cy + 0.25
     if idx < height + width:
         tile_x = idx - height
         cx = tile_x + 0.5
-        return pdk.LAYER_SURFACE_V, cx - 0.25, 0.0, cx + 0.25, 0.5
+        return v_layer, cx - 0.25, 0.0, cx + 0.25, 0.5
     if idx < 2 * height + width:
         tile_y = idx - height - width
         cy = tile_y + 0.5
-        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+        return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     tile_x = (idx - 2 * height - width) % width
     cx = tile_x + 0.5
-    return pdk.LAYER_SURFACE_V, cx - 0.25, h - 0.5, cx + 0.25, h
+    return v_layer, cx - 0.25, h - 0.5, cx + 0.25, h
 
 
 def macro_lines(cell: dict[str, Any]) -> list[str]:
@@ -211,6 +215,34 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M4",
+        # VL4: underground-to-circuit cut layer.
+        "LAYER VL4",
+        "  TYPE CUT ;",
+        "  SPACING 0.5 ;",
+        "END VL4",
+        # M5: circuit red wire horizontal.
+        "LAYER M5",
+        "  TYPE ROUTING ;",
+        "  DIRECTION HORIZONTAL ;",
+        "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
+        "  WIDTH 0.5 ;",
+        "  SPACING 0.5 ;",
+        "END M5",
+        # VL5: circuit wire turn cut layer.
+        "LAYER VL5",
+        "  TYPE CUT ;",
+        "  SPACING 0.5 ;",
+        "END VL5",
+        # M6: circuit green wire vertical.
+        "LAYER M6",
+        "  TYPE ROUTING ;",
+        "  DIRECTION VERTICAL ;",
+        "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
+        "  WIDTH 0.5 ;",
+        "  SPACING 0.5 ;",
+        "END M6",
     ]
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
     lines.extend(
@@ -272,6 +304,34 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "  LAYER M4 ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
             "END UNDERGROUND_TURN_VIA",
+        ]
+    )
+    # 5. Circuit drop connection (M4 -> VL4 -> M5)
+    lines.extend(
+        [
+            "VIA CIRCUIT_DROP_VIA",
+            "  DEFAULT",
+            "  LAYER M4 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL4 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M5 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END CIRCUIT_DROP_VIA",
+        ]
+    )
+    # 6. Circuit turn connection (M5 -> VL5 -> M6)
+    lines.extend(
+        [
+            "VIA CIRCUIT_TURN_VIA",
+            "  DEFAULT",
+            "  LAYER M5 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL5 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M6 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END CIRCUIT_TURN_VIA",
             "SITE tile",
             f"  SIZE {TILE_MICRONS:.3f} BY {TILE_MICRONS:.3f} ;",
             "  CLASS CORE ;",

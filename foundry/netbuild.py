@@ -48,7 +48,14 @@ def parse_demand(argv: list[str]) -> dict[str, float]:
     return pairs
 
 
-def build_all(dump_path: Path | str, demand: dict[str, float], out_dir: Path | str = ".") -> int:
+def build_all(
+    dump_path: Path | str,
+    demand: dict[str, float],
+    out_dir: Path | str = ".",
+    tap_scope: str = "none",
+    enable_display: bool = True,
+    enable_circuit: bool = False,
+) -> int:
     """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
     out = Path(out_dir)
     data = solve.Data(str(dump_path))
@@ -56,6 +63,9 @@ def build_all(dump_path: Path | str, demand: dict[str, float], out_dir: Path | s
     allowed = data.allowed_recipes(["nauvis"])
     nl = netlist.build(data, demand, allowed)
     plans = netlist.merge_plans_of(nl)
+    telemetry_records = netlist.insert_telemetry(
+        nl, tap_scope, enable_display, enable_circuit, plans
+    )
     text = netlist.emit_verilog(nl, plans)
     (out / "netlist.v").write_text(text)
     (out / "cells.v").write_text(netlist.emit_cells_v(nl))
@@ -77,6 +87,7 @@ def build_all(dump_path: Path | str, demand: dict[str, float], out_dir: Path | s
         "outputs": nl.outputs,
         "raw_rates_per_min": {m: nl.nets[m].rate_per_min for m in nl.inputs},
         "cells": dict(nl.cells),
+        "telemetry": telemetry_records,
         "instances": [
             {
                 "name": i.name,
@@ -109,6 +120,23 @@ def main() -> int:
     parser.add_argument(
         "--spc", type=float, help="science packs per minute; the six pre-space packs at this rate"
     )
+    parser.add_argument(
+        "--telemetry-taps",
+        default="none",
+        help="telemetry tap scope: none, io, merges, io,merges, all, or comma-separated nets",
+    )
+    parser.add_argument(
+        "--enable-display-readouts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="instantiate display panel cells for telemetry taps",
+    )
+    parser.add_argument(
+        "--enable-circuit-readouts",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="instantiate arithmetic combinator accumulator cells for telemetry taps",
+    )
     args = parser.parse_args()
 
     if args.spc is not None:
@@ -116,7 +144,14 @@ def main() -> int:
     else:
         demand = parse_demand(args.demand)
 
-    return build_all(args.dump, demand, Path())
+    return build_all(
+        args.dump,
+        demand,
+        Path(),
+        tap_scope=args.telemetry_taps,
+        enable_display=args.enable_display_readouts,
+        enable_circuit=args.enable_circuit_readouts,
+    )
 
 
 if __name__ == "__main__":
