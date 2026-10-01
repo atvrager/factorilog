@@ -117,6 +117,13 @@ def parse_def(text: str) -> dict[str, Any]:
     }
 
 
+def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Determine Factorio 2.0 cardinal direction from endpoint coordinates."""
+    if x1 == x2:
+        return DIRECTION_SOUTH if y2 >= y1 else DIRECTION_NORTH
+    return DIRECTION_EAST if x2 >= x1 else DIRECTION_WEST
+
+
 def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Translate parsed DEF and netlist into Factorio blueprint entities."""
     scale = 1.0 / float(def_data.get("units", 1000))
@@ -174,38 +181,69 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 extra=extra,
             )
 
-    # 2. Place vias (underground belts and pipe transitions)
+    # 2. Place underground belt tunnels (M2 wire segments)
     for net in def_data.get("nets", []):
-        for via in net.get("vias", []):
-            vx = via["x"] * scale
-            vy = via["y"] * scale
-            vname = via["via"]
-            if vname == "TRANSPORT_BELT_VIA":
+        for wire in net.get("wires", []):
+            if wire["layer"] == "M2":
+                x1, y1 = wire["x1"], wire["y1"]
+                x2, y2 = wire["x2"], wire["y2"]
+                if (x1, y1) == (x2, y2):
+                    continue
+                tunnel_dir = _segment_direction(x1, y1, x2, y2)
                 add_entity(
                     "underground-belt",
-                    vx,
-                    vy,
-                    direction=DIRECTION_EAST,
+                    x1 * scale,
+                    y1 * scale,
+                    direction=tunnel_dir,
                     extra={"type": "input"},
                 )
-            elif vname == "PIPE_TO_GROUND_VIA":
+                add_entity(
+                    "underground-belt",
+                    x2 * scale,
+                    y2 * scale,
+                    direction=tunnel_dir,
+                    extra={"type": "output"},
+                )
+
+    # 3. Place pipe-to-ground transitions
+    for net in def_data.get("nets", []):
+        for via in net.get("vias", []):
+            if via["via"] == "PIPE_TO_GROUND_VIA":
+                vx = via["x"] * scale
+                vy = via["y"] * scale
+                via_dir = DIRECTION_EAST
+                for wire in net.get("wires", []):
+                    if wire["layer"] == "M3":
+                        if wire["x1"] == via["x"] and wire["y1"] == via["y"]:
+                            via_dir = _segment_direction(
+                                wire["x1"], wire["y1"], wire["x2"], wire["y2"]
+                            )
+                            break
+                        if wire["x2"] == via["x"] and wire["y2"] == via["y"]:
+                            via_dir = _segment_direction(
+                                wire["x1"], wire["y1"], wire["x2"], wire["y2"]
+                            )
+                            break
                 add_entity(
                     "pipe-to-ground",
                     vx,
                     vy,
-                    direction=DIRECTION_EAST,
+                    direction=via_dir,
                     extra={"type": "input"},
                 )
 
-    # 3. Place routed wires
+    # 4. Place surface wires (M1 belts and M3 pipes)
     unit_step = round(1.0 / scale)
     for net in def_data.get("nets", []):
         for wire in net.get("wires", []):
             layer = wire["layer"]
-            x1, y1 = wire["x1"], wire["y1"]
-            x2, y2 = wire["x2"], wire["y2"]
+            if layer == "M2":
+                # M2 is an underground tunnel. Do not place surface entities.
+                continue
 
             entity_name = "pipe" if layer == "M3" else "transport-belt"
+            x1, y1 = wire["x1"], wire["y1"]
+            x2, y2 = wire["x2"], wire["y2"]
 
             if x1 == x2:
                 # Vertical segment

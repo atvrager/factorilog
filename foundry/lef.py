@@ -131,8 +131,14 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
                 f"  END {port.replace('-', '_')}",
             ]
         )
-    # No OBS section. The machine occupies its whole footprint, and the
-    # router must not cross a building on the surface layer.
+    lines.extend(
+        [
+            "  OBS",
+            f"    LAYER {pdk.LAYER_SURFACE} ;",
+            f"      RECT 0.000 0.000 {width:.3f} {height:.3f} ;",
+            "  END",
+        ]
+    )
     lines.append(f"END {name}")
     return lines
 
@@ -263,6 +269,10 @@ def merge_lines() -> list[str]:
         "      RECT 1.500 0.250 2.000 0.750 ;",
         "    END",
         "  END y",
+        "  OBS",
+        "    LAYER M1 ;",
+        "      RECT 0.000 0.000 2.000 1.000 ;",
+        "  END",
         f"END {name}",
     ]
 
