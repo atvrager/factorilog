@@ -14,6 +14,7 @@ py_library(
     name = "pdk_lib",
     srcs = [
         "blueprint.py",
+        "def2bp.py",
         "lef.py",
         "liberty.py",
         "netlist.py",
@@ -25,6 +26,13 @@ py_library(
         "@pip//pyslang",
         "@pip//scipy",
     ],
+)
+
+py_binary(
+    name = "def2bp",
+    srcs = ["def2bp.py"],
+    main = "def2bp.py",
+    deps = [":pdk_lib"],
 )
 
 py_binary(
@@ -88,5 +96,17 @@ py_test(
     args = ["$(location //test:fixture)"],
     data = ["//test:fixture"],
     main = "test_liberty.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "def2bp_test",
+    size = "small",
+    srcs = ["test_def2bp.py"],
+    data = [
+        "factory.def",
+        "netlist.json",
+    ],
+    main = "test_def2bp.py",
     deps = [":pdk_lib"],
 )

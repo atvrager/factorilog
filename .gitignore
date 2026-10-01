@@ -10,6 +10,8 @@ foundry/tech.lib
 foundry/probe.def
 foundry/factory.def
 foundry/route_drc.rpt
+foundry/factory.blueprint
+*.blueprint
 
 __pycache__/
 *.pyc
