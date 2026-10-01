@@ -38,11 +38,14 @@ factorilog_synth(
     name = "synth",
     cells_v = "cells.v",
     dump = "//test:data/dump-fixture.json",
+    enable_circuit_readouts = True,
+    enable_display_readouts = True,
     netlist_json = "netlist.json",
     netlist_v = "netlist.v",
     spc = "60.0",
     tech_lef = "tech.lef",
     tech_lib = "tech.lib",
+    telemetry_taps = "io,merges",
 )
 
 # 2. Floorplan Stage: netlist + LEF + Lib -> 1_floorplan.odb

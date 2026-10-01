@@ -77,6 +77,20 @@ def _factorilog_synth_impl(ctx):
     args.add("--spc")
     args.add(str(ctx.attr.spc))
 
+    extra_flags = []
+    if ctx.attr.telemetry_taps:
+        extra_flags.append("--telemetry-taps '%s'" % ctx.attr.telemetry_taps)
+    if ctx.attr.enable_display_readouts:
+        extra_flags.append("--enable-display-readouts")
+    else:
+        extra_flags.append("--no-enable-display-readouts")
+    if ctx.attr.enable_circuit_readouts:
+        extra_flags.append("--enable-circuit-readouts")
+    else:
+        extra_flags.append("--no-enable-circuit-readouts")
+
+    flags_str = " ".join(extra_flags)
+
     cmd = (
         "set -euo pipefail\n" +
         "OUT_DIR='%s'\n" % out_dir +
@@ -84,8 +98,8 @@ def _factorilog_synth_impl(ctx):
         "DUMP_ABS=\"$(pwd)/%s\"\n" % ctx.file.dump.path +
         "NETBUILD_ABS=\"$(pwd)/%s\"\n" % script.path +
         "cd \"$OUT_DIR\"\n" +
-        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" --spc %s\n"
-    ) % ctx.attr.spc
+        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" --spc %s %s\n"
+    ) % (ctx.attr.spc, flags_str)
 
     ctx.actions.run_shell(
         inputs = [ctx.file.dump],
@@ -106,6 +120,9 @@ factorilog_synth = rule(
     attrs = {
         "dump": attr.label(allow_single_file = [".json"], mandatory = True, doc = "Dump fixture JSON file"),
         "spc": attr.string(default = "60.0", doc = "Science packs per minute rate"),
+        "telemetry_taps": attr.string(default = "none", doc = "Telemetry tap scope: none, io, merges, io,merges, all"),
+        "enable_display_readouts": attr.bool(default = True, doc = "Enable display panel readouts"),
+        "enable_circuit_readouts": attr.bool(default = False, doc = "Enable arithmetic combinator readouts"),
         "cells_v": attr.output(mandatory = True),
         "netlist_v": attr.output(mandatory = True),
         "netlist_json": attr.output(mandatory = True),
