@@ -48,5 +48,6 @@ py_test(
     ],
     deps = [
         "//flow:check_blueprint_lib",
+        "//foundry:pdk_lib",
     ],
 )

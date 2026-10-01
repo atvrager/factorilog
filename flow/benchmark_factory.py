@@ -170,25 +170,33 @@ script.on_init(function()
     for _, pin in ipairs(input_pins) do
         local ents = surface.find_entities_filtered{position = {pin.x, pin.y}}
         for _, ent in pairs(ents) do
-            if (pin.type == "belt" and ent.type == "transport-belt") or (pin.type == "pipe" and ent.type == "pipe") then
+            if (pin.type == "belt" and (ent.type == "transport-belt" or ent.type == "underground-belt")) or
+               (pin.type == "pipe" and (ent.type == "pipe" or ent.type == "pipe-to-ground")) then
                 input_entities[#input_entities + 1] = {name = pin.name, entity = ent, type = pin.type}
                 break
             end
         end
     end
 
+    log("BENCH_INPUT_COUNT: " .. tostring(#input_entities))
+    for _, ie in ipairs(input_entities) do
+        log("BENCH_INPUT_PIN: " .. ie.name .. " pos=" .. ie.entity.position.x .. "," .. ie.entity.position.y)
+    end
+
     local output_entities = {}
     for _, pin in ipairs(output_pins) do
-        local ents = surface.find_entities_filtered{position = {pin.x, pin.y}, type = "transport-belt"}
+        local ents = surface.find_entities_filtered{position = {pin.x, pin.y}, type = {"transport-belt", "underground-belt"}}
         for _, ent in pairs(ents) do
             output_entities[#output_entities + 1] = {name = pin.name, entity = ent}
             break
         end
     end
+    log("BENCH_OUTPUT_COUNT: " .. tostring(#output_entities))
 
     -- Map all active machines and transfer connections
     local machines = surface.find_entities_filtered{type = {"assembling-machine", "furnace"}}
     local machine_map = {}
+    local machines_with_belts = 0
     for _, m in pairs(machines) do
         local box = m.bounding_box
         -- Scan perimeter belts
@@ -196,11 +204,15 @@ script.on_init(function()
             type = "transport-belt",
             area = {{box.left_top.x - 1.2, box.left_top.y - 1.2}, {box.right_bottom.x + 1.2, box.right_bottom.y + 1.2}}
         }
+        if #nearby_belts > 0 then
+            machines_with_belts = machines_with_belts + 1
+        end
         machine_map[#machine_map + 1] = {
             entity = m,
             belts = nearby_belts
         }
     end
+    log("BENCH_MACHINES_WITH_BELTS: " .. tostring(machines_with_belts) .. "/" .. tostring(#machines))
     storage.machine_map = machine_map
     storage.input_entities = input_entities
     storage.output_entities = output_entities
@@ -217,6 +229,21 @@ script.on_event(defines.events.on_tick, function(event)
 
     if tick == 0 then
         log("BENCH_REVIVED: " .. tostring(storage.revived_count or 0))
+        log("BENCH_INPUT_COUNT: " .. tostring(#(storage.input_entities or {})))
+        for _, ie in ipairs(storage.input_entities or {}) do
+            log("BENCH_INPUT_PIN: " .. ie.name .. " pos=" .. ie.entity.position.x .. "," .. ie.entity.position.y)
+        end
+        log("BENCH_OUTPUT_COUNT: " .. tostring(#(storage.output_entities or {})))
+        for _, oe in ipairs(storage.output_entities or {}) do
+            log("BENCH_OUTPUT_PIN: " .. oe.name .. " pos=" .. oe.entity.position.x .. "," .. oe.entity.position.y)
+        end
+        local machines_with_belts = 0
+        for _, entry in pairs(storage.machine_map or {}) do
+            if #(entry.belts) > 0 then
+                machines_with_belts = machines_with_belts + 1
+            end
+        end
+        log("BENCH_MACHINES_WITH_BELTS: " .. tostring(machines_with_belts) .. "/" .. tostring(#(storage.machine_map or {})))
     end
 
     -- 1. Power all machines and transfer items
@@ -231,15 +258,12 @@ script.on_event(defines.events.on_tick, function(event)
                     -- Pull input items from belt
                     for line_idx = 1, 2 do
                         local line = belt.get_transport_line(line_idx)
-                        local count = #line
-                        if count > 0 then
-                            local item = line[1]
-                            if item and item.valid and item.name then
-                                local inserted = m.insert({name = item.name, count = 1})
-                                if inserted > 0 then
-                                    line.remove_item({name = item.name, count = 1})
-                                    storage.stats.consumed[item.name] = (storage.stats.consumed[item.name] or 0) + 1
-                                end
+                        for _, it in pairs(line.get_contents()) do
+                            local inserted = m.insert({name = it.name, count = 1})
+                            if inserted > 0 then
+                                line.remove_item({name = it.name, count = 1})
+                                storage.stats.consumed[it.name] = (storage.stats.consumed[it.name] or 0) + 1
+                                break
                             end
                         end
                     end
@@ -269,7 +293,11 @@ script.on_event(defines.events.on_tick, function(event)
             elseif in_ent.type == "belt" then
                 for line_idx = 1, 2 do
                     local line = ent.get_transport_line(line_idx)
-                    if line.can_insert_at_back() then
+                    local can = line.can_insert_at_back()
+                    if tick < 5 then
+                        log(string.format("BENCH_FEED_DEBUG: tick=%d pin=%s line=%d can=%s count=%d", tick, in_ent.name, line_idx, tostring(can), #line))
+                    end
+                    if can then
                         line.insert_at_back({name = in_ent.name, count = 1})
                     end
                 end
@@ -284,6 +312,7 @@ script.on_event(defines.events.on_tick, function(event)
             for line_idx = 1, 2 do
                 local line = belt.get_transport_line(line_idx)
                 for _, item_entry in pairs(line.get_contents()) do
+                    log(string.format("BENCH_DRAINED_%s_AT_%s: count=%d", item_entry.name, out_ent.name, item_entry.count))
                     storage.stats.produced[item_entry.name] = (storage.stats.produced[item_entry.name] or 0) + item_entry.count
                     line.remove_item({name = item_entry.name, count = item_entry.count})
                 end
@@ -302,6 +331,12 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
         log(string.format("BENCH_STATUS: tick=%d active_machines=%d/%d", tick, active_count, total_count))
+        local total_consumed = 0
+        for k, v in pairs(storage.stats.consumed) do
+            total_consumed = total_consumed + v
+            log(string.format("BENCH_CONSUMED_%s: %d", k, v))
+        end
+        log(string.format("BENCH_TOTAL_CONSUMED: %d", total_consumed))
         for k, v in pairs(storage.stats.produced) do
             local rate_spm = (v / (tick / 3600.0))
             log(string.format("BENCH_RATE_%s: total=%d rate_spm=%.2f", k, v, rate_spm))
@@ -364,6 +399,8 @@ end)
     }
     if log_path.is_file():
         for line in log_path.read_text().splitlines():
+            if "BENCH_" in line:
+                results.setdefault("bench_logs", []).append(line)
             if "BENCH_REVIVED:" in line:
                 results["revived"] = int(line.split(":")[-1].strip())
             elif "BENCH_STATUS:" in line:
@@ -405,6 +442,11 @@ def main() -> int:
     print(f"  Revived entities: {results['revived']}")
     if "summary" in results:
         print(f"  Speed: {results['summary']}")
+
+    if "bench_logs" in results:
+        print("\nDiagnostic Logs:")
+        for log_line in results["bench_logs"]:
+            print(f"  {log_line}")
 
     print("\nStatus Progression:")
     for status in results["status_reports"][:10]:

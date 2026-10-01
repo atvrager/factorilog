@@ -26,6 +26,7 @@ import solve
 # The transport cell that joins two streams of one material. A splitter
 # run backwards. The PDK carries it next to the recipe cells.
 MERGE_CELL = "belt_merge2"
+PUMP_CELL = "pump"
 
 
 def merge_cell() -> dict[str, Any]:
@@ -44,6 +45,25 @@ def merge_cell() -> dict[str, Any]:
         "watts": 0.0,
         "crafts_per_minute": 0.0,
         "inputs": ["a", "b"],
+        "outputs": ["y"],
+    }
+
+
+def pump_cell() -> dict[str, Any]:
+    """The fluid buffer cell as a PDK cell record.
+
+    The pump footprint is 1x2 tiles in the dump. One fluid input port,
+    one fluid output port, and 29kW power draw.
+    """
+    return {
+        "cell": PUMP_CELL,
+        "machine": "pump",
+        "recipe": "pump",
+        "width": 1,
+        "height": 2,
+        "watts": 29000.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a"],
         "outputs": ["y"],
     }
 
@@ -250,6 +270,13 @@ def emit_cells_v(nl: Netlist) -> str:
     out.append(f"module {MERGE_CELL} (")
     out.append("  input  wire a,")
     out.append("  input  wire b,")
+    out.append("  output wire y")
+    out.append(");")
+    out.append("endmodule")
+    out.append("")
+    out.append("// fluid buffer: pump enforces unidirectional flow")
+    out.append(f"module {PUMP_CELL} (")
+    out.append("  input  wire a,")
     out.append("  output wire y")
     out.append(");")
     out.append("endmodule")

@@ -99,7 +99,11 @@ end)
         ]
         res_create = subprocess.run(cmd_create, capture_output=True, text=True)
         if res_create.returncode != 0:
-            raise RuntimeError(f"Factorio create failed:\n{res_create.stderr}")
+            log_file = data_dir / "factorio-current.log"
+            log_text = log_file.read_text() if log_file.is_file() else "No log"
+            raise RuntimeError(
+                f"Factorio create failed:\nSTDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}"
+            )
 
         cmd_bench = [
             str(game_bin),
@@ -115,7 +119,11 @@ end)
         ]
         res_bench = subprocess.run(cmd_bench, capture_output=True, text=True)
         if res_bench.returncode != 0:
-            raise RuntimeError(f"Factorio benchmark failed:\n{res_bench.stderr}")
+            log_file = data_dir / "factorio-current.log"
+            log_text = log_file.read_text() if log_file.is_file() else "No log"
+            raise RuntimeError(
+                f"Factorio benchmark failed:\nSTDOUT:\n{res_bench.stdout}\nSTDERR:\n{res_bench.stderr}\nLOG:\n{log_text}"
+            )
 
         log_file = data_dir / "factorio-current.log"
         if not log_file.is_file():
@@ -210,6 +218,197 @@ class TestRoutingPrimitives(unittest.TestCase):
             any("bypass_iron_ore=1" in r for r in results),
             f"Expected bypass_iron_ore=1, got {results}",
         )
+
+    def test_pump_unidirectional_transfer(self) -> None:
+        """Powered pump actively transfers fluid from input pipe to output pipe."""
+        init_lua = """
+        local p1 = surface.create_entity{name = "pipe", position = {0.5, 2.5}, force = "player"}
+        local pump = surface.create_entity{name = "pump", position = {0.5, 1.0}, direction = 0, force = "player"}
+        local p2 = surface.create_entity{name = "pipe", position = {0.5, -0.5}, force = "player"}
+        p1.insert_fluid({name = "water", amount = 100})
+        storage.p1 = p1
+        storage.pump = pump
+        storage.p2 = p2
+        """
+        tick_lua = """
+        storage.pump.energy = 1e9
+        if event.tick == 30 then
+            local w1 = storage.p1.get_fluid_count("water")
+            local w2 = storage.p2.get_fluid_count("water")
+            log(string.format("TEST_RESULT: pump_forward w1=%.1f w2=%.1f", w1, w2))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=40)
+        self.assertTrue(
+            any("pump_forward w1=0.0 w2=99.9" in r for r in results),
+            f"Expected w1=0.0 w2=99.9, got {results}",
+        )
+
+    def test_pump_backflow_isolation(self) -> None:
+        """Pump blocks backflow when output pipe contains high pressure fluid."""
+        init_lua = """
+        local p1 = surface.create_entity{name = "pipe", position = {0.5, 2.5}, force = "player"}
+        local pump = surface.create_entity{name = "pump", position = {0.5, 1.0}, direction = 0, force = "player"}
+        local p2 = surface.create_entity{name = "pipe", position = {0.5, -0.5}, force = "player"}
+        p2.insert_fluid({name = "water", amount = 100})
+        storage.p1 = p1
+        storage.pump = pump
+        storage.p2 = p2
+        """
+        tick_lua = """
+        storage.pump.energy = 1e9
+        if event.tick == 60 then
+            local w1 = storage.p1.get_fluid_count("water")
+            local w2 = storage.p2.get_fluid_count("water")
+            log(string.format("TEST_RESULT: pump_reverse w1=%.1f w2=%.1f", w1, w2))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=70)
+        self.assertTrue(
+            any("pump_reverse w1=0.0 w2=100.0" in r for r in results),
+            f"Expected w1=0.0 w2=100.0, got {results}",
+        )
+
+    def test_pump_blueprint_placement_and_footprint(self) -> None:
+        """Pump blueprint builds cleanly with 1x2 footprint in Factorio."""
+        import blueprint
+
+        entities = [
+            {"name": "pipe", "position": {"x": 0.5, "y": 2.5}, "entity_number": 1},
+            {"name": "pump", "position": {"x": 0.5, "y": 1.0}, "direction": 0, "entity_number": 2},
+            {"name": "pipe", "position": {"x": 0.5, "y": -0.5}, "entity_number": 3},
+        ]
+        bp_str = blueprint.encode(entities, "pump_blueprint_test")
+        init_lua = f"""
+        local inv = game.create_inventory(1)
+        local stack = inv[1]
+        stack.set_stack{{name = "blueprint", count = 1}}
+        stack.import_stack('{bp_str}')
+        local built = stack.build_blueprint{{
+            surface = surface,
+            force = game.forces.player,
+            position = {{0, 0}},
+            force_build = true
+        }}
+        local ghosts = surface.find_entities_filtered{{name = "entity-ghost"}}
+        local revived = 0
+        for _, g in pairs(ghosts) do
+            local colliders, ent = g.revive()
+            if ent and ent.valid then revived = revived + 1 end
+        end
+        storage.revived = revived
+        """
+        tick_lua = """
+        if event.tick == 1 then
+            local surface = game.surfaces[1]
+            local placed_pumps = surface.find_entities_filtered{name = "pump"}
+            log(string.format("TEST_RESULT: bp_pumps=%d revived=%d", #placed_pumps, storage.revived or 0))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=5)
+        self.assertTrue(
+            any("bp_pumps=1 revived=3" in r for r in results),
+            f"Expected bp_pumps=1 revived=3, got {results}",
+        )
+
+    def test_belt_intersection_first_unit_turns(self) -> None:
+        """An intersecting belt entering the first unit curves that unit with 1:1 lane mapping."""
+        init_lua = """
+        local u1 = surface.create_entity{name = "transport-belt", position = {0.5, 1.5}, direction = 4, force = "player"}
+        local u2 = surface.create_entity{name = "transport-belt", position = {1.5, 1.5}, direction = 4, force = "player"}
+        local u3 = surface.create_entity{name = "transport-belt", position = {2.5, 1.5}, direction = 4, force = "player"}
+        local bi = surface.create_entity{name = "transport-belt", position = {0.5, 0.5}, direction = 8, force = "player"}
+
+        bi.get_transport_line(1).insert_at_back({name = "copper-plate", count = 1})
+        bi.get_transport_line(2).insert_at_back({name = "copper-ore", count = 1})
+
+        storage.u1 = u1
+        storage.u3 = u3
+        """
+        tick_lua = """
+        if event.tick == 1 then
+            log("TEST_RESULT: u1_shape=" .. storage.u1.belt_shape)
+        elseif event.tick == 120 then
+            local l1 = storage.u3.get_transport_line(1).get_item_count("copper-plate")
+            local l2 = storage.u3.get_transport_line(2).get_item_count("copper-ore")
+            log(string.format("TEST_RESULT: u3_end l1_plate=%d l2_ore=%d", l1, l2))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
+        self.assertTrue(any("u1_shape=left" in r for r in results), f"Expected u1_shape=left, got {results}")
+        self.assertTrue(any("u3_end l1_plate=1 l2_ore=1" in r for r in results), f"Expected 1:1 lane flow, got {results}")
+
+    def test_belt_intersection_middle_unit_sideloads(self) -> None:
+        """An intersecting belt entering the middle unit sideloads onto a single lane."""
+        init_lua = """
+        local u1 = surface.create_entity{name = "transport-belt", position = {0.5, 1.5}, direction = 4, force = "player"}
+        local u2 = surface.create_entity{name = "transport-belt", position = {1.5, 1.5}, direction = 4, force = "player"}
+        local u3 = surface.create_entity{name = "transport-belt", position = {2.5, 1.5}, direction = 4, force = "player"}
+        local bi = surface.create_entity{name = "transport-belt", position = {1.5, 0.5}, direction = 8, force = "player"}
+
+        u1.get_transport_line(2).insert_at_back({name = "iron-ore", count = 1})
+        bi.get_transport_line(1).insert_at_back({name = "copper-plate", count = 1})
+        bi.get_transport_line(2).insert_at_back({name = "copper-ore", count = 1})
+
+        storage.u2 = u2
+        storage.u3 = u3
+        """
+        tick_lua = """
+        if event.tick == 1 then
+            log(string.format("TEST_RESULT: u2_shape=%s in_count=%d", storage.u2.belt_shape, #storage.u2.belt_neighbours.inputs))
+        elseif event.tick == 120 then
+            local l1_count = storage.u3.get_transport_line(1).get_item_count()
+            local l2_count = storage.u3.get_transport_line(2).get_item_count()
+            log(string.format("TEST_RESULT: u3_lanes l1_count=%d l2_count=%d", l1_count, l2_count))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
+        self.assertTrue(any("u2_shape=straight in_count=2" in r for r in results), f"Expected straight with 2 inputs, got {results}")
+        self.assertTrue(any("u3_lanes l1_count=2 l2_count=1" in r for r in results), f"Expected sideloaded 2 on L1 and 1 on L2, got {results}")
+
+    def test_belt_intersection_rotated_third_unit(self) -> None:
+        """Rotated third unit straightens when fed from behind, making prior unit a sideload."""
+        init_lua = """
+        local u1 = surface.create_entity{name = "transport-belt", position = {0.5, 1.5}, direction = 4, force = "player"}
+        local u2 = surface.create_entity{name = "transport-belt", position = {1.5, 1.5}, direction = 4, force = "player"}
+        local u3 = surface.create_entity{name = "transport-belt", position = {2.5, 1.5}, direction = 8, force = "player"}
+        local bi = surface.create_entity{name = "transport-belt", position = {2.5, 0.5}, direction = 8, force = "player"}
+
+        storage.u3 = u3
+        """
+        tick_lua = """
+        if event.tick == 1 then
+            log(string.format("TEST_RESULT: u3_rot_shape=%s in_count=%d", storage.u3.belt_shape, #storage.u3.belt_neighbours.inputs))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=5)
+        self.assertTrue(any("u3_rot_shape=straight in_count=2" in r for r in results), f"Expected straight with 2 inputs, got {results}")
+
+    def test_belt_3x3_crossing_requires_underground(self) -> None:
+        """Crossing two 3-unit belt lines in 3x3 requires an underground belt for isolation."""
+        init_lua = """
+        local uh1 = surface.create_entity{name = "transport-belt", position = {0.5, 1.5}, direction = 4, force = "player"}
+        local uh2 = surface.create_entity{name = "transport-belt", position = {1.5, 1.5}, direction = 4, force = "player"}
+        local uh3 = surface.create_entity{name = "transport-belt", position = {2.5, 1.5}, direction = 4, force = "player"}
+
+        local uv1 = surface.create_entity{name = "underground-belt", position = {1.5, 0.5}, direction = 8, type = "input", force = "player"}
+        local uv3 = surface.create_entity{name = "underground-belt", position = {1.5, 2.5}, direction = 8, type = "output", force = "player"}
+
+        uh1.get_transport_line(1).insert_at_back({name = "iron-plate", count = 3})
+        uv1.get_transport_line(1).insert_at_back({name = "copper-plate", count = 3})
+
+        storage.uh3 = uh3
+        storage.uv3 = uv3
+        """
+        tick_lua = """
+        if event.tick == 120 then
+            local h_count = storage.uh3.get_transport_line(1).get_item_count()
+            local v_count = storage.uv3.get_transport_line(1).get_item_count()
+            log(string.format("TEST_RESULT: 3x3_ug_cross h_count=%d v_count=%d", h_count, v_count))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
+        self.assertTrue(any("3x3_ug_cross h_count=1 v_count=1" in r for r in results), f"Expected h_count=1 v_count=1, got {results}")
 
 
 if __name__ == "__main__":
