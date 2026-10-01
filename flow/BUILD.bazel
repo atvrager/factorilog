@@ -1,0 +1,29 @@
+# Flow scripts and OpenROAD automation.
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "factorilog.tcl",
+    "orfs.sh",
+    "verify_def.tcl",
+])
+
+filegroup(
+    name = "flow_scripts",
+    srcs = glob([
+        "*.tcl",
+        "*.sh",
+    ]),
+)
+
+py_library(
+    name = "check_blueprint_lib",
+    srcs = ["check_blueprint.py"],
+)
+
+py_binary(
+    name = "check_blueprint",
+    srcs = ["check_blueprint.py"],
+    main = "check_blueprint.py",
+)

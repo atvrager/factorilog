@@ -17,6 +17,7 @@ py_library(
         "def2bp.py",
         "lef.py",
         "liberty.py",
+        "netbuild.py",
         "netlist.py",
         "pdk.py",
         "solve.py",

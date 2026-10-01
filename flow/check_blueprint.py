@@ -27,10 +27,11 @@ def find_factorio_binary(override: Path | None = None) -> Path:
     if env_game and Path(env_game).is_file():
         return Path(env_game)
     which_bin = shutil.which("factorio")
-    if which_bin:
-        return Path(which_bin)
     if DEFAULT_GAME_PATH.is_file():
         return DEFAULT_GAME_PATH
+    for candidate in Path("/home").glob("*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"):
+        if candidate.is_file():
+            return candidate
     raise FileNotFoundError("Factorio binary not found.")
 
 

@@ -48,31 +48,21 @@ def parse_demand(argv: list[str]) -> dict[str, float]:
     return pairs
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("dump")
-    parser.add_argument("demand", nargs="*", help="item per_min pairs")
-    parser.add_argument(
-        "--spc", type=float, help="science packs per minute; the six pre-space packs at this rate"
-    )
-    args = parser.parse_args()
-
-    if args.spc is not None:
-        demand = dict.fromkeys(SPM_PACKS, args.spc)
-    else:
-        demand = parse_demand(args.demand)
-    data = solve.Data(args.dump)
+def build_all(dump_path: Path | str, demand: dict[str, float], out_dir: Path | str = ".") -> int:
+    """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
+    out = Path(out_dir)
+    data = solve.Data(str(dump_path))
     tech = pdk.Pdk(data)
     allowed = data.allowed_recipes(["nauvis"])
     nl = netlist.build(data, demand, allowed)
     plans = netlist.merge_plans_of(nl)
     text = netlist.emit_verilog(nl, plans)
-    Path("netlist.v").write_text(text)
-    Path("cells.v").write_text(netlist.emit_cells_v(nl))
+    (out / "netlist.v").write_text(text)
+    (out / "cells.v").write_text(netlist.emit_cells_v(nl))
 
     cells = [*nl.cells.values(), netlist.merge_cell()]
-    lef_text = lef.write_lef(tech, cells, "tech.lef")
-    lib_text = liberty.write_liberty(cells, "tech.lib")
+    lef_text = lef.write_lef(tech, cells, str(out / "tech.lef"))
+    lib_text = liberty.write_liberty(cells, str(out / "tech.lib"))
     problems = lef.check_lef(cells, lef_text)
     problems += liberty.check_liberty(cells, lib_text)
     if problems:
@@ -97,7 +87,7 @@ def main() -> int:
             for i in nl.instances
         ],
     }
-    Path("netlist.json").write_text(json.dumps(sidecar, indent=2))
+    (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
     counts: dict[str, int] = {}
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1
@@ -109,6 +99,23 @@ def main() -> int:
     for key, count in sorted(counts.items()):
         print(f"  {count:3} x {key}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dump")
+    parser.add_argument("demand", nargs="*", help="item per_min pairs")
+    parser.add_argument(
+        "--spc", type=float, help="science packs per minute; the six pre-space packs at this rate"
+    )
+    args = parser.parse_args()
+
+    if args.spc is not None:
+        demand = dict.fromkeys(SPM_PACKS, args.spc)
+    else:
+        demand = parse_demand(args.demand)
+
+    return build_all(args.dump, demand, Path())
 
 
 if __name__ == "__main__":
