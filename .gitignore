@@ -9,6 +9,7 @@ foundry/tech.lef
 foundry/tech.lib
 foundry/probe.def
 foundry/factory.def
+foundry/route_drc.rpt
 
 __pycache__/
 *.pyc

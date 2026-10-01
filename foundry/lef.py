@@ -39,20 +39,52 @@ class LefError(Exception):
     """One structural violation in the emitted LEF."""
 
 
-def _pin_rect(cell: dict[str, Any], side: str) -> tuple[float, float, float, float]:
-    """The pin shape of one port, in microns, origin at the macro centre.
+def _input_pin_rect(
+    cell: dict[str, Any], idx: int, total: int
+) -> tuple[str, float, float, float, float]:
+    """Calculate input pin layer and bounds on the macro grid."""
+    width = cell["width"]
+    height = cell["height"]
+    if total <= height:
+        offset = (height - total) // 2
+        tile_y = offset + idx
+        cy = tile_y + 0.5
+        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+    if idx < height:
+        cy = idx + 0.5
+        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+    tile_x = 1 + ((idx - height) % max(1, width - 1))
+    cx = tile_x + 0.5
+    return pdk.LAYER_TUNNEL, cx - 0.25, float(height) - 0.5, cx + 0.25, float(height)
 
-    A 3x3 macro spans -1.5..1.5. A west pin sits on the left edge, an
-    east pin on the right edge, both one tile tall and centred.
-    """
-    width = cell["width"] * TILE_MICRONS
-    half_w = width / 2.0
-    lane = 0.5  # one lane, half a tile wide, centred on the edge midpoint
-    if side == "W":
-        return (-half_w, -lane, -half_w + TILE_MICRONS, lane)
-    if side == "E":
-        return (half_w - TILE_MICRONS, -lane, half_w, lane)
-    raise LefError(f"unknown side {side}")
+
+def _output_pin_rect(
+    cell: dict[str, Any], idx: int, total: int
+) -> tuple[str, float, float, float, float]:
+    """Calculate output pin layer and bounds on the macro grid."""
+    width = cell["width"]
+    height = cell["height"]
+    w = float(width)
+    h = float(height)
+    if total <= height:
+        offset = (height - total) // 2
+        tile_y = offset + idx
+        cy = tile_y + 0.5
+        return pdk.LAYER_SURFACE, w - 0.5, cy - 0.25, w, cy + 0.25
+    if idx < height:
+        cy = idx + 0.5
+        return pdk.LAYER_SURFACE, w - 0.5, cy - 0.25, w, cy + 0.25
+    if idx < height + width:
+        tile_x = idx - height
+        cx = tile_x + 0.5
+        return pdk.LAYER_TUNNEL, cx - 0.25, 0.0, cx + 0.25, 0.5
+    if idx < 2 * height + width:
+        tile_y = idx - height - width
+        cy = tile_y + 0.5
+        return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
+    tile_x = (idx - 2 * height - width) % width
+    cx = tile_x + 0.5
+    return pdk.LAYER_TUNNEL, cx - 0.25, h - 0.5, cx + 0.25, h
 
 
 def macro_lines(cell: dict[str, Any]) -> list[str]:
@@ -71,29 +103,29 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         f"  PROPERTY POWER_WATTS {cell['watts']:.6f} ;",
         f'  PROPERTY RECIPE "{cell["recipe"]}" ;',
     ]
-    for port in cell["inputs"]:
-        side = PIN_SIDE["in"]
-        x1, y1, x2, y2 = _pin_rect(cell, side)
+    sorted_inputs = sorted(cell["inputs"])
+    for idx, port in enumerate(sorted_inputs):
+        layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs))
         lines.extend(
             [
                 f"  PIN {port.replace('-', '_')}",
                 "    DIRECTION INPUT ;",
                 "    USE SIGNAL ;",
-                "    PORT LAYER M1 ;",
+                f"    PORT LAYER {layer} ;",
                 f"      RECT {x1:.3f} {y1:.3f} {x2:.3f} {y2:.3f} ;",
                 "    END",
                 f"  END {port.replace('-', '_')}",
             ]
         )
-    for port in cell["outputs"]:
-        side = PIN_SIDE["out"]
-        x1, y1, x2, y2 = _pin_rect(cell, side)
+    sorted_outputs = sorted(cell["outputs"])
+    for idx, port in enumerate(sorted_outputs):
+        layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
         lines.extend(
             [
                 f"  PIN {port.replace('-', '_')}",
                 "    DIRECTION OUTPUT ;",
                 "    USE SIGNAL ;",
-                "    PORT LAYER M1 ;",
+                f"    PORT LAYER {layer} ;",
                 f"      RECT {x1:.3f} {y1:.3f} {x2:.3f} {y2:.3f} ;",
                 "    END",
                 f"  END {port.replace('-', '_')}",
@@ -114,51 +146,61 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "UNITS",
         f"  DATABASE MICRONS {LEF_UNITS} ;",
         "END UNITS",
-        "MANUFACTURINGGRID 0.5 ;",
+        "MANUFACTURINGGRID 0.001 ;",
         # M1: the surface. Belts, machines, and their pins live here.
         "LAYER M1",
         "  TYPE ROUTING ;",
         "  DIRECTION HORIZONTAL ;",
         "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M1",
+        # VL1: cut layer between surface belts and tunnels.
+        "LAYER VL1",
+        "  TYPE CUT ;",
+        "  SPACING 0.5 ;",
+        "END VL1",
         # M2: the tunnel layer. One tunnel pair per belt tier, span per tier.
         "LAYER M2",
         "  TYPE ROUTING ;",
         "  DIRECTION VERTICAL ;",
         "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M2",
+        # VL2: cut layer between tunnels and fluids.
+        "LAYER VL2",
+        "  TYPE CUT ;",
+        "  SPACING 0.5 ;",
+        "END VL2",
         # M3: fluids. Pipes. The layer change is the pipe-to-ground pair.
         "LAYER M3",
         "  TYPE ROUTING ;",
         "  DIRECTION HORIZONTAL ;",
         "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M3",
-        # VL1: the cut layer. One tunnel mouth or pipe bend per cut.
-        "LAYER VL1",
-        "  TYPE CUT ;",
-        "END VL1",
     ]
     # A LEF layer-change record needs real geometry: the shapes on both
     # routing layers and the cut between them. The cut layer VL1 models
     # the tunnel mouth. Its span rides in the properties as game data.
     for tier in tiers:
         name = tier["belt"].replace("-", "_").upper()
+        default_tag = "  DEFAULT" if tier["belt"] == "transport-belt" else ""
         lines.extend(
             [
                 f"VIA {name}_VIA",
-                "  DEFAULT",
+                default_tag,
                 "  LAYER M1 ;",
-                "    RECT -0.5 -0.5 0.5 0.5 ;",
-                "  LAYER VL1 ;",
                 "    RECT -0.25 -0.25 0.25 0.25 ;",
+                "  LAYER VL1 ;",
+                "    RECT -0.125 -0.125 0.125 0.125 ;",
                 "  LAYER M2 ;",
-                "    RECT -0.5 -0.5 0.5 0.5 ;",
+                "    RECT -0.25 -0.25 0.25 0.25 ;",
                 f'  PROPERTY TIER_BELT "{tier["belt"]}" ;',
                 f"  PROPERTY SPAN {tier['span']} ;",
                 f"END {name}_VIA",
@@ -167,12 +209,13 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
     lines.extend(
         [
             "VIA PIPE_TO_GROUND_VIA",
-            "  LAYER M1 ;",
-            "    RECT -0.5 -0.5 0.5 0.5 ;",
-            "  LAYER VL1 ;",
+            "  DEFAULT",
+            "  LAYER M2 ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL2 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
             "  LAYER M3 ;",
-            "    RECT -0.5 -0.5 0.5 0.5 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
             f"  PROPERTY SPAN {span} ;",
             "END PIPE_TO_GROUND_VIA",
             "SITE tile",
@@ -181,15 +224,14 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "END tile",
         ]
     )
-    return lines
+    return [line for line in lines if line]
 
 
 def merge_lines() -> list[str]:
     """The transport merge cell: one splitter tile, three pins.
 
-    The splitter footprint from the dump is 1.8 x 0.8 tiles; the macro
-    snaps to the tile grid, 2 x 1. Input a enters west, input b enters
-    south, the merged lane leaves east.
+    Input a enters west on M1. Input b enters south on M2. The merged
+    output y leaves east on M1.
     """
     name = netlist.MERGE_CELL
     return [
@@ -204,21 +246,21 @@ def merge_lines() -> list[str]:
         "    DIRECTION INPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT -1.000 -0.500 0.000 0.500 ;",
+        "      RECT 0.000 0.250 0.500 0.750 ;",
         "    END",
         "  END a",
         "  PIN b",
         "    DIRECTION INPUT ;",
         "    USE SIGNAL ;",
-        "    PORT LAYER M1 ;",
-        "      RECT -0.500 -0.500 0.500 0.000 ;",
+        "    PORT LAYER M2 ;",
+        "      RECT 0.750 0.000 1.250 0.500 ;",
         "    END",
         "  END b",
         "  PIN y",
         "    DIRECTION OUTPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT 0.000 -0.500 1.000 0.500 ;",
+        "      RECT 1.500 0.250 2.000 0.750 ;",
         "    END",
         "  END y",
         f"END {name}",
@@ -280,9 +322,9 @@ def check_lef(cells: list[dict[str, Any]], text: str) -> list[str]:
             if token.startswith("RECT "):
                 parts = token.split()
                 x1, y1, x2, y2 = (float(v) for v in parts[1:5])
-                if abs(x1) > width / 2 + 1e-9 or abs(x2) > width / 2 + 1e-9:
+                if x1 < -1e-9 or x2 > width + 1e-9:
                     problems.append(f"{name}: rect x outside macro: {token}")
-                if abs(y1) > height / 2 + 1e-9 or abs(y2) > height / 2 + 1e-9:
+                if y1 < -1e-9 or y2 > height + 1e-9:
                     problems.append(f"{name}: rect y outside macro: {token}")
         for token in block:
             if token.startswith("SIZE "):

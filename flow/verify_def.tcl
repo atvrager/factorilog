@@ -44,7 +44,14 @@ if {[catch {check_placement} problem]} {
     error "verify: placement check failed: $problem"
 }
 
+set routed 0
+foreach net [$block getNets] {
+    if {[$net getWire] != "NULL"} {
+        incr routed
+    }
+}
+
 set die_w [expr {([$die xMax] - [$die xMin]) / $dbu}]
 set die_h [expr {([$die yMax] - [$die yMin]) / $dbu}]
 puts "verify: die $die_w x $die_h tiles, [llength $insts] blocks placed,\
- [llength [$block getNets]] nets, [llength [$block getBTerms]] ports"
+ $routed routed nets, [llength [$block getNets]] nets, [llength [$block getBTerms]] ports"

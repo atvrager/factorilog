@@ -112,5 +112,13 @@ foreach inst [$block getInsts] {
 }
 puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
 
+# --- route ----------------------------------------------------------
+# The router connects blocks across three layers:
+# M1 for surface belts, M2 for underground tunnels, M3 for pipes.
+# FastRoute runs global routing. TritonRoute runs detailed routing.
+set_routing_layers -signal M1-M3
+global_route -verbose
+detailed_route -output_drc route_drc.rpt -verbose 1
+
 write_def factory.def
-puts "factorilog: DEF written"
+puts "factorilog: routed DEF written"

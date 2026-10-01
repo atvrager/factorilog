@@ -70,7 +70,7 @@ graph LR
 | `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`, `tech.lib`. |
 | `flow/factorilog.tcl` | The OpenROAD stages: floorplan, io, place, write DEF. |
 | `flow/verify_def.tcl` | Reads the DEF back and repeats the checks. |
-| `flow/orfs.sh` | Runs a stage in the `openroad/orfs` container. |
+| `flow/orfs.sh` | Runs a stage in the `openroad/orfs` Podman container. |
 | `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
 | `foundry/test_solve.py` | Solver tests on the fixture. |
 | `foundry/test_pdk.py` | Smoke test: dump to plan to cells to blueprint. |
@@ -118,26 +118,24 @@ Two inputs feed one command. A new game version reruns both.
 3.  `bazel run //foundry:netbuild` merges the two and writes the PDK and
     the netlist. The PDK is a build product, never a hand-edited file.
 
-The OpenROAD stage runs in the prebuilt `openroad/orfs` container, no
-build step:
+The OpenROAD stage runs in the prebuilt `openroad/orfs` Podman container,
+no build step:
 
 ```
-flow/orfs.sh    # read_liberty, read_lef, read_verilog, link, write_def
+flow/orfs.sh    # read_liberty, read_lef, read_verilog, link, place, route
 ```
 
 ## Status
 
-Working: synthesis and placement on the hermetic fixture. A 60
+Working: synthesis, placement, and routing on the hermetic fixture. A 60
 packs-per-minute demand solves with zero balance error and lowers to a
 flat netlist: 1220 instances, 1248 nets, 12 ports. The PDK carries 39
-masters with LEF geometry and Liberty stubs. OpenROAD sizes a 166 by
-166 tile die, places all 1220 blocks on the tile grid with no overlap
-and a two tile lane between block columns, and writes `factory.def`.
-The flow runs with no warnings.
+masters with LEF geometry and Liberty stubs. OpenROAD places all 1220
+blocks on the tile grid with no overlap. FastRoute and TritonRoute route
+all nets across three layers with zero DRC violations.
 
-Next, in order: the route stage (belts, tunnels, pipes), the Liberty
-timing tables from measured craft times, the DEF-to-entities bridge
-with the blueprint string, trains as a track layer.
+Next: the Liberty timing tables, the DEF-to-entities bridge with
+blueprint strings, and trains as a track layer.
 
 ## Prose
 
