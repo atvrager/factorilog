@@ -6,7 +6,7 @@
 
 read_db 2_placed.odb
 
-set_routing_layers -signal M1-M3
+set_routing_layers -signal M1-M4
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

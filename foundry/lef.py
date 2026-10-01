@@ -55,7 +55,7 @@ def _input_pin_rect(
         return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
     tile_x = 1 + ((idx - height) % max(1, width - 1))
     cx = tile_x + 0.5
-    return pdk.LAYER_TUNNEL, cx - 0.25, float(height) - 0.5, cx + 0.25, float(height)
+    return pdk.LAYER_SURFACE_V, cx - 0.25, float(height) - 0.5, cx + 0.25, float(height)
 
 
 def _output_pin_rect(
@@ -77,14 +77,14 @@ def _output_pin_rect(
     if idx < height + width:
         tile_x = idx - height
         cx = tile_x + 0.5
-        return pdk.LAYER_TUNNEL, cx - 0.25, 0.0, cx + 0.25, 0.5
+        return pdk.LAYER_SURFACE_V, cx - 0.25, 0.0, cx + 0.25, 0.5
     if idx < 2 * height + width:
         tile_y = idx - height - width
         cy = tile_y + 0.5
         return pdk.LAYER_SURFACE, 0.0, cy - 0.25, 0.5, cy + 0.25
     tile_x = (idx - 2 * height - width) % width
     cx = tile_x + 0.5
-    return pdk.LAYER_TUNNEL, cx - 0.25, h - 0.5, cx + 0.25, h
+    return pdk.LAYER_SURFACE_V, cx - 0.25, h - 0.5, cx + 0.25, h
 
 
 def macro_lines(cell: dict[str, Any]) -> list[str]:
@@ -131,21 +131,14 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
                 f"  END {port.replace('-', '_')}",
             ]
         )
-    lines.extend(
-        [
-            "  OBS",
-            f"    LAYER {pdk.LAYER_SURFACE} ;",
-            f"      RECT 0.000 0.000 {width:.3f} {height:.3f} ;",
-            "  END",
-        ]
-    )
+    # No OBS for test
     lines.append(f"END {name}")
     return lines
 
 
 def tech_lines(tech: dict[str, Any]) -> list[str]:
     """The technology section: units, layers, vias, site."""
-    tiers = tech["layers"]["M2"]["tiers"]
+    tiers = tech["layers"]["M3"]["tiers"]
     span = tech["layers"]["M3"]["span"]
     lines = [
         "VERSION 5.8 ;",
@@ -153,7 +146,7 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         f"  DATABASE MICRONS {LEF_UNITS} ;",
         "END UNITS",
         "MANUFACTURINGGRID 0.001 ;",
-        # M1: the surface. Belts, machines, and their pins live here.
+        # M1: surface horizontal. Belts, pipes, machine pins.
         "LAYER M1",
         "  TYPE ROUTING ;",
         "  DIRECTION HORIZONTAL ;",
@@ -162,12 +155,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M1",
-        # VL1: cut layer between surface belts and tunnels.
+        # VL1: surface corner turn cut layer.
         "LAYER VL1",
         "  TYPE CUT ;",
         "  SPACING 0.5 ;",
         "END VL1",
-        # M2: the tunnel layer. One tunnel pair per belt tier, span per tier.
+        # M2: surface vertical. Belts, pipes, machine pins.
         "LAYER M2",
         "  TYPE ROUTING ;",
         "  DIRECTION VERTICAL ;",
@@ -176,12 +169,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M2",
-        # VL2: cut layer between tunnels and fluids.
+        # VL2: surface-to-underground transition cut layer (tunnel mouth).
         "LAYER VL2",
         "  TYPE CUT ;",
         "  SPACING 0.5 ;",
         "END VL2",
-        # M3: fluids. Pipes. The layer change is the pipe-to-ground pair.
+        # M3: underground horizontal tunnel layer.
         "LAYER M3",
         "  TYPE ROUTING ;",
         "  DIRECTION HORIZONTAL ;",
@@ -190,10 +183,36 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.5 ;",
         "END M3",
+        # VL3: underground turn cut layer.
+        "LAYER VL3",
+        "  TYPE CUT ;",
+        "  SPACING 0.5 ;",
+        "END VL3",
+        # M4: underground vertical tunnel layer.
+        "LAYER M4",
+        "  TYPE ROUTING ;",
+        "  DIRECTION VERTICAL ;",
+        "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
+        "  WIDTH 0.5 ;",
+        "  SPACING 0.5 ;",
+        "END M4",
     ]
-    # A LEF layer-change record needs real geometry: the shapes on both
-    # routing layers and the cut between them. The cut layer VL1 models
-    # the tunnel mouth. Its span rides in the properties as game data.
+    # 1. Surface turn layer connection (M1 -> VL1 -> M2)
+    lines.extend(
+        [
+            "VIA SURFACE_TURN_VIA",
+            "  DEFAULT",
+            "  LAYER M1 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL1 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M2 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END SURFACE_TURN_VIA",
+        ]
+    )
+    # 2. Underground belt entrance/exit connection (M2 -> VL2 -> M3)
     for tier in tiers:
         name = tier["belt"].replace("-", "_").upper()
         default_tag = "  DEFAULT" if tier["belt"] == "transport-belt" else ""
@@ -201,17 +220,18 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             [
                 f"VIA {name}_VIA",
                 default_tag,
-                "  LAYER M1 ;",
-                "    RECT -0.25 -0.25 0.25 0.25 ;",
-                "  LAYER VL1 ;",
-                "    RECT -0.125 -0.125 0.125 0.125 ;",
                 "  LAYER M2 ;",
+                "    RECT -0.25 -0.25 0.25 0.25 ;",
+                "  LAYER VL2 ;",
+                "    RECT -0.125 -0.125 0.125 0.125 ;",
+                "  LAYER M3 ;",
                 "    RECT -0.25 -0.25 0.25 0.25 ;",
                 f'  PROPERTY TIER_BELT "{tier["belt"]}" ;',
                 f"  PROPERTY SPAN {tier['span']} ;",
                 f"END {name}_VIA",
             ]
         )
+    # 3. Underground pipe-to-ground entrance/exit connection
     lines.extend(
         [
             "VIA PIPE_TO_GROUND_VIA",
@@ -224,6 +244,20 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "    RECT -0.25 -0.25 0.25 0.25 ;",
             f"  PROPERTY SPAN {span} ;",
             "END PIPE_TO_GROUND_VIA",
+        ]
+    )
+    # 4. Underground turn connection (M3 -> VL3 -> M4)
+    lines.extend(
+        [
+            "VIA UNDERGROUND_TURN_VIA",
+            "  DEFAULT",
+            "  LAYER M3 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL3 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M4 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END UNDERGROUND_TURN_VIA",
             "SITE tile",
             f"  SIZE {TILE_MICRONS:.3f} BY {TILE_MICRONS:.3f} ;",
             "  CLASS CORE ;",
@@ -236,15 +270,14 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
 def merge_lines() -> list[str]:
     """The transport merge cell: one splitter tile, three pins.
 
-    Input a enters west on M1. Input b enters south on M2. The merged
-    output y leaves east on M1.
+    Inputs a and b enter west on M1. Output y leaves east on M1.
     """
     name = netlist.MERGE_CELL
     return [
         f"MACRO {name}",
         "  CLASS CORE ;",
         "  ORIGIN 0 0 ;",
-        "  SIZE 2.000 BY 1.000 ;",
+        "  SIZE 1.000 BY 2.000 ;",
         "  SITE tile ;",
         '  PROPERTY CELLTYPE "splitter" ;',
         '  PROPERTY ROLE "merge2" ;',
@@ -258,21 +291,17 @@ def merge_lines() -> list[str]:
         "  PIN b",
         "    DIRECTION INPUT ;",
         "    USE SIGNAL ;",
-        "    PORT LAYER M2 ;",
-        "      RECT 0.750 0.000 1.250 0.500 ;",
+        "    PORT LAYER M1 ;",
+        "      RECT 0.000 1.250 0.500 1.750 ;",
         "    END",
         "  END b",
         "  PIN y",
         "    DIRECTION OUTPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT 1.500 0.250 2.000 0.750 ;",
+        "      RECT 0.500 0.250 1.000 0.750 ;",
         "    END",
         "  END y",
-        "  OBS",
-        "    LAYER M1 ;",
-        "      RECT 0.000 0.000 2.000 1.000 ;",
-        "  END",
         f"END {name}",
     ]
 

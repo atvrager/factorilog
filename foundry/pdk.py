@@ -46,10 +46,10 @@ INSERTER_REACH = {
 # Rows of the routing stack, lowest first. Stable handles shared by the
 # netlister, the DEF exporter, and the game bridge.
 LAYER_SURFACE = "M1"
-LAYER_TUNNEL = "M2"
+LAYER_SURFACE_V = "M2"
+LAYER_TUNNEL = "M3"
+LAYER_TUNNEL_V = "M4"
 LAYER_FLUID = "M3"
-# The tunnel pair works as the layer change of M2. A pipe-to-ground pair
-# works as the layer change of M3.
 
 # Pipe-to-ground span, tiles. The prototype dump carries no max_distance
 # for it, unlike underground belts. One measurement in game fills this.
@@ -130,14 +130,13 @@ class Pdk:
         return {
             "layers": {
                 LAYER_SURFACE: {"via": "none"},
+                LAYER_SURFACE_V: {"via": "surface-turn"},
                 LAYER_TUNNEL: {
                     "via": "tunnel-pair",
                     "tiers": self.belt_tiers(),
-                },
-                LAYER_FLUID: {
-                    "via": "pipe-to-ground",
                     "span": PIPE_TO_GROUND_SPAN,
                 },
+                LAYER_TUNNEL_V: {"via": "tunnel-turn"},
             },
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
             "inserters": {

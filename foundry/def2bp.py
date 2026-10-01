@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -161,7 +162,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
             net_name = net.get("name", "")
             base = net_name.split("__")[0].replace("_", "-")
             return base in fluids
-        return layer == "M3"
+        return layer in ("M3", "M4")
 
     # 1. Place components
     for comp in def_data.get("components", []):
@@ -174,44 +175,63 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
         cell = cell_map.get(cell_id, {})
 
         if macro == "belt_merge2" or cell_id == "belt_merge2":
-            # Splitter: 2 tiles wide, 1 tile high, facing East
-            add_entity("splitter", gx + 1.0, gy + 0.5, direction=DIRECTION_EAST)
+            # Splitter: 1 tile wide, 2 tiles high when facing East
+            orient = comp.get("orient", "N")
+            if orient in ("W", "E"):
+                cw, ch = 2, 1
+                center_x, center_y = gx + 1.0, gy + 0.5
+                direction = DIRECTION_NORTH if orient == "W" else DIRECTION_SOUTH
+            else:
+                cw, ch = 1, 2
+                center_x, center_y = gx + 0.5, gy + 1.0
+                direction = DIRECTION_WEST if orient == "S" else DIRECTION_EAST
+            add_entity("splitter", center_x, center_y, direction=direction)
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
         else:
-            width = float(cell.get("width", 3))
-            height = float(cell.get("height", 3))
+            cw = int(cell.get("width", 3))
+            ch = int(cell.get("height", 3))
             machine = cell.get("machine", "assembling-machine-3")
             recipe = inst.get("recipe", cell.get("recipe", ""))
             extra = {"recipe": recipe} if recipe else None
             add_entity(
                 machine,
-                gx + width / 2.0,
-                gy + height / 2.0,
+                gx + cw / 2.0,
+                gy + ch / 2.0,
                 direction=DIRECTION_NORTH,
                 extra=extra,
             )
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
 
-    # 2. Place underground tunnels (M2 wire segments)
+    # 2. Place underground tunnels (M3 and M4 wire segments)
     for net in def_data.get("nets", []):
         for wire in net.get("wires", []):
-            if wire["layer"] == "M2":
+            if wire["layer"] in ("M3", "M4"):
                 x1, y1 = wire["x1"], wire["y1"]
                 x2, y2 = wire["x2"], wire["y2"]
                 if (x1, y1) == (x2, y2):
                     continue
                 tunnel_dir = _segment_direction(x1, y1, x2, y2)
-                is_fluid = is_fluid_wire(net, "M2")
+                is_fluid = is_fluid_wire(net, wire["layer"])
                 ent_name = "pipe-to-ground" if is_fluid else "underground-belt"
+                t1_x = math.floor(x1 * scale) + 0.5
+                t1_y = math.floor(y1 * scale) + 0.5
+                t2_x = math.floor(x2 * scale) + 0.5
+                t2_y = math.floor(y2 * scale) + 0.5
                 add_entity(
                     ent_name,
-                    x1 * scale,
-                    y1 * scale,
+                    t1_x,
+                    t1_y,
                     direction=tunnel_dir,
                     extra={"type": "input"},
                 )
                 add_entity(
                     ent_name,
-                    x2 * scale,
-                    y2 * scale,
+                    t2_x,
+                    t2_y,
                     direction=tunnel_dir,
                     extra={"type": "output"},
                 )
@@ -220,19 +240,15 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     for net in def_data.get("nets", []):
         for via in net.get("vias", []):
             if via["via"] == "PIPE_TO_GROUND_VIA":
-                vx = via["x"] * scale
-                vy = via["y"] * scale
+                vx = math.floor(via["x"] * scale) + 0.5
+                vy = math.floor(via["y"] * scale) + 0.5
                 via_dir = DIRECTION_EAST
                 for wire in net.get("wires", []):
                     if wire["x1"] == via["x"] and wire["y1"] == via["y"]:
-                        via_dir = _segment_direction(
-                            wire["x1"], wire["y1"], wire["x2"], wire["y2"]
-                        )
+                        via_dir = _segment_direction(wire["x1"], wire["y1"], wire["x2"], wire["y2"])
                         break
                     if wire["x2"] == via["x"] and wire["y2"] == via["y"]:
-                        via_dir = _segment_direction(
-                            wire["x1"], wire["y1"], wire["x2"], wire["y2"]
-                        )
+                        via_dir = _segment_direction(wire["x1"], wire["y1"], wire["x2"], wire["y2"])
                         break
                 add_entity(
                     "pipe-to-ground",
@@ -242,13 +258,12 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                     extra={"type": "input"},
                 )
 
-    # 4. Place surface wires
-    unit_step = round(1.0 / scale)
+    # 4. Place surface wires (M1 and M2)
     for net in def_data.get("nets", []):
         for wire in net.get("wires", []):
             layer = wire["layer"]
-            if layer == "M2":
-                # M2 is an underground tunnel. Do not place surface entities.
+            if layer in ("M3", "M4"):
+                # M3 and M4 are underground tunnels. Do not place surface entities.
                 continue
 
             is_fluid = is_fluid_wire(net, layer)
@@ -258,24 +273,28 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
 
             if x1 == x2:
                 # Vertical segment
-                step = unit_step if y2 >= y1 else -unit_step
+                tx = math.floor(x1 * scale) + 0.5
+                ty_start = min(math.floor(y1 * scale), math.floor(y2 * scale))
+                ty_end = max(math.floor(y1 * scale), math.floor(y2 * scale))
                 direction = DIRECTION_SOUTH if y2 >= y1 else DIRECTION_NORTH
-                for y_curr in range(y1, y2 + step, step):
+                for ty in range(ty_start, ty_end + 1):
                     add_entity(
                         entity_name,
-                        x1 * scale,
-                        y_curr * scale,
+                        tx,
+                        ty + 0.5,
                         direction=direction if entity_name != "pipe" else None,
                     )
             elif y1 == y2:
                 # Horizontal segment
-                step = unit_step if x2 >= x1 else -unit_step
+                ty = math.floor(y1 * scale) + 0.5
+                tx_start = min(math.floor(x1 * scale), math.floor(x2 * scale))
+                tx_end = max(math.floor(x1 * scale), math.floor(x2 * scale))
                 direction = DIRECTION_EAST if x2 >= x1 else DIRECTION_WEST
-                for x_curr in range(x1, x2 + step, step):
+                for tx in range(tx_start, tx_end + 1):
                     add_entity(
                         entity_name,
-                        x_curr * scale,
-                        y1 * scale,
+                        tx + 0.5,
+                        ty,
                         direction=direction if entity_name != "pipe" else None,
                     )
 

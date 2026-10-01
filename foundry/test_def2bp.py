@@ -20,13 +20,16 @@ COMPONENTS 2 ;
 - u_merge_1 belt_merge2 + PLACED ( 30000 40000 ) N ;
 END COMPONENTS
 
-NETS 1 ;
+NETS 2 ;
 - net_wire ( u_assembler_1 electronic_circuit ) ( u_merge_1 a ) + USE SIGNAL
   + ROUTED M1 ( 13000 21500 ) ( 30000 * )
   NEW M2 ( 30000 21500 ) ( * 40500 )
-  NEW M1 ( 30000 21500 ) TRANSPORT_BELT_VIA
-  NEW M3 ( 35000 40500 ) ( 40000 * )
-  NEW M2 ( 35000 40500 ) PIPE_TO_GROUND_VIA ;
+  NEW M2 ( 30000 21500 ) TRANSPORT_BELT_VIA
+  NEW M3 ( 35000 40500 ) ( 40000 * ) ;
+- crude_oil__1 ( u_assembler_1 crude_oil ) + USE SIGNAL
+  + ROUTED M1 ( 13000 22500 ) ( 20000 * )
+  NEW M3 ( 20000 22500 ) ( 25000 * )
+  NEW M2 ( 20000 22500 ) PIPE_TO_GROUND_VIA ;
 END NETS
 END DESIGN
 """
@@ -52,6 +55,7 @@ MINI_NETLIST = {
             "recipe": "electronic-circuit",
         },
     ],
+    "fluids": ["crude-oil"],
 }
 
 
@@ -66,11 +70,11 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(data["components"][0]["x"], 10000)
         self.assertEqual(data["components"][0]["y"], 20000)
 
-        self.assertEqual(len(data["nets"]), 1)
+        self.assertEqual(len(data["nets"]), 2)
         net = data["nets"][0]
         self.assertEqual(net["name"], "net_wire")
         self.assertEqual(len(net["wires"]), 3)
-        self.assertEqual(len(net["vias"]), 2)
+        self.assertEqual(len(net["vias"]), 1)
 
     def test_build_entities(self) -> None:
         def_data = def2bp.parse_def(MINI_DEF)
@@ -90,9 +94,9 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(mach["position"], {"x": 11.5, "y": 21.5})
         self.assertEqual(mach["recipe"], "electronic-circuit")
 
-        # Check splitter coordinates (origin 30, 40 + 1.0, 0.5 -> 31.0, 40.5)
+        # Check splitter coordinates (origin 30, 40 + 0.5, 1.0 -> 30.5, 41.0)
         spl = next(e for e in entities if e["name"] == "splitter")
-        self.assertEqual(spl["position"], {"x": 31.0, "y": 40.5})
+        self.assertEqual(spl["position"], {"x": 30.5, "y": 41.0})
         self.assertEqual(spl["direction"], def2bp.DIRECTION_EAST)
 
         # Check entity numbering is 1-based and sequential

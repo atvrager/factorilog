@@ -63,7 +63,7 @@ initialize_floorplan -die_area "0 0 $die_side $die_side" \
 puts "factorilog: [llength [$block getRows]] rows"
 
 # Routing tracks come from the LEF pitches: one track per tile on each
-# layer. M1 carries belts, M2 tunnels, M3 pipes.
+# layer. M1 and M2 carry surface tracks, M3 and M4 carry underground tunnels.
 make_tracks
 
 # --- io -------------------------------------------------------------
@@ -113,10 +113,10 @@ foreach inst [$block getInsts] {
 puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
 
 # --- route ----------------------------------------------------------
-# The router connects blocks across three layers:
-# M1 for surface belts, M2 for underground tunnels, M3 for pipes.
+# The router connects blocks across four layers:
+# M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
 # FastRoute runs global routing. TritonRoute runs detailed routing.
-set_routing_layers -signal M1-M3
+set_routing_layers -signal M1-M4
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 
