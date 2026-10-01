@@ -72,6 +72,7 @@ def build_all(dump_path: Path | str, demand: dict[str, float], out_dir: Path | s
 
     sidecar = {
         "demand": demand,
+        "fluids": sorted(data.prototypes.get("fluid", {}).keys()),
         "inputs": nl.inputs,
         "outputs": nl.outputs,
         "raw_rates_per_min": {m: nl.nets[m].rate_per_min for m in nl.inputs},

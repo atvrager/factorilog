@@ -154,6 +154,15 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
             entity.update(extra)
         entities.append(entity)
 
+    fluids = set(netlist_data.get("fluids", []))
+
+    def is_fluid_wire(net: dict[str, Any], layer: str) -> bool:
+        if fluids:
+            net_name = net.get("name", "")
+            base = net_name.split("__")[0].replace("_", "-")
+            return base in fluids
+        return layer == "M3"
+
     # 1. Place components
     for comp in def_data.get("components", []):
         cname = comp["name"]
@@ -181,7 +190,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 extra=extra,
             )
 
-    # 2. Place underground belt tunnels (M2 wire segments)
+    # 2. Place underground tunnels (M2 wire segments)
     for net in def_data.get("nets", []):
         for wire in net.get("wires", []):
             if wire["layer"] == "M2":
@@ -190,15 +199,17 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 if (x1, y1) == (x2, y2):
                     continue
                 tunnel_dir = _segment_direction(x1, y1, x2, y2)
+                is_fluid = is_fluid_wire(net, "M2")
+                ent_name = "pipe-to-ground" if is_fluid else "underground-belt"
                 add_entity(
-                    "underground-belt",
+                    ent_name,
                     x1 * scale,
                     y1 * scale,
                     direction=tunnel_dir,
                     extra={"type": "input"},
                 )
                 add_entity(
-                    "underground-belt",
+                    ent_name,
                     x2 * scale,
                     y2 * scale,
                     direction=tunnel_dir,
@@ -213,17 +224,16 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 vy = via["y"] * scale
                 via_dir = DIRECTION_EAST
                 for wire in net.get("wires", []):
-                    if wire["layer"] == "M3":
-                        if wire["x1"] == via["x"] and wire["y1"] == via["y"]:
-                            via_dir = _segment_direction(
-                                wire["x1"], wire["y1"], wire["x2"], wire["y2"]
-                            )
-                            break
-                        if wire["x2"] == via["x"] and wire["y2"] == via["y"]:
-                            via_dir = _segment_direction(
-                                wire["x1"], wire["y1"], wire["x2"], wire["y2"]
-                            )
-                            break
+                    if wire["x1"] == via["x"] and wire["y1"] == via["y"]:
+                        via_dir = _segment_direction(
+                            wire["x1"], wire["y1"], wire["x2"], wire["y2"]
+                        )
+                        break
+                    if wire["x2"] == via["x"] and wire["y2"] == via["y"]:
+                        via_dir = _segment_direction(
+                            wire["x1"], wire["y1"], wire["x2"], wire["y2"]
+                        )
+                        break
                 add_entity(
                     "pipe-to-ground",
                     vx,
@@ -232,7 +242,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                     extra={"type": "input"},
                 )
 
-    # 4. Place surface wires (M1 belts and M3 pipes)
+    # 4. Place surface wires
     unit_step = round(1.0 / scale)
     for net in def_data.get("nets", []):
         for wire in net.get("wires", []):
@@ -241,7 +251,8 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 # M2 is an underground tunnel. Do not place surface entities.
                 continue
 
-            entity_name = "pipe" if layer == "M3" else "transport-belt"
+            is_fluid = is_fluid_wire(net, layer)
+            entity_name = "pipe" if is_fluid else "transport-belt"
             x1, y1 = wire["x1"], wire["y1"]
             x2, y2 = wire["x2"], wire["y2"]
 
