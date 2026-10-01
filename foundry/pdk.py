@@ -34,14 +34,29 @@ UNDERGROUND_TABLE = "underground-belt"
 INSERTER_TABLE = "inserter"
 POLE_TABLE = "electric-pole"
 
-# Inserters that the PDK exposes, with the tile reach of the hand.
-INSERTER_REACH = {
-    "inserter": 1,
-    "long-handed-inserter": 2,
-    "fast-inserter": 1,
-    "bulk-inserter": 1,
-    "stack-inserter": 1,
-}
+
+def inserter_spec(proto: dict[str, Any]) -> dict[str, Any]:
+    """Calculate inserter specifications from Factorio prototype data."""
+    pickup = proto.get("pickup_position", [0.0, -1.0])
+    insert = proto.get("insert_position", [0.0, 1.2])
+    pickup_reach = round(math.hypot(float(pickup[0]), float(pickup[1])))
+    insert_reach = round(math.hypot(float(insert[0]), float(insert[1])))
+    rot_speed = float(proto.get("rotation_speed", 0.014))
+    ext_speed = float(proto.get("extension_speed", 0.035))
+    swings_per_second = rot_speed * TICKS_PER_SECOND
+    turn_ticks = 0.5 / rot_speed if rot_speed > 0 else 0.0
+    return {
+        "reach": max(1, pickup_reach),
+        "pickup_position": [float(pickup[0]), float(pickup[1])],
+        "insert_position": [float(insert[0]), float(insert[1])],
+        "pickup_reach": max(1, pickup_reach),
+        "insert_reach": max(1, insert_reach),
+        "rotation_speed": rot_speed,
+        "extension_speed": ext_speed,
+        "swings_per_second": swings_per_second,
+        "turn_ticks": turn_ticks,
+    }
+
 
 # Rows of the routing stack, lowest first. Stable handles shared by the
 # netlister, the DEF exporter, and the game bridge.
@@ -139,11 +154,7 @@ class Pdk:
                 LAYER_TUNNEL_V: {"via": "tunnel-turn"},
             },
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
-            "inserters": {
-                name: {"reach": reach}
-                for name, reach in INSERTER_REACH.items()
-                if name in self.inserters
-            },
+            "inserters": {name: inserter_spec(proto) for name, proto in self.inserters.items()},
             "poles": {
                 name: {
                     "supply": proto.get("supply_area_distance"),

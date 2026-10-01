@@ -70,6 +70,13 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertIn("M2", tech["layers"])
         self.assertIn("substation", tech["poles"])
         self.assertEqual(tech["poles"]["substation"]["supply"], 9)
+        self.assertIn("inserter", tech["inserters"])
+        self.assertEqual(tech["inserters"]["inserter"]["reach"], 1)
+        self.assertEqual(tech["inserters"]["long-handed-inserter"]["reach"], 2)
+        self.assertGreater(
+            tech["inserters"]["fast-inserter"]["swings_per_second"],
+            tech["inserters"]["inserter"]["swings_per_second"],
+        )
 
     def test_blueprint_round_trip(self) -> None:
         cell = self.pdk.cell("assembling-machine-3", "electronic-circuit")
