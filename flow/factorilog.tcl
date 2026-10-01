@@ -31,6 +31,8 @@ read_lef tech.lef
 read_verilog netlist.v
 link_design factory
 
+set_thread_count [exec nproc]
+
 set block [ord::get_db_block]
 set dbu [[ord::get_db] getDbuPerMicron]
 
@@ -116,7 +118,7 @@ puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid
 # The router connects blocks across four layers:
 # M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
 # FastRoute runs global routing. TritonRoute runs detailed routing.
-set_routing_layers -signal M1-M4
+set_routing_layers -signal M1-M6
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

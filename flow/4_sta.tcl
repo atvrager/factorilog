@@ -6,6 +6,8 @@
 read_db 3_routed.odb
 read_liberty tech.lib
 
+set_thread_count [exec nproc]
+
 create_clock -name virtual_clk -period 1000
 set_input_delay -clock virtual_clk 0 [all_inputs]
 set_output_delay -clock virtual_clk 0 [all_outputs]

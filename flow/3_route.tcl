@@ -6,7 +6,8 @@
 
 read_db 2_placed.odb
 
-set_routing_layers -signal M1-M4
+set_thread_count [exec nproc]
+set_routing_layers -signal M1-M6
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

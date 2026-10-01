@@ -5,6 +5,7 @@
 
 read_db 1_floorplan.odb
 
+set_thread_count [exec nproc]
 set block [ord::get_db_block]
 set CELL_PAD_SITES 1
 
