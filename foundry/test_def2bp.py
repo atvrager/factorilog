@@ -127,6 +127,35 @@ class TestDef2Bp(unittest.TestCase):
         entities = blueprint.entities_of(bp_string)
         self.assertGreater(len(entities), 1000)
 
+    def test_extract_pins(self) -> None:
+        foundry_dir = Path(__file__).resolve().parent
+        factory_def_path = foundry_dir / "factory.def"
+        netlist_json_path = foundry_dir / "netlist.json"
+        if not factory_def_path.exists() or not netlist_json_path.exists():
+            self.skipTest("factory.def or netlist.json missing")
+
+        def_text = factory_def_path.read_text()
+        netlist_data = json.loads(netlist_json_path.read_text())
+        def_data = def2bp.parse_def(def_text)
+        pins = def2bp.extract_pins(def_data, netlist_data)
+
+        self.assertIn("inputs", pins)
+        self.assertIn("outputs", pins)
+        self.assertEqual(len(pins["inputs"]), 6)
+        self.assertEqual(len(pins["outputs"]), 6)
+
+        input_names = [p["name"] for p in pins["inputs"]]
+        self.assertIn("coal", input_names)
+        self.assertIn("copper-ore", input_names)
+        self.assertIn("iron-ore", input_names)
+        self.assertIn("crude-oil", input_names)
+
+        crude = next(p for p in pins["inputs"] if p["name"] == "crude-oil")
+        self.assertEqual(crude["type"], "pipe")
+
+        coal = next(p for p in pins["inputs"] if p["name"] == "coal")
+        self.assertEqual(coal["type"], "belt")
+
 
 if __name__ == "__main__":
     unittest.main()

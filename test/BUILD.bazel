@@ -70,3 +70,15 @@ py_test(
     ],
 )
 
+py_test(
+    name = "telemetry_analysis_test",
+    size = "small",
+    srcs = ["test_telemetry_analysis.py"],
+    local = True,
+    main = "test_telemetry_analysis.py",
+    deps = [
+        "//flow:analyze_telemetry_lib",
+    ],
+)
+
+

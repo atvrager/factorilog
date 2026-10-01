@@ -140,26 +140,33 @@ factorilog_synth = rule(
 
 def _factorilog_blueprint_impl(ctx):
     out_bp = ctx.outputs.blueprint
+    out_pins = ctx.outputs.pins_json
     def_file = ctx.file.def_file
     netlist_json = ctx.file.netlist_json
     label = ctx.attr.label_text
 
+    args = [
+        def_file.path,
+        netlist_json.path,
+        "-o",
+        out_bp.path,
+        "--label",
+        label,
+    ]
+    outputs = [out_bp]
+    if out_pins:
+        args.extend(["--pins-out", out_pins.path])
+        outputs.append(out_pins)
+
     ctx.actions.run(
         inputs = [def_file, netlist_json],
-        outputs = [out_bp],
+        outputs = outputs,
         executable = ctx.executable._def2bp,
-        arguments = [
-            def_file.path,
-            netlist_json.path,
-            "-o",
-            out_bp.path,
-            "--label",
-            label,
-        ],
+        arguments = args,
         mnemonic = "FactorilogBlueprint",
     )
 
-    return [DefaultInfo(files = depset([out_bp]))]
+    return [DefaultInfo(files = depset(outputs))]
 
 factorilog_blueprint = rule(
     implementation = _factorilog_blueprint_impl,
@@ -168,6 +175,7 @@ factorilog_blueprint = rule(
         "netlist_json": attr.label(allow_single_file = [".json"], mandatory = True, doc = "Netlist sidecar metadata"),
         "label_text": attr.string(default = "factory", doc = "Blueprint label"),
         "blueprint": attr.output(mandatory = True, doc = "Output blueprint file"),
+        "pins_json": attr.output(doc = "Optional output pins JSON metadata file"),
         "_def2bp": attr.label(
             default = Label("//foundry:def2bp"),
             executable = True,

@@ -137,7 +137,20 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         )
     w = float(cell["width"])
     h = float(cell["height"])
-    if w > 2.0 and h > 2.0:
+    if cell.get("circuit_cell"):
+        lines.append("  OBS")
+        lines.append("    LAYER M1 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER M2 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL2 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER M3 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER M4 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("  END")
+    elif w > 2.0 and h > 2.0:
         lines.append("  OBS")
         lines.append("    LAYER M1 ;")
         lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")

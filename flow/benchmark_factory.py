@@ -16,7 +16,67 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+try:
+    from foundry import def2bp
+except ImportError:
+    foundry_path = Path(__file__).resolve().parent.parent / "foundry"
+    if str(foundry_path) not in sys.path:
+        sys.path.insert(0, str(foundry_path))
+    import def2bp
+
 DEFAULT_GAME_PATH = Path("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio").expanduser()
+
+
+def resolve_factory_pins(
+    blueprint_file: Path | None,
+    netlist_data: dict[str, Any],
+    pins_file: Path | None = None,
+    def_file: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve input and output pin locations dynamically from DEF or pins JSON."""
+    # 1. Direct pins JSON file
+    if pins_file and pins_file.is_file():
+        data = json.loads(pins_file.read_text())
+        return data.get("inputs", []), data.get("outputs", [])
+
+    # 2. Direct DEF file
+    if def_file and def_file.is_file():
+        def_data = def2bp.parse_def(def_file.read_text())
+        pins_data = def2bp.extract_pins(def_data, netlist_data)
+        return pins_data.get("inputs", []), pins_data.get("outputs", [])
+
+    # 3. Auto-discover alongside blueprint file
+    if blueprint_file:
+        candidate_pins = [
+            blueprint_file.with_suffix(".pins.json"),
+            blueprint_file.parent / "pins.json",
+        ]
+        for cp in candidate_pins:
+            if cp.is_file():
+                data = json.loads(cp.read_text())
+                return data.get("inputs", []), data.get("outputs", [])
+
+        candidate_defs = [
+            blueprint_file.with_suffix(".def"),
+            blueprint_file.parent / "factory.def",
+            blueprint_file.parent / f"{blueprint_file.stem}.def",
+        ]
+        for cd in candidate_defs:
+            if cd.is_file():
+                def_data = def2bp.parse_def(cd.read_text())
+                pins_data = def2bp.extract_pins(def_data, netlist_data)
+                return pins_data.get("inputs", []), pins_data.get("outputs", [])
+
+    # 4. Fallback: check foundry/factory.def in repository
+    repo_def = Path(__file__).resolve().parent.parent / "foundry" / "factory.def"
+    if repo_def.is_file():
+        def_data = def2bp.parse_def(repo_def.read_text())
+        pins_data = def2bp.extract_pins(def_data, netlist_data)
+        return pins_data.get("inputs", []), pins_data.get("outputs", [])
+
+    raise FileNotFoundError(
+        "Could not discover pin definitions. Provide --def or --pins flag."
+    )
 
 
 def find_factorio_binary(override: Path | None = None) -> Path:
@@ -39,14 +99,69 @@ def find_factorio_binary(override: Path | None = None) -> Path:
     raise FileNotFoundError("Factorio binary not found.")
 
 
+def extract_blueprint_taps(blueprint_string: str) -> list[dict[str, Any]]:
+    """Extract telemetry tap coordinates from blueprint string."""
+    import base64
+    import zlib
+
+    raw = zlib.decompress(base64.b64decode(blueprint_string.strip()[1:]))
+    bp = json.loads(raw).get("blueprint", {})
+    entities = bp.get("entities", [])
+    ent_by_num = {e["entity_number"]: e for e in entities if "entity_number" in e}
+    taps = []
+    for e in entities:
+        if e.get("name") == "display-panel":
+            mat = e.get("text", "")
+            disp_pos = e["position"]
+            conns = e.get("connections", {}).get("1", {}).get("red", [])
+            acc_pos = None
+            if conns:
+                target_id = conns[0].get("entity_id")
+                target = ent_by_num.get(target_id)
+                if target and target.get("name") == "arithmetic-combinator":
+                    acc_pos = target["position"]
+            taps.append(
+                {
+                    "material": mat,
+                    "disp_pos": [disp_pos["x"], disp_pos["y"]],
+                    "acc_pos": [acc_pos["x"], acc_pos["y"]] if acc_pos else None,
+                }
+            )
+    return taps
+
+
+def serialize_lua(obj: Any) -> str:
+    """Serialize a Python data structure into valid Lua literal code."""
+    if obj is None:
+        return "nil"
+    elif isinstance(obj, bool):
+        return "true" if obj else "false"
+    elif isinstance(obj, (int, float)):
+        return str(obj)
+    elif isinstance(obj, str):
+        return json.dumps(obj)
+    elif isinstance(obj, (list, tuple)):
+        return "{" + ", ".join(serialize_lua(x) for x in obj) + "}"
+    elif isinstance(obj, dict):
+        return "{" + ", ".join(f"[{json.dumps(k)}] = {serialize_lua(v)}" for k, v in obj.items()) + "}"
+    raise TypeError(f"Cannot serialize {type(obj)} to Lua")
+
+
 def run_benchmark(
     blueprint_string: str,
     netlist_data: dict[str, Any],
     game_bin: Path,
     work_dir: Path,
+    input_pins: list[dict[str, Any]] | None = None,
+    output_pins: list[dict[str, Any]] | None = None,
     ticks: int = 7200,
 ) -> dict[str, Any]:
     """Run dynamic simulation benchmark in headless Factorio."""
+    if input_pins is None or output_pins is None:
+        auto_in, auto_out = resolve_factory_pins(None, netlist_data)
+        input_pins = input_pins or auto_in
+        output_pins = output_pins or auto_out
+
     mods_dir = work_dir / "mods"
     mod_dir = mods_dir / "factory_bench"
     data_dir = work_dir / "data"
@@ -62,6 +177,18 @@ def run_benchmark(
     # Save netlist inputs and outputs metadata for Lua script
     inputs_json = mod_dir / "netlist.json"
     inputs_json.write_text(json.dumps(netlist_data))
+
+    taps_list = extract_blueprint_taps(blueprint_string)
+    taps_lua = mod_dir / "taps.lua"
+    taps_lua.write_text(f"return {serialize_lua(taps_list)}\n")
+
+    pins_lua = mod_dir / "pins.lua"
+    pins_lua.write_text(
+        f"return {{\n"
+        f"  inputs = {serialize_lua(input_pins)},\n"
+        f"  outputs = {serialize_lua(output_pins)},\n"
+        f"}}\n"
+    )
 
     info_file = mod_dir / "info.json"
     info_file.write_text(
@@ -83,10 +210,13 @@ def run_benchmark(
     control_lua.write_text(
         """
 local BLUEPRINT = require("blueprint")
+local TAPS = require("taps")
+local PINS = require("pins")
 
 local TICKS_TOTAL = """
         + str(ticks)
         + """
+
 
 script.on_init(function()
     local surface = game.surfaces[1]
@@ -148,23 +278,24 @@ script.on_init(function()
     storage.revived_count = revived
     log("BENCH_REVIVED: " .. tostring(revived))
 
-    -- Map inputs and outputs from netlist pin positions
-    local input_pins = {
-        {name = "coal", x = 80.5 + shift_x, y = 0.5 + shift_y, type = "belt"},
-        {name = "copper-ore", x = 92.5 + shift_x, y = 0.5 + shift_y, type = "belt"},
-        {name = "iron-ore", x = 76.5 + shift_x, y = 0.5 + shift_y, type = "belt"},
-        {name = "stone", x = 84.5 + shift_x, y = 0.5 + shift_y, type = "belt"},
-        {name = "crude-oil", x = 90.5 + shift_x, y = 0.5 + shift_y, type = "pipe"},
-        {name = "water", x = 88.5 + shift_x, y = 0.5 + shift_y, type = "pipe"}
-    }
-    local output_pins = {
-        {name = "automation-science-pack", x = 94.5 + shift_x, y = 0.5 + shift_y},
-        {name = "chemical-science-pack", x = 82.5 + shift_x, y = 0.5 + shift_y},
-        {name = "logistic-science-pack", x = 74.5 + shift_x, y = 0.5 + shift_y},
-        {name = "military-science-pack", x = 86.5 + shift_x, y = 0.5 + shift_y},
-        {name = "production-science-pack", x = 78.5 + shift_x, y = 0.5 + shift_y},
-        {name = "utility-science-pack", x = 72.5 + shift_x, y = 0.5 + shift_y}
-    }
+    -- Map inputs and outputs dynamically from pins
+    local input_pins = {}
+    for _, pin in ipairs(PINS.inputs) do
+        input_pins[#input_pins + 1] = {
+            name = pin.name,
+            x = pin.x + shift_x,
+            y = pin.y + shift_y,
+            type = pin.type
+        }
+    end
+    local output_pins = {}
+    for _, pin in ipairs(PINS.outputs) do
+        output_pins[#output_pins + 1] = {
+            name = pin.name,
+            x = pin.x + shift_x,
+            y = pin.y + shift_y
+        }
+    end
 
     local input_entities = {}
     for _, pin in ipairs(input_pins) do
@@ -213,6 +344,34 @@ script.on_init(function()
         }
     end
     log("BENCH_MACHINES_WITH_BELTS: " .. tostring(machines_with_belts) .. "/" .. tostring(#machines))
+
+    -- Map telemetry tap entities
+    local telemetry_taps = {}
+    for _, tap in ipairs(TAPS or {}) do
+        local entry = {
+            material = tap.material,
+            acc = nil,
+            disp = nil
+        }
+        if tap.acc_pos then
+            local ents = surface.find_entities_filtered{
+                name = "arithmetic-combinator",
+                position = {tap.acc_pos[1] + shift_x, tap.acc_pos[2] + shift_y}
+            }
+            entry.acc = ents[1]
+        end
+        if tap.disp_pos then
+            local ents = surface.find_entities_filtered{
+                name = "display-panel",
+                position = {tap.disp_pos[1] + shift_x, tap.disp_pos[2] + shift_y}
+            }
+            entry.disp = ents[1]
+        end
+        telemetry_taps[#telemetry_taps + 1] = entry
+    end
+    storage.telemetry_taps = telemetry_taps
+    storage.telemetry_samples = {}
+
     storage.machine_map = machine_map
     storage.input_entities = input_entities
     storage.output_entities = output_entities
@@ -244,6 +403,14 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
         log("BENCH_MACHINES_WITH_BELTS: " .. tostring(machines_with_belts) .. "/" .. tostring(#(storage.machine_map or {})))
+        log("BENCH_TELEMETRY_TAPS: " .. tostring(#(storage.telemetry_taps or {})))
+    end
+
+    -- Power combinator accumulators
+    for _, tap in pairs(storage.telemetry_taps or {}) do
+        if tap.acc and tap.acc.valid then
+            tap.acc.energy = 1e9
+        end
     end
 
     -- 1. Power all machines and transfer items
@@ -320,7 +487,30 @@ script.on_event(defines.events.on_tick, function(event)
         end
     end
 
-    -- 4. Periodic reporting
+    -- 4. Periodic telemetry sampling
+    if tick % 60 == 0 then
+        local snap = {
+            tick = tick,
+            taps = {}
+        }
+        for _, tap in ipairs(storage.telemetry_taps or {}) do
+            local count = 0
+            if tap.acc and tap.acc.valid then
+                local net = tap.acc.get_circuit_network(defines.wire_connector_id.combinator_output_green)
+                if net and net.signals then
+                    for _, s in pairs(net.signals) do
+                        if s.count then
+                            count = count + s.count
+                        end
+                    end
+                end
+            end
+            snap.taps[tap.material] = count
+        end
+        storage.telemetry_samples[#storage.telemetry_samples + 1] = snap
+    end
+
+    -- 5. Periodic reporting
     if tick % 600 == 0 then
         local active_count = 0
         local total_count = 0
@@ -343,13 +533,20 @@ script.on_event(defines.events.on_tick, function(event)
         end
     end
 
-    -- 5. Completion
-    if tick >= TICKS_TOTAL then
+    -- 6. Completion
+    if tick >= TICKS_TOTAL - 1 then
         log("BENCH_COMPLETE: true")
         for k, v in pairs(storage.stats.produced) do
             local rate_spm = (v / (TICKS_TOTAL / 3600.0))
             log(string.format("FINAL_RATE_%s: %d (%.2f/min)", k, v, rate_spm))
         end
+        local trace_payload = {
+            ticks_total = TICKS_TOTAL,
+            sample_interval = 60,
+            samples = storage.telemetry_samples
+        }
+        helpers.write_file("telemetry_trace.json", helpers.table_to_json(trace_payload))
+        log("BENCH_TRACE_WRITTEN: telemetry_trace.json")
     end
 end)
 """
@@ -417,6 +614,14 @@ end)
             if "Performed" in line and "in" in line:
                 results["summary"] = line.strip()
 
+    # Load telemetry trace JSON if generated
+    trace_file = data_dir / "script-output" / "telemetry_trace.json"
+    if trace_file.is_file():
+        try:
+            results["telemetry_trace"] = json.loads(trace_file.read_text())
+        except Exception as e:
+            results["telemetry_trace_error"] = str(e)
+
     return results
 
 
@@ -427,21 +632,51 @@ def main() -> int:
     parser.add_argument("netlist_file", type=Path, help="Path to netlist JSON file")
     parser.add_argument("--ticks", type=int, default=3600, help="Simulation ticks to run")
     parser.add_argument("--game", type=Path, default=None, help="Path to Factorio binary")
+    parser.add_argument("--def", dest="def_file", type=Path, default=None, help="Path to factory.def file")
+    parser.add_argument("--pins", dest="pins_file", type=Path, default=None, help="Path to pins.json file")
+    parser.add_argument("--trace-out", type=Path, default=None, help="Path to export telemetry trace JSON")
+    parser.add_argument("--analyze", action="store_true", help="Run shape-based telemetry analysis")
+    parser.add_argument("--json-out", type=Path, default=None, help="Path to export analysis results as JSON")
 
     args = parser.parse_args()
     game_bin = find_factorio_binary(args.game)
     bp_string = args.blueprint_file.read_text().strip()
     netlist_data = json.loads(args.netlist_file.read_text())
 
+    input_pins, output_pins = resolve_factory_pins(
+        args.blueprint_file,
+        netlist_data,
+        pins_file=args.pins_file,
+        def_file=args.def_file,
+    )
+
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="factorilog-bench-") as tmp:
         work_dir = Path(tmp)
-        results = run_benchmark(bp_string, netlist_data, game_bin, work_dir, ticks=args.ticks)
+        results = run_benchmark(
+            bp_string,
+            netlist_data,
+            game_bin,
+            work_dir,
+            input_pins=input_pins,
+            output_pins=output_pins,
+            ticks=args.ticks,
+        )
+
+    if args.trace_out and "telemetry_trace" in results:
+        args.trace_out.parent.mkdir(parents=True, exist_ok=True)
+        args.trace_out.write_text(json.dumps(results["telemetry_trace"], indent=2))
+        print(f"\nExported telemetry trace to: {args.trace_out}")
 
     print("\nBenchmark Execution Results:")
     print(f"  Simulation ticks: {results['ticks']} ({results['ticks'] / 60.0:.1f} game seconds)")
     print(f"  Revived entities: {results['revived']}")
     if "summary" in results:
         print(f"  Speed: {results['summary']}")
+
+    if "telemetry_trace" in results:
+        t_data = results["telemetry_trace"]
+        num_samples = len(t_data.get("samples", []))
+        print(f"  Telemetry trace: {num_samples} samples collected across taps")
 
     if "bench_logs" in results:
         print("\nDiagnostic Logs:")
@@ -458,6 +693,21 @@ def main() -> int:
             print(f"  {pack:25s}: {rate}")
     else:
         print("  No science pack output recorded during this interval.")
+
+    if args.analyze and "telemetry_trace" in results:
+        try:
+            import analyze_telemetry
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import analyze_telemetry
+
+        analysis = analyze_telemetry.analyze_shapes(results["telemetry_trace"], netlist_data)
+        if args.json_out:
+            args.json_out.parent.mkdir(parents=True, exist_ok=True)
+            args.json_out.write_text(json.dumps(analysis, indent=2))
+            print(f"\nExported shape analysis JSON to: {args.json_out}")
+
+        print("\n" + analyze_telemetry.format_markdown_report(analysis))
 
     return 0
 

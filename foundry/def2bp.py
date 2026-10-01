@@ -455,6 +455,8 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         for w in net.get("wires", []):
+            if w.get("layer") in ("M5", "M6"):
+                continue
             p1 = (
                 round(math.floor(w["x1"] * scale) + 0.5, 2),
                 round(math.floor(w["y1"] * scale) + 0.5, 2),
@@ -503,6 +505,9 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                 d = DIRECTION_SOUTH if to_p[1] >= from_p[1] else DIRECTION_NORTH
             else:
                 d = DIRECTION_EAST if to_p[0] >= from_p[0] else DIRECTION_WEST
+
+            if layer in ("M5", "M6"):
+                continue
 
             if layer in ("M3", "M4"):
                 if from_p[0] == to_p[0]:
@@ -949,6 +954,60 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     return entities
 
 
+def extract_pins(
+    def_data: dict[str, Any], netlist_data: dict[str, Any]
+) -> dict[str, list[dict[str, Any]]]:
+    """Extract input and output pin coordinates and types by material name."""
+    scale = 1.0 / float(def_data.get("units", 1000))
+    fluids = set(netlist_data.get("fluids") or []) | {
+        "crude-oil",
+        "water",
+        "petroleum-gas",
+        "heavy-oil",
+        "light-oil",
+        "sulfuric-acid",
+        "lubricant",
+        "steam",
+    }
+    inputs: list[dict[str, Any]] = []
+    outputs: list[dict[str, Any]] = []
+
+    known_materials = list(netlist_data.get("inputs", [])) + list(netlist_data.get("outputs", []))
+
+    for pin in def_data.get("pins", []):
+        net_name = pin.get("net", pin["name"]).replace("_", "-")
+        direction = pin.get("direction", "INPUT").upper()
+
+        mat = net_name
+        for known in known_materials:
+            if known == mat or known.replace("-", "_") == pin.get("net", ""):
+                mat = known
+                break
+
+        x = math.floor(pin["x"] * scale) + 0.5
+        y = math.floor(pin["y"] * scale) + 0.5
+        pin_type = "pipe" if mat in fluids else "belt"
+
+        entry = {
+            "name": mat,
+            "x": x,
+            "y": y,
+            "type": pin_type,
+        }
+        if direction == "INPUT":
+            inputs.append(entry)
+        elif direction == "OUTPUT":
+            outputs.append(entry)
+
+    inputs.sort(key=lambda p: (p["name"], p["x"], p["y"]))
+    outputs.sort(key=lambda p: (p["name"], p["x"], p["y"]))
+
+    return {
+        "inputs": inputs,
+        "outputs": outputs,
+    }
+
+
 def def_to_blueprint(def_text: str, netlist_data: dict[str, Any], label: str = "factory") -> str:
     """Convert DEF text and netlist metadata into a blueprint exchange string."""
     def_data = parse_def(def_text)
@@ -969,6 +1028,12 @@ def main() -> int:
         type=Path,
         default=None,
         help="Path to write blueprint output",
+    )
+    parser.add_argument(
+        "--pins-out",
+        type=Path,
+        default=None,
+        help="Path to write extracted pins JSON",
     )
     parser.add_argument(
         "--label",
@@ -1007,6 +1072,11 @@ def main() -> int:
         args.out.write_text(output_text + "\n")
     else:
         sys.stdout.write(output_text + "\n")
+
+    if args.pins_out:
+        pins_data = extract_pins(def_data, netlist_data)
+        args.pins_out.parent.mkdir(parents=True, exist_ok=True)
+        args.pins_out.write_text(json.dumps(pins_data, indent=2) + "\n")
 
     return 0
 
