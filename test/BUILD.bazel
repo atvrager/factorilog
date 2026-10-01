@@ -15,7 +15,9 @@ py_test(
     name = "e2e_test",
     size = "large",
     srcs = ["test_e2e.py"],
+    args = ["$(location //flow:blueprint)"],
     data = [
+        "//flow:blueprint",
         "//flow:flow_scripts",
         "//foundry:py_srcs",
         "//test:fixture",

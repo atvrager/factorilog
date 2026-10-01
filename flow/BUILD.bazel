@@ -1,9 +1,14 @@
 # Flow scripts and OpenROAD automation.
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//flow:openroad.bzl", "factorilog_blueprint", "factorilog_synth", "openroad_stage")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "1_floorplan.tcl",
+    "2_place.tcl",
+    "3_route.tcl",
+    "4_sta.tcl",
     "factorilog.tcl",
     "orfs.sh",
     "verify_def.tcl",
@@ -26,4 +31,72 @@ py_binary(
     name = "check_blueprint",
     srcs = ["check_blueprint.py"],
     main = "check_blueprint.py",
+)
+
+# 1. Synthesis Stage: dump fixture -> Verilog, LEF, Liberty, JSON
+factorilog_synth(
+    name = "synth",
+    cells_v = "cells.v",
+    dump = "//test:data/dump-fixture.json",
+    netlist_json = "netlist.json",
+    netlist_v = "netlist.v",
+    spc = "60.0",
+    tech_lef = "tech.lef",
+    tech_lib = "tech.lib",
+)
+
+# 2. Floorplan Stage: netlist + LEF + Lib -> 1_floorplan.odb
+openroad_stage(
+    name = "floorplan",
+    outs = ["1_floorplan.odb"],
+    script = "1_floorplan.tcl",
+    srcs = [
+        ":netlist.v",
+        ":tech.lef",
+        ":tech.lib",
+    ],
+)
+
+# 3. Placement Stage: 1_floorplan.odb -> 2_placed.odb
+openroad_stage(
+    name = "place",
+    outs = ["2_placed.odb"],
+    script = "2_place.tcl",
+    srcs = [
+        ":1_floorplan.odb",
+    ],
+)
+
+# 4. Routing Stage: 2_placed.odb -> 3_routed.odb, factory.def, route_drc.rpt
+openroad_stage(
+    name = "route",
+    outs = [
+        "3_routed.odb",
+        "factory.def",
+        "route_drc.rpt",
+    ],
+    script = "3_route.tcl",
+    srcs = [
+        ":2_placed.odb",
+    ],
+)
+
+# 5. Timing Analysis Stage: 3_routed.odb + tech.lib -> timing.rpt
+openroad_stage(
+    name = "sta",
+    outs = ["timing.rpt"],
+    script = "4_sta.tcl",
+    srcs = [
+        ":3_routed.odb",
+        ":tech.lib",
+    ],
+)
+
+# 6. Blueprint Stage: factory.def + netlist.json -> factory.blueprint
+factorilog_blueprint(
+    name = "blueprint",
+    blueprint = "factory.blueprint",
+    def_file = ":factory.def",
+    label_text = "factory_60spm",
+    netlist_json = ":netlist.json",
 )
