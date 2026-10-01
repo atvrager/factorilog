@@ -34,3 +34,19 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "routing_primitives_test",
+    size = "medium",
+    srcs = ["test_routing_primitives.py"],
+    local = True,
+    main = "test_routing_primitives.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//flow:check_blueprint_lib",
+    ],
+)
