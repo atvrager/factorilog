@@ -206,8 +206,7 @@ def emit_verilog(nl: Netlist, merge_plans: dict[str, list[tuple[str, str, str, s
         module = sanitize(inst.cell_key)
         conns = [f".{sanitize(p)}({sanitize(p)})" for p in cell["inputs"]]
         for port in cell["outputs"]:
-            driver_net = nl.nets[port]
-            if len(driver_net.drivers) > 1:
+            if port in merge_plans:
                 conns.append(f".{sanitize(port)}({sanitize(port)}__{inst.name})")
             else:
                 conns.append(f".{sanitize(port)}({sanitize(port)})")

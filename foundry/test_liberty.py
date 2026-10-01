@@ -43,6 +43,13 @@ class LibertyTest(unittest.TestCase):
         text = liberty.write_liberty([cell], "/dev/null")
         self.assertIn("area : 25.000 ;", text)
 
+    def test_craft_delay_is_recipe_duration(self) -> None:
+        # assembling-machine-3 has crafting speed 1.25.
+        # electronic-circuit has energy 0.5 s. Delay = 0.5 / 1.25 = 0.4000 s.
+        self.assertIn("delay_model : table_lookup ;", self.text)
+        self.assertIn('cell_rise (scalar) { values ("0.4000") ; }', self.text)
+        self.assertIn('rise_transition (scalar) { values ("0.0400") ; }', self.text)
+
     def test_leakage_is_the_power_draw(self) -> None:
         # The electric furnace draws 180 kW. The unit is 1mW.
         self.assertIn("cell_leakage_power : 180.000000 ;", self.text)

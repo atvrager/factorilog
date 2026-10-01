@@ -55,3 +55,12 @@ set die_w [expr {([$die xMax] - [$die xMin]) / $dbu}]
 set die_h [expr {([$die yMax] - [$die yMin]) / $dbu}]
 puts "verify: die $die_w x $die_h tiles, [llength $insts] blocks placed,\
  $routed routed nets, [llength [$block getNets]] nets, [llength [$block getBTerms]] ports"
+
+# --- timing ---------------------------------------------------------
+# Static timing analysis across the factory combinational paths.
+# Virtual clock anchors the raw inputs and science pack outputs.
+create_clock -name virtual_clk -period 1000
+set_input_delay -clock virtual_clk 0 [all_inputs]
+set_output_delay -clock virtual_clk 0 [all_outputs]
+report_checks -path_delay max -fields {input_pins slew capacitance} -digits 4
+report_worst_slack -max

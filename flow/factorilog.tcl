@@ -122,3 +122,11 @@ detailed_route -output_drc route_drc.rpt -verbose 1
 
 write_def factory.def
 puts "factorilog: routed DEF written"
+
+# --- timing ---------------------------------------------------------
+# Static timing analysis across factory combinational paths.
+create_clock -name virtual_clk -period 1000
+set_input_delay -clock virtual_clk 0 [all_inputs]
+set_output_delay -clock virtual_clk 0 [all_outputs]
+report_checks -path_delay max -fields {input_pins slew capacitance} -digits 4
+report_worst_slack -max

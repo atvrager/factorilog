@@ -57,7 +57,10 @@ def _template_lines() -> list[str]:
 
 
 def _timing_arcs(cell: dict[str, Any]) -> list[str]:
-    """One combinational arc per input. Zero delay for now."""
+    """One combinational arc per input. Craft delay models propagation."""
+    cpm = cell.get("crafts_per_minute", 0.0)
+    delay = f"{60.0 / cpm:.4f}" if cpm > 0.0 else "0.0000"
+    trans = f"{0.1 * float(delay):.4f}" if cpm > 0.0 else "0.0100"
     lines: list[str] = []
     for port in cell["inputs"]:
         related = netlist.sanitize(port)
@@ -66,10 +69,10 @@ def _timing_arcs(cell: dict[str, Any]) -> list[str]:
                 "    timing () {",
                 f'      related_pin : "{related}" ;',
                 "      timing_type : combinational ;",
-                '      cell_rise (in_slew) { values ("0") ; }',
-                '      cell_fall (in_slew) { values ("0") ; }',
-                '      rise_transition (out_cap) { values ("0") ; }',
-                '      fall_transition (out_cap) { values ("0") ; }',
+                f'      cell_rise (scalar) {{ values ("{delay}") ; }}',
+                f'      cell_fall (scalar) {{ values ("{delay}") ; }}',
+                f'      rise_transition (scalar) {{ values ("{trans}") ; }}',
+                f'      fall_transition (scalar) {{ values ("{trans}") ; }}',
                 "    }",
             ]
         )
@@ -129,6 +132,8 @@ def write_liberty(cells: list[dict[str, Any]], path: str) -> str:
         "/* Stubs today. The comment at each value names the game",
         "   measurement that replaces it. */",
         "library (factorilog) {",
+        "  technology (cmos) ;",
+        "  delay_model : table_lookup ;",
         '  time_unit : "1ns" ;',
         '  voltage_unit : "1V" ;',
         '  current_unit : "1mA" ;',
@@ -138,7 +143,6 @@ def write_liberty(cells: list[dict[str, Any]], path: str) -> str:
         "  /* one day: the capacitive unit becomes items or fluid units,",
         "     once storage-as-capacitance has measured numbers */",
     ]
-    lines.extend(_template_lines())
     for cell in sorted(cells, key=lambda c: c["cell"]):
         lines.extend(cell_lines(cell))
     lines.append("}")
