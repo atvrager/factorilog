@@ -345,7 +345,7 @@ script.on_init(function()
         -- Scan perimeter belts cardinally (exclude diagonal corners)
         local nearby_belts = surface.find_entities_filtered{
             type = {"transport-belt", "underground-belt"},
-            area = {{box.left_top.x - 1.2, box.left_top.y - 1.2}, {box.right_bottom.x + 1.2, box.right_bottom.y + 1.2}}
+            area = {{box.left_top.x - 2.2, box.left_top.y - 2.2}, {box.right_bottom.x + 2.2, box.right_bottom.y + 2.2}}
         }
         local in_belts = {}
         local out_belts = {}

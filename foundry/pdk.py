@@ -193,11 +193,17 @@ class Pdk:
         if proto is None:
             return None
         box = proto["collision_box"]
-        width = math.ceil(box[1][0] - box[0][0])
-        height = math.ceil(box[1][1] - box[0][1])
+        machine_width = math.ceil(box[1][0] - box[0][0])
+        machine_height = math.ceil(box[1][1] - box[0][1])
         recipe_proto = self.data.recipes[recipe]
         speed = float(proto.get("crafting_speed", 1.0))
         seconds = solve.Data.craft_seconds(recipe_proto)
+        inputs = [solve.name_of(e) for e in solve.Data.ingredients_of(recipe_proto)]
+        outputs = [solve.name_of(e) for e in solve.Data.results_of(recipe_proto)]
+        has_inputs = bool(inputs)
+        has_outputs = bool(outputs)
+        width = machine_width + (1 if has_inputs else 0) + (1 if has_outputs else 0)
+        height = machine_height
         # One machine crafts speed * 60 / craft_seconds per minute. The
         # solver's count formula is the inverse of this number.
         return {
@@ -206,10 +212,12 @@ class Pdk:
             "recipe": recipe,
             "width": width,
             "height": height,
+            "machine_width": machine_width,
+            "machine_height": machine_height,
             "watts": watts_of(proto.get("energy_usage", 0)),
             "crafts_per_minute": 60.0 * speed / seconds,
-            "inputs": [solve.name_of(e) for e in solve.Data.ingredients_of(recipe_proto)],
-            "outputs": [solve.name_of(e) for e in solve.Data.results_of(recipe_proto)],
+            "inputs": inputs,
+            "outputs": outputs,
         }
 
     def tech_json(self) -> dict[str, Any]:

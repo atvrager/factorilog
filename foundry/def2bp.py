@@ -24,6 +24,9 @@ DIRECTION_EAST = 4
 DIRECTION_SOUTH = 8
 DIRECTION_WEST = 12
 
+# Factorio 2.0 wire connector IDs: pole_copper = 5.
+WIRE_CONNECTOR_POLE_COPPER = 5
+
 
 def parse_def(text: str) -> dict[str, Any]:
     """Parse DEF text into components, nets, pins, and design units."""
@@ -150,7 +153,116 @@ def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
     return DIRECTION_EAST if x2 >= x1 else DIRECTION_WEST
 
 
-def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> list[dict[str, Any]]:
+def entity_size(name: str) -> tuple[float, float]:
+    """Return width and height of named entity."""
+    if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
+        return 3.0, 3.0
+    if "oil-refinery" in name:
+        return 5.0, 5.0
+    if "pump" in name:
+        return 1.0, 2.0
+    return 1.0, 1.0
+
+
+def check_power(
+    entities: list[dict[str, Any]], supply_radius: float = 3.5
+) -> list[dict[str, Any]]:
+    """Return list of powered entities lacking electric pole supply coverage."""
+    poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
+    powered = [
+        e
+        for e in entities
+        if any(
+            k in e.get("name", "") for k in ("assembling-machine", "furnace", "inserter", "pump")
+        )
+    ]
+    unpowered = []
+    for e in powered:
+        ex = e["position"]["x"]
+        ey = e["position"]["y"]
+        w, h = entity_size(e.get("name", ""))
+        covered = any(
+            max(
+                max(0.0, abs(ex - p["position"]["x"]) - w / 2.0),
+                max(0.0, abs(ey - p["position"]["y"]) - h / 2.0),
+            )
+            <= supply_radius
+            for p in poles
+        )
+        if not covered:
+            unpowered.append(e)
+    return unpowered
+
+
+def check_collisions(
+    entities: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Check for surface entity collisions. Return list of colliding entity pairs."""
+    occupied: dict[tuple[float, float], dict[str, Any]] = {}
+    collisions: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for ent in entities:
+        epos = ent["position"]
+        tiles = [(round(epos["x"], 2), round(epos["y"], 2))]
+        ename = ent.get("name", "")
+        if ename == "splitter":
+            d = ent.get("direction", 0)
+            if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                tiles.append((round(epos["x"] + 1.0, 2), round(epos["y"], 2)))
+            else:
+                tiles.append((round(epos["x"], 2), round(epos["y"] + 1.0, 2)))
+        for t in tiles:
+            if t in occupied:
+                collisions.append((occupied[t], ent))
+            else:
+                occupied[t] = ent
+    return collisions
+
+
+def check_underground_pairing(
+    entities: list[dict[str, Any]], max_span: int = 6
+) -> list[dict[str, Any]]:
+    """Verify that all underground belt entities pair correctly."""
+    ugs = [e for e in entities if e.get("name") == "underground-belt"]
+    inputs = [e for e in ugs if e.get("type") == "input"]
+    outputs = [e for e in ugs if e.get("type") == "output"]
+    matched_outputs = set()
+    unpaired: list[dict[str, Any]] = []
+    for inp in inputs:
+        ix, iy = inp["position"]["x"], inp["position"]["y"]
+        d = inp.get("direction", 0)
+        found = None
+        for o in outputs:
+            if id(o) in matched_outputs:
+                continue
+            ox, oy = o["position"]["x"], o["position"]["y"]
+            od = o.get("direction", 0)
+            if od != d:
+                continue
+            if d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= max_span:
+                found = o
+                break
+            elif d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= max_span:
+                found = o
+                break
+            elif d == DIRECTION_SOUTH and ix == ox and 1 <= oy - iy <= max_span:
+                found = o
+                break
+            elif d == DIRECTION_NORTH and ix == ox and 1 <= iy - oy <= max_span:
+                found = o
+                break
+        if found:
+            matched_outputs.add(id(found))
+        else:
+            unpaired.append(inp)
+    for o in outputs:
+        if id(o) not in matched_outputs:
+            unpaired.append(o)
+    return unpaired
+
+
+def build_entities(
+    def_data: dict[str, Any], netlist_data: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Translate parsed DEF and netlist into Factorio blueprint entities."""
     scale = 1.0 / float(def_data.get("units", 1000))
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
@@ -296,29 +408,47 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
         else:
             cw = int(cell.get("width", 3))
             ch = int(cell.get("height", 3))
+            m_w = int(cell.get("machine_width", 3))
+            m_h = int(cell.get("machine_height", 3))
             machine = cell.get("machine", "assembling-machine-3")
             recipe = inst.get("recipe", cell.get("recipe", ""))
             extra = {"recipe": recipe} if recipe else None
+            inputs = cell.get("inputs", [])
+            outputs = cell.get("outputs", [])
+            in_offset = 1.0 if inputs else 0.0
+
+            # 1. Place the machine centered within its building slot
             ent = add_entity(
                 machine,
-                gx + cw / 2.0,
-                gy + ch / 2.0,
+                gx + in_offset + m_w / 2.0,
+                gy + m_h / 2.0,
                 direction=DIRECTION_NORTH,
                 extra=extra,
             )
             inst_to_entity[cname] = ent
-            for tx in range(cw):
-                for ty in range(ch):
-                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
 
-    def choose_belt_tier(span_tiles: int) -> str:
-        if span_tiles <= 5:
-            return "underground-belt"
-        if span_tiles <= 7:
-            return "fast-underground-belt"
-        if span_tiles <= 9:
-            return "express-underground-belt"
-        return "turbo-underground-belt"
+            # 2. Place input fast-inserters (pickup from West belt, drop into East machine)
+            for idx, _port in enumerate(sorted(inputs)):
+                cy = (ch - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= ch else idx + 0.5
+                add_entity("fast-inserter", gx + 0.5, gy + cy, direction=DIRECTION_WEST)
+                occupied_positions.add((round(gx + 0.5, 2), round(gy + cy, 2)))
+
+            # 3. Place output fast-inserters (pickup from West machine, drop onto East belt)
+            for idx, _port in enumerate(sorted(outputs)):
+                cy = (ch - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= ch else idx + 0.5
+                add_entity("fast-inserter", gx + cw - 0.5, gy + cy, direction=DIRECTION_WEST)
+                occupied_positions.add((round(gx + cw - 0.5, 2), round(gy + cy, 2)))
+
+            # 4. Mark machine core footprint as occupied
+            for tx in range(m_w):
+                for ty in range(m_h):
+                    occupied_positions.add(
+                        (round(gx + in_offset + tx + 0.5, 2), round(gy + ty + 0.5, 2))
+                    )
+
+    def choose_belt_tier(_span_tiles: int) -> str:
+        """Select underground belt tier. Use tier 1 yellow belt."""
+        return "underground-belt"
 
     def segment_run(
         start: float,
@@ -614,8 +744,8 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
     }
     net_map = {n.get("name", ""): n for n in def_data.get("nets", [])}
 
-    # 2b. Refine surface belt directions: orient belts away from drivers to eliminate reverse collisions
-    for nname, tiles in net_surface_tiles.items():
+    # 2b. Refine surface belt directions: disabled (wire-graph Dijkstra in Step 2 preserves serpentine paths)
+    for nname, tiles in {}.items():
         if not tiles:
             continue
         drivers: list[tuple[float, float]] = []
@@ -761,7 +891,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                         tile_to_nets[(cur, cy)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else 11
+                    max_allowed_span = 10 if is_fluid else 5
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(h_start, cy)].add(nname)
@@ -851,7 +981,7 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                         tile_to_nets[(cx, cur)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else 11
+                    max_allowed_span = 10 if is_fluid else 5
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(cx, h_start)].add(nname)
@@ -893,13 +1023,6 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                             )
     net_map = {n.get("name", ""): n for n in def_data.get("nets", [])}
 
-    # 4. Resolve surface conflicts using legal straight-run jumpers
-    jumpers: list[tuple[str, tuple[float, float], tuple[float, float], int, bool]] = []
-    used_underground_endpoints: dict[tuple[float, float], int] = {}
-    for ue in underground_entities:
-        pos_u = (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2))
-        used_underground_endpoints[pos_u] = ue.get("direction", 0)
-
     DIR_STEPS = {
         DIRECTION_EAST: (1, 0),
         DIRECTION_WEST: (-1, 0),
@@ -912,6 +1035,13 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
         DIRECTION_SOUTH: DIRECTION_NORTH,
         DIRECTION_NORTH: DIRECTION_SOUTH,
     }
+
+    # 4. Resolve surface conflicts using legal straight-run jumpers
+    jumpers: list[tuple[str, tuple[float, float], tuple[float, float], int, bool]] = []
+    used_underground_endpoints: dict[tuple[float, float], int] = {}
+    for ue in underground_entities:
+        pos_u = (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2))
+        used_underground_endpoints[pos_u] = ue.get("direction", 0)
 
     conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
     for pos in conflicts:
@@ -1127,6 +1257,185 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                                     ent["direction"] = cand_d
                                     break
 
+    # 7.5. Power Distribution Network (PDN) generation
+    mst_connections: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    pole_entities: dict[tuple[float, float], dict[str, Any]] = {}
+    powered = [
+        e
+        for e in entities
+        if any(
+            k in e.get("name", "") for k in ("assembling-machine", "furnace", "inserter", "pump")
+        )
+    ]
+    if powered:
+        surface_occupied = set(occupied_positions)
+        for ent in entities:
+            ep = ent["position"]
+            surface_occupied.add((round(ep["x"], 2), round(ep["y"], 2)))
+            ename = ent.get("name", "")
+            if ename == "splitter":
+                d = ent.get("direction", 0)
+                if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                    surface_occupied.add((round(ep["x"] + 1.0, 2), round(ep["y"], 2)))
+                else:
+                    surface_occupied.add((round(ep["x"], 2), round(ep["y"] + 1.0, 2)))
+
+        xs = [e["position"]["x"] for e in powered]
+        ys = [e["position"]["y"] for e in powered]
+        min_x, max_x = int(min(xs)) - 1, int(max(xs)) + 4
+        min_y, max_y = int(min(ys)) - 1, int(max(ys)) + 4
+        cands: list[tuple[float, float]] = []
+        for x in range(min_x, max_x, 6):
+            for y in range(min_y, max_y, 6):
+                cand = (math.floor(x) + 0.5, math.floor(y) + 0.5)
+                if cand in surface_occupied:
+                    for dx in (0, 1, -1, 2, -2, 3, -3):
+                        for dy in (0, 1, -1, 2, -2, 3, -3):
+                            c2 = (cand[0] + dx, cand[1] + dy)
+                            if c2 not in surface_occupied:
+                                cand = c2
+                                break
+                        if cand not in surface_occupied:
+                            break
+                if cand not in surface_occupied:
+                    cands.append(cand)
+
+        def is_covered(ent: dict[str, Any], cand_pos: tuple[float, float]) -> bool:
+            ex = ent["position"]["x"]
+            ey = ent["position"]["y"]
+            w, h = entity_size(ent.get("name", ""))
+            return (
+                max(
+                    max(0.0, abs(ex - cand_pos[0]) - w / 2.0),
+                    max(0.0, abs(ey - cand_pos[1]) - h / 2.0),
+                )
+                <= 3.5
+            )
+
+        uncovered = set(range(len(powered)))
+        chosen: set[tuple[float, float]] = set()
+        while uncovered:
+            best_cand = None
+            best_covers: set[int] = set()
+            for c in cands:
+                if c in chosen:
+                    continue
+                covers = {i for i in uncovered if is_covered(powered[i], c)}
+                if len(covers) > len(best_covers):
+                    best_covers = covers
+                    best_cand = c
+            if not best_cand:
+                break
+            chosen.add(best_cand)
+            uncovered -= best_covers
+
+        for i in list(uncovered):
+            px, py = powered[i]["position"]["x"], powered[i]["position"]["y"]
+            w, h = entity_size(powered[i].get("name", ""))
+            reach = int(math.ceil(3.5 + max(w, h) / 2.0))
+            for dx in range(-reach, reach + 1):
+                for dy in range(-reach, reach + 1):
+                    cand = (math.floor(px + dx) + 0.5, math.floor(py + dy) + 0.5)
+                    if cand not in surface_occupied and cand not in chosen:
+                        if is_covered(powered[i], cand):
+                            chosen.add(cand)
+                            cands.append(cand)
+                            uncovered.remove(i)
+                            break
+                if i not in uncovered:
+                    break
+
+        # Connect chosen poles through Steiner MST with maximum wire span 9.0 tiles
+        cand_list = list(cands)
+        cand_adj: dict[tuple[float, float], list[tuple[float, float]]] = {c: [] for c in cand_list}
+        for i in range(len(cand_list)):
+            for j in range(i + 1, len(cand_list)):
+                if (
+                    math.hypot(cand_list[i][0] - cand_list[j][0], cand_list[i][1] - cand_list[j][1])
+                    <= 9.0
+                ):
+                    cand_adj[cand_list[i]].append(cand_list[j])
+                    cand_adj[cand_list[j]].append(cand_list[i])
+
+        all_poles = set(chosen)
+        if chosen:
+            connected = {next(iter(chosen))}
+            unconnected = set(chosen) - connected
+
+            while unconnected:
+                dist: dict[tuple[float, float], int] = dict.fromkeys(connected, 0)
+                parent: dict[tuple[float, float], tuple[float, float]] = {}
+                pq: list[tuple[int, tuple[float, float]]] = [(0, p) for p in connected]
+                target = None
+                while pq:
+                    d, u = heapq.heappop(pq)
+                    if u in unconnected:
+                        target = u
+                        break
+                    if d > dist.get(u, 1_000_000_000):
+                        continue
+                    for v in cand_adj.get(u, []):
+                        if d + 1 < dist.get(v, 1_000_000_000):
+                            dist[v] = d + 1
+                            parent[v] = u
+                            heapq.heappush(pq, (d + 1, v))
+                if not target:
+                    break
+                curr = target
+                while curr not in connected:
+                    all_poles.add(curr)
+                    connected.add(curr)
+                    curr = parent[curr]
+                unconnected.remove(target)
+
+        for p in sorted(all_poles):
+            pole_ent = add_entity("medium-electric-pole", p[0], p[1])
+            pole_entities[p] = pole_ent
+            surface_occupied.add(p)
+
+        pole_list = sorted(all_poles)
+        pole_edges: list[tuple[float, int, int]] = []
+        for i in range(len(pole_list)):
+            for j in range(i + 1, len(pole_list)):
+                d = math.hypot(
+                    pole_list[i][0] - pole_list[j][0],
+                    pole_list[i][1] - pole_list[j][1],
+                )
+                if d <= 9.0:
+                    pole_edges.append((d, i, j))
+        pole_edges.sort()
+        parent_mst = list(range(len(pole_list)))
+
+        def find_root(node: int) -> int:
+            if parent_mst[node] == node:
+                return node
+            parent_mst[node] = find_root(parent_mst[node])
+            return parent_mst[node]
+
+        for _d, u, v in pole_edges:
+            ru, rv = find_root(u), find_root(v)
+            if ru != rv:
+                parent_mst[ru] = rv
+                mst_connections.append((pole_list[u], pole_list[v]))
+
+    unpowered_ents = check_power(entities)
+    if unpowered_ents:
+        raise RuntimeError(
+            f"Power check failed: {len(unpowered_ents)} entities lack electric pole coverage: {unpowered_ents[:5]}"
+        )
+
+    collision_pairs = check_collisions(entities)
+    if collision_pairs:
+        raise RuntimeError(
+            f"Collision check failed: {len(collision_pairs)} overlapping entity pairs detected"
+        )
+
+    unpaired_hoods = check_underground_pairing(entities)
+    if unpaired_hoods:
+        raise RuntimeError(
+            f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected"
+        )
+
     # 8. Wire circuit telemetry connections
     def connect_wire(
         ent_a: dict[str, Any], port_a: int, ent_b: dict[str, Any], port_b: int, color: str
@@ -1216,7 +1525,21 @@ def build_entities(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> li
                         resolved_links.append(link)
                 colors[color] = resolved_links
 
-    return entities
+    wires: list[list[int]] = []
+    for p1, p2 in mst_connections:
+        ent1 = pole_entities.get(p1)
+        ent2 = pole_entities.get(p2)
+        if ent1 and ent2 and "entity_number" in ent1 and "entity_number" in ent2:
+            wires.append(
+                [
+                    ent1["entity_number"],
+                    WIRE_CONNECTOR_POLE_COPPER,
+                    ent2["entity_number"],
+                    WIRE_CONNECTOR_POLE_COPPER,
+                ]
+            )
+
+    return entities, wires
 
 
 def extract_pins(
@@ -1276,8 +1599,8 @@ def extract_pins(
 def def_to_blueprint(def_text: str, netlist_data: dict[str, Any], label: str = "factory") -> str:
     """Convert DEF text and netlist metadata into a blueprint exchange string."""
     def_data = parse_def(def_text)
-    entities = build_entities(def_data, netlist_data)
-    return blueprint.encode(entities, label)
+    entities, wires = build_entities(def_data, netlist_data)
+    return blueprint.encode(entities, label, wires=wires)
 
 
 def main() -> int:
@@ -1318,10 +1641,10 @@ def main() -> int:
     netlist_data = json.loads(args.netlist_file.read_text())
 
     def_data = parse_def(def_text)
-    entities = build_entities(def_data, netlist_data)
+    entities, wires = build_entities(def_data, netlist_data)
 
     if args.json:
-        document = {
+        document: dict[str, Any] = {
             "blueprint": {
                 "item": "blueprint",
                 "label": args.label,
@@ -1329,9 +1652,11 @@ def main() -> int:
                 "entities": entities,
             }
         }
+        if wires:
+            document["blueprint"]["wires"] = wires
         output_text = json.dumps(document, indent=2)
     else:
-        output_text = blueprint.encode(entities, args.label)
+        output_text = blueprint.encode(entities, args.label, wires=wires)
 
     if args.out:
         args.out.write_text(output_text + "\n")

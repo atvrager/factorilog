@@ -130,7 +130,7 @@ factorilog_blueprint(
     name = "blueprint",
     blueprint = "factory.blueprint",
     def_file = ":factory.def",
-    label_text = "red_science_60spm",
+    label_text = "red_science_60spm_v2",
     netlist_json = ":netlist.json",
     pins_json = "pins.json",
 )

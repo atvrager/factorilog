@@ -274,7 +274,10 @@ class TestRoutingPrimitives(unittest.TestCase):
 
     def test_pump_blueprint_placement_and_footprint(self) -> None:
         """Pump blueprint builds cleanly with 1x2 footprint in Factorio."""
-        import blueprint
+        try:
+            import blueprint
+        except ImportError:
+            from foundry import blueprint
 
         entities = [
             {"name": "pipe", "position": {"x": 0.5, "y": 2.5}, "entity_number": 1},

@@ -32,7 +32,7 @@ class LefTest(unittest.TestCase):
 
     def test_macro_structure(self) -> None:
         self.assertIn("MACRO assembling_machine_3__electronic_circuit", self.text)
-        self.assertIn("SIZE 3.000 BY 3.000 ;", self.text)
+        self.assertIn("SIZE 5.000 BY 3.000 ;", self.text)
         self.assertIn("PIN iron_plate", self.text)
         self.assertIn("DIRECTION OUTPUT ;", self.text)
 

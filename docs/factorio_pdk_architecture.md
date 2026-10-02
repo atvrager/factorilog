@@ -487,3 +487,94 @@ flowchart TD
    - Run headless Factorio simulation for $T_{\text{sim\_ticks}} \ge T_{\text{crit}} + 3600$ ticks.
    - Sample item production rates every 60 ticks.
    - Confirm sustained production of `automation-science-pack` at 60.0 SPM with zero starvation.
+
+---
+
+## 12. Objective-Driven Test Suite Hierarchy
+
+The test architecture uses four progressive levels. Each level validates specific Factorio objectives before full factory integration.
+
+```mermaid
+flowchart TD
+    L0["Level 0: Routing Primitives<br>(Belts, Undergrounds, Pipes, Pumps)"] --> L1["Level 1: Single Machine Cells<br>(Assemblers, Furnaces, Inserters, Poles)"]
+    L1 --> L2["Level 2: Two-Stage Machine Chains<br>(Inter-Cell Belt Handoffs, Buffering)"]
+    L2 --> L3["Level 3: Full Factory Integration<br>(OpenROAD P&R, 60.0 SPM Sustained Rate)"]
+```
+
+### 12.1 Level 0: Physical Routing Primitives
+The file `test/test_routing_primitives.py` tests transport elements in small Factorio worlds:
+- **Belt Kinematics**:
+  - Belts are one-way and turn at 90-degree angles.
+  - Direct belt turns preserve distinct item lanes.
+  - Perpendicular belt intersections sideload items onto a single lane.
+- **Underground Belts**:
+  - An underground pair requires an input hood and an output hood on the surface plane.
+  - Belts cross underground spans without colliding with surface entities.
+- **Fluid Mechanics**:
+  - Pipe-to-ground pairs span underground distances between two surface endpoints.
+  - Powered pumps enforce unidirectional flow and prevent reverse fluid movement.
+
+### 12.2 Level 1: Single Machine Cells
+The file `test/test_machine_cells.py` tests individual PDK standard cells through OpenROAD and headless Factorio:
+- **Single-Input Assembler**:
+  - An `assembling-machine-1` crafts `iron-gear-wheel` from `iron-plate`.
+  - OpenROAD routes the `iron-plate` input pin and `iron-gear-wheel` output pin.
+  - A fast inserter picks up iron plates from the routed input belt and drops them into the machine.
+  - An output fast inserter picks up completed gears and drops them onto the routed output belt.
+- **Multi-Input Assembler**:
+  - An `assembling-machine-1` crafts `automation-science-pack` from `copper-plate` and `iron-gear-wheel`.
+  - OpenROAD routes two independent input nets to the cell input ports.
+  - Multiple inserters supply required input ingredients simultaneously.
+- **Smelting Furnace**:
+  - An `electric-furnace` smelts `iron-ore` into `iron-plate`.
+- **Combinator Cell**:
+  - An `arithmetic-combinator` reads circuit signals and calculates running totals.
+
+#### End-to-End Pipeline for Machine Cells
+Every single-cell test executes the full electronic design automation flow.
+
+1. Generate Verilog netlist, LEF, and Liberty files for the single cell.
+2. Execute OpenROAD to place the cell and edge pins.
+3. Run detailed routing on surface and underground layers.
+4. Verify that TritonRoute reports zero design rule violations.
+5. Compile the routed DEF file into a blueprint using `def2bp.py`.
+6. Load the blueprint into headless Factorio for physical simulation.
+
+#### Verification Criteria for Machine Cells
+Every cell test must satisfy six criteria.
+
+1. **Zero DRC Violations**: OpenROAD detailed routing completes with zero violations.
+2. **Zero Collision Placement**: Headless Factorio builds 100 percent of blueprint entities without collision errors.
+3. **Physical Electric Supply**: An `electric-energy-interface` supplies power to a `medium-electric-pole`. The pole powers the machine and inserters. The test uses no artificial Lua energy injection.
+4. **Correct Inserter Offsets**: Inserters pick up items from belt coordinates and drop items into machine bounding boxes.
+5. **Autonomous Crafting**: The machine crafts items when supplied with ingredients and electricity.
+6. **Item Conservation**: The total count of consumed ingredients and produced outputs strictly matches the recipe definition.
+
+### 12.3 Level 2: Two-Stage Machine Chains
+The file `test/test_machine_chains.py` tests connected cells through OpenROAD and Factorio.
+
+#### End-to-End Pipeline for Machine Chains
+The two-stage chain tests execute the full automation pipeline.
+
+1. Synthesize a two-machine netlist from recipe definitions.
+2. Execute OpenROAD to place both cells and route the connecting material net.
+3. Validate routing with zero DRC violations.
+4. Compile the routed DEF into a Factorio blueprint.
+5. Simulate the blueprint in headless Factorio to verify inter-cell material flow.
+
+#### Verification Criteria for Machine Chains
+Every two-stage chain test must satisfy these criteria.
+
+- **Cell Handoff**:
+  - OpenROAD routes the output of Cell A (`iron-gear-wheel`) into the input of Cell B (`automation-science-pack`).
+  - Verifies that output inserter drop lines align with downstream input inserter pickup lines.
+- **Backpressure and Buffer Stability**:
+  - Verifies that belt congestion does not deadlock machines or stall upstream production.
+
+### 12.4 Level 3: Full Factory Integration
+The files `flow/benchmark_factory.py` and `test/test_e2e.py` validate the full automated flow:
+- Netlist synthesis from recipe specifications.
+- Macro placement and detailed routing with OpenROAD.
+- Minimum Spanning Tree electric power network synthesis.
+- Sustained production of 60.0 science packs per minute in headless Factorio.
+

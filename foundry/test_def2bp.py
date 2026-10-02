@@ -78,7 +78,8 @@ class TestDef2Bp(unittest.TestCase):
 
     def test_build_entities(self) -> None:
         def_data = def2bp.parse_def(MINI_DEF)
-        entities = def2bp.build_entities(def_data, MINI_NETLIST)
+        entities, wires = def2bp.build_entities(def_data, MINI_NETLIST)
+        self.assertIsInstance(wires, list)
 
         # Look up by name
         names = {e["name"] for e in entities}

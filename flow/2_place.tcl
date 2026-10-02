@@ -7,14 +7,15 @@ read_db 1_floorplan.odb
 
 set_thread_count [exec nproc]
 set block [ord::get_db_block]
-set CELL_PAD_SITES 4
+set CELL_PAD_SITES 6
 
-set density 0.18
+set density 0.10
 puts "factorilog: placement density [format %.3f $density]"
 
 global_placement -density $density \
     -pad_left $CELL_PAD_SITES \
-    -pad_right $CELL_PAD_SITES
+    -pad_right $CELL_PAD_SITES \
+    -routability_driven
 
 place_pins -hor_layers M1 -ver_layers M2
 set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES

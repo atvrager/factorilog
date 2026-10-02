@@ -52,7 +52,8 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertIn(recipe, self.rates)
         cell = self.pdk.cell("assembling-machine-3", recipe)
         assert cell is not None
-        self.assertEqual(cell["width"], 3)
+        self.assertEqual(cell["width"], 5)
+        self.assertEqual(cell["machine_width"], 3)
         self.assertEqual(cell["height"], 3)
         self.assertIn("iron-plate", cell["inputs"])
         self.assertIn("copper-cable", cell["inputs"])

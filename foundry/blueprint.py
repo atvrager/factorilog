@@ -20,16 +20,21 @@ FORMAT_PREFIX = "0"
 VERSION_2_0 = 2 << 48
 
 
-def encode(entities: list[dict[str, Any]], label: str) -> str:
+def encode(
+    entities: list[dict[str, Any]],
+    label: str,
+    wires: list[list[int]] | None = None,
+) -> str:
     """Entities -> exchange string."""
-    document = {
-        "blueprint": {
-            "item": "blueprint",
-            "label": label,
-            "version": VERSION_2_0,
-            "entities": entities,
-        },
+    bp_dict: dict[str, Any] = {
+        "item": "blueprint",
+        "label": label,
+        "version": VERSION_2_0,
+        "entities": entities,
     }
+    if wires:
+        bp_dict["wires"] = wires
+    document = {"blueprint": bp_dict}
     raw = json.dumps(document, separators=(",", ":")).encode()
     return FORMAT_PREFIX + base64.b64encode(zlib.compress(raw, 9)).decode()
 
@@ -45,3 +50,8 @@ def decode(string: str) -> dict[str, Any]:
 def entities_of(string: str) -> list[dict[str, Any]]:
     """Exchange string -> the entity list."""
     return decode(string)["blueprint"]["entities"]
+
+
+def wires_of(string: str) -> list[list[int]]:
+    """Exchange string -> the wire list."""
+    return decode(string)["blueprint"].get("wires", [])

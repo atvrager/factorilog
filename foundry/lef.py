@@ -174,36 +174,55 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         lines.append("  END")
     elif w > 1.0 or h > 1.0:
         margin = 0.50
-        all_pins = []
+        m_obs_m1 = [(0.0, 0.0, w, h)]
+        m_obs_m2 = [(0.0, 0.0, w, h)]
         for idx, _port in enumerate(sorted_inputs):
             layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs))
-            all_pins.append((x1, y1, x2, y2))
-        for idx, _port in enumerate(sorted_outputs):
-            layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
-            all_pins.append((x1, y1, x2, y2))
-
-        m_obs = [(0.0, 0.0, w, h)]
-        for x1, y1, x2, y2 in all_pins:
             exp = (
                 max(0.0, x1 - margin),
                 max(0.0, y1 - margin),
                 min(w, x2 + margin),
                 min(h, y2 + margin),
             )
-            next_obs = []
-            for r in m_obs:
-                next_obs.extend(_subtract_rect(r, exp))
-            m_obs = next_obs
+            if layer == "M1":
+                next_obs = []
+                for r in m_obs_m1:
+                    next_obs.extend(_subtract_rect(r, exp))
+                m_obs_m1 = next_obs
+            elif layer == "M2":
+                next_obs = []
+                for r in m_obs_m2:
+                    next_obs.extend(_subtract_rect(r, exp))
+                m_obs_m2 = next_obs
+
+        for idx, _port in enumerate(sorted_outputs):
+            layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
+            exp = (
+                max(0.0, x1 - margin),
+                max(0.0, y1 - margin),
+                min(w, x2 + margin),
+                min(h, y2 + margin),
+            )
+            if layer == "M1":
+                next_obs = []
+                for r in m_obs_m1:
+                    next_obs.extend(_subtract_rect(r, exp))
+                m_obs_m1 = next_obs
+            elif layer == "M2":
+                next_obs = []
+                for r in m_obs_m2:
+                    next_obs.extend(_subtract_rect(r, exp))
+                m_obs_m2 = next_obs
 
         lines.append("  OBS")
         lines.append("    LAYER M1 ;")
-        for rx1, ry1, rx2, ry2 in m_obs:
+        for rx1, ry1, rx2, ry2 in m_obs_m1:
             lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
         lines.append("    LAYER M2 ;")
-        for rx1, ry1, rx2, ry2 in m_obs:
+        for rx1, ry1, rx2, ry2 in m_obs_m2:
             lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
         lines.append("    LAYER VL1 ;")
-        for rx1, ry1, rx2, ry2 in m_obs:
+        for rx1, ry1, rx2, ry2 in m_obs_m1:
             lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
         lines.append("    LAYER M3 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
@@ -335,7 +354,7 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
                 f"VIA {name}_VIA",
                 default_tag,
                 "  LAYER M2 ;",
-                "    RECT -0.25 -0.25 0.25 0.25 ;",
+                "    RECT -0.75 -0.25 0.75 0.25 ;",
                 "  LAYER VL2 ;",
                 "    RECT -0.125 -0.125 0.125 0.125 ;",
                 "  LAYER M3 ;",
@@ -349,9 +368,8 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
     lines.extend(
         [
             "VIA PIPE_TO_GROUND_VIA",
-            "  DEFAULT",
             "  LAYER M2 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "    RECT -0.75 -0.25 0.75 0.25 ;",
             "  LAYER VL2 ;",
             "    RECT -0.125 -0.125 0.125 0.125 ;",
             "  LAYER M3 ;",
@@ -360,6 +378,7 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "END PIPE_TO_GROUND_VIA",
         ]
     )
+
     # 4. Underground turn connection (M3 -> VL3 -> M4)
     lines.extend(
         [
@@ -374,6 +393,7 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "END UNDERGROUND_TURN_VIA",
         ]
     )
+
     # 5. Circuit drop connection (M4 -> VL4 -> M5)
     lines.extend(
         [

@@ -32,7 +32,7 @@ class LibertyTest(unittest.TestCase):
 
     def test_cell_shape(self) -> None:
         self.assertIn("cell (assembling_machine_3__electronic_circuit) {", self.text)
-        self.assertIn("area : 9.000 ;", self.text)
+        self.assertIn("area : 15.000 ;", self.text)
         self.assertIn("pin (iron_plate) {", self.text)
         self.assertIn("pin (copper_cable) {", self.text)
         self.assertIn("direction : output ;", self.text)
@@ -41,7 +41,7 @@ class LibertyTest(unittest.TestCase):
         cell = self.pdk.cell("oil-refinery", "advanced-oil-processing")
         assert cell is not None
         text = liberty.write_liberty([cell], "/dev/null")
-        self.assertIn("area : 25.000 ;", text)
+        self.assertIn("area : 35.000 ;", text)
 
     def test_craft_delay_is_recipe_duration(self) -> None:
         # assembling-machine-3 has crafting speed 1.25.

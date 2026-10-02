@@ -165,6 +165,7 @@ def _factorilog_blueprint_impl(ctx):
         inputs = [def_file, netlist_json],
         outputs = outputs,
         executable = ctx.executable._def2bp,
+        tools = [ctx.executable._def2bp],
         arguments = args,
         mnemonic = "FactorilogBlueprint",
     )
