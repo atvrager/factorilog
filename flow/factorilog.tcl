@@ -22,8 +22,8 @@
 #   fill 28 percent: legalizer settles in 5 passes, wirelength +66
 #   fill 35 percent: 147 passes, wirelength +287
 # Above 35 percent it does not converge at all.
-set BLOCK_FILL 0.28
-set CELL_PAD_SITES 1
+set BLOCK_FILL 0.08
+set CELL_PAD_SITES 4
 set CORE_MARGIN 4
 
 read_liberty tech.lib
@@ -68,11 +68,6 @@ puts "factorilog: [llength [$block getRows]] rows"
 # layer. M1 and M2 carry surface tracks, M3 and M4 carry underground tunnels.
 make_tracks
 
-# --- io -------------------------------------------------------------
-# The 6 raw inputs and 6 science outputs go on the die edge, so the
-# game bridge knows where the player feeds the factory.
-place_pins -hor_layers M1 -ver_layers M2
-
 # --- place ----------------------------------------------------------
 # The placer target is its own uniform density floor: the tightest
 # packing the pad allows. The space left over from BLOCK_FILL stays
@@ -91,13 +86,18 @@ place_pins -hor_layers M1 -ver_layers M2
 #
 # CTS and STA do not run. The Liberty timing tables are stubs, so the
 # design has no clock and no delay to repair.
-set density [expr {[gpl::get_global_placement_uniform_density \
-    -pad_left $CELL_PAD_SITES -pad_right $CELL_PAD_SITES] + 0.01}]
+set density 0.18
 puts "factorilog: placement density [format %.3f $density]"
 global_placement -density $density \
     -pad_left $CELL_PAD_SITES \
     -pad_right $CELL_PAD_SITES
+
+# --- io -------------------------------------------------------------
+# Place pins on the die edge closest to their connected instances.
+place_pins -hor_layers M1 -ver_layers M2
+
 set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+set_placement_padding -masters {belt_merge2 belt_split2} -left 5 -right 5
 detailed_placement
 
 if {[catch {check_placement} problem]} {
@@ -118,7 +118,9 @@ puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid
 # The router connects blocks across four layers:
 # M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
 # FastRoute runs global routing. TritonRoute runs detailed routing.
-set_routing_layers -signal M1-M6
+set_routing_layers -signal M1-M2
+::drt::detailed_route_set_unidirectional_layer M1
+::drt::detailed_route_set_unidirectional_layer M2
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

@@ -91,6 +91,28 @@ def _output_pin_rect(
     return v_layer, cx - 0.25, h - 0.5, cx + 0.25, h
 
 
+def _subtract_rect(
+    r: tuple[float, float, float, float], p: tuple[float, float, float, float]
+) -> list[tuple[float, float, float, float]]:
+    """Subtract rectangle p from rectangle r, returning non-overlapping remainder."""
+    rx1, ry1, rx2, ry2 = r
+    px1, py1, px2, py2 = p
+    if px2 <= rx1 or px1 >= rx2 or py2 <= ry1 or py1 >= ry2:
+        return [r]
+    ix1, iy1 = max(rx1, px1), max(ry1, py1)
+    ix2, iy2 = min(rx2, px2), min(ry2, py2)
+    res = []
+    if ry1 < iy1:
+        res.append((rx1, ry1, rx2, iy1))
+    if ry2 > iy2:
+        res.append((rx1, iy2, rx2, ry2))
+    if rx1 < ix1:
+        res.append((rx1, iy1, ix1, iy2))
+    if rx2 > ix2:
+        res.append((ix2, iy1, rx2, iy2))
+    return res
+
+
 def macro_lines(cell: dict[str, Any]) -> list[str]:
     """One MACRO block. Sorted ports keep the file diff stable."""
     name = cell["cell"].replace(".", "__").replace("-", "_")
@@ -143,25 +165,58 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("    LAYER M2 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL1 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("    LAYER VL2 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
-        lines.append("    LAYER M3 ;")
-        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
-        lines.append("    LAYER M4 ;")
+        lines.append("    LAYER VL3 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("  END")
-    elif w > 2.0 and h > 2.0:
+    elif w > 1.0 or h > 1.0:
+        margin = 0.50
+        all_pins = []
+        for idx, _port in enumerate(sorted_inputs):
+            layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs))
+            all_pins.append((x1, y1, x2, y2))
+        for idx, _port in enumerate(sorted_outputs):
+            layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
+            all_pins.append((x1, y1, x2, y2))
+
+        m_obs = [(0.0, 0.0, w, h)]
+        for x1, y1, x2, y2 in all_pins:
+            exp = (
+                max(0.0, x1 - margin),
+                max(0.0, y1 - margin),
+                min(w, x2 + margin),
+                min(h, y2 + margin),
+            )
+            next_obs = []
+            for r in m_obs:
+                next_obs.extend(_subtract_rect(r, exp))
+            m_obs = next_obs
+
         lines.append("  OBS")
         lines.append("    LAYER M1 ;")
-        lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")
+        for rx1, ry1, rx2, ry2 in m_obs:
+            lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
         lines.append("    LAYER M2 ;")
-        lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")
-        lines.append("    LAYER VL2 ;")
-        lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")
+        for rx1, ry1, rx2, ry2 in m_obs:
+            lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
+        lines.append("    LAYER VL1 ;")
+        for rx1, ry1, rx2, ry2 in m_obs:
+            lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
         lines.append("    LAYER M3 ;")
-        lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("    LAYER M4 ;")
-        lines.append(f"      RECT 1.000 1.000 {w - 1.0:.3f} {h - 1.0:.3f} ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL2 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL3 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL4 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
+        lines.append("    LAYER VL5 ;")
+        lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("  END")
     lines.append(f"END {name}")
     return lines
@@ -184,12 +239,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M1",
         # VL1: surface corner turn cut layer.
         "LAYER VL1",
         "  TYPE CUT ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END VL1",
         # M2: surface vertical. Belts, pipes, machine pins.
         "LAYER M2",
@@ -198,12 +253,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M2",
         # VL2: surface-to-underground transition cut layer (tunnel mouth).
         "LAYER VL2",
         "  TYPE CUT ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END VL2",
         # M3: underground horizontal tunnel layer.
         "LAYER M3",
@@ -212,12 +267,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M3",
         # VL3: underground turn cut layer.
         "LAYER VL3",
         "  TYPE CUT ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END VL3",
         # M4: underground vertical tunnel layer.
         "LAYER M4",
@@ -226,12 +281,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M4",
         # VL4: underground-to-circuit cut layer.
         "LAYER VL4",
         "  TYPE CUT ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END VL4",
         # M5: circuit red wire horizontal.
         "LAYER M5",
@@ -240,12 +295,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M5",
         # VL5: circuit wire turn cut layer.
         "LAYER VL5",
         "  TYPE CUT ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END VL5",
         # M6: circuit green wire vertical.
         "LAYER M6",
@@ -254,7 +309,7 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  PITCH 1.0 ;",
         "  OFFSET 0.5 ;",
         "  WIDTH 0.5 ;",
-        "  SPACING 0.5 ;",
+        "  SPACING 0.25 ;",
         "END M6",
     ]
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
@@ -389,6 +444,77 @@ def merge_lines() -> list[str]:
         "      RECT 0.500 0.250 1.000 0.750 ;",
         "    END",
         "  END y",
+        "  OBS",
+        "    LAYER M1 ;",
+        "      RECT 0.500 1.000 1.000 2.000 ;",
+        "    LAYER M2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER M3 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER M4 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL1 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL3 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "  END",
+        f"END {name}",
+    ]
+
+
+def split_lines() -> list[str]:
+    """The transport split cell: one splitter tile, three pins.
+
+    Input a enters west on M1. Outputs y1 and y2 leave east on M1.
+    """
+    name = netlist.SPLIT_CELL
+    return [
+        f"MACRO {name}",
+        "  CLASS CORE ;",
+        "  ORIGIN 0 0 ;",
+        "  SIZE 1.000 BY 2.000 ;",
+        "  SITE tile ;",
+        '  PROPERTY CELLTYPE "splitter" ;',
+        '  PROPERTY ROLE "split2" ;',
+        "  PIN a",
+        "    DIRECTION INPUT ;",
+        "    USE SIGNAL ;",
+        "    PORT LAYER M1 ;",
+        "      RECT 0.000 0.250 0.500 0.750 ;",
+        "    END",
+        "  END a",
+        "  PIN y1",
+        "    DIRECTION OUTPUT ;",
+        "    USE SIGNAL ;",
+        "    PORT LAYER M1 ;",
+        "      RECT 0.500 0.250 1.000 0.750 ;",
+        "    END",
+        "  END y1",
+        "  PIN y2",
+        "    DIRECTION OUTPUT ;",
+        "    USE SIGNAL ;",
+        "    PORT LAYER M1 ;",
+        "      RECT 0.500 1.250 1.000 1.750 ;",
+        "    END",
+        "  END y2",
+        "  OBS",
+        "    LAYER M1 ;",
+        "      RECT 0.000 1.000 0.500 2.000 ;",
+        "    LAYER M2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER M3 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER M4 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL1 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL3 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "  END",
         f"END {name}",
     ]
 
@@ -432,10 +558,12 @@ def write_lef(p: pdk.Pdk, cells: list[dict[str, Any]], path: str) -> str:
     lines.append("")
     lines.extend(merge_lines())
     lines.append("")
+    lines.extend(split_lines())
+    lines.append("")
     lines.extend(pump_lines())
     for cell in sorted(cells, key=lambda c: c["cell"]):
-        if cell["cell"] in (netlist.MERGE_CELL, netlist.PUMP_CELL):
-            continue  # merge_lines and pump_lines emitted them
+        if cell["cell"] in (netlist.MERGE_CELL, netlist.SPLIT_CELL, netlist.PUMP_CELL):
+            continue  # merge_lines, split_lines and pump_lines emitted them
         lines.append("")
         lines.extend(macro_lines(cell))
     lines.append("")

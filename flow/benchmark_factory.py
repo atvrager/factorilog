@@ -74,9 +74,7 @@ def resolve_factory_pins(
         pins_data = def2bp.extract_pins(def_data, netlist_data)
         return pins_data.get("inputs", []), pins_data.get("outputs", [])
 
-    raise FileNotFoundError(
-        "Could not discover pin definitions. Provide --def or --pins flag."
-    )
+    raise FileNotFoundError("Could not discover pin definitions. Provide --def or --pins flag.")
 
 
 def find_factorio_binary(override: Path | None = None) -> Path:
@@ -91,6 +89,12 @@ def find_factorio_binary(override: Path | None = None) -> Path:
         return Path(which_bin)
     if DEFAULT_GAME_PATH.is_file():
         return DEFAULT_GAME_PATH
+    for candidate in [
+        Path("/scratch/opt/factorio/bin/x64/factorio"),
+        Path("/opt/factorio/bin/x64/factorio"),
+    ]:
+        if candidate.is_file():
+            return candidate
     for candidate in Path("/home").glob(
         "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
     ):
@@ -143,7 +147,9 @@ def serialize_lua(obj: Any) -> str:
     elif isinstance(obj, (list, tuple)):
         return "{" + ", ".join(serialize_lua(x) for x in obj) + "}"
     elif isinstance(obj, dict):
-        return "{" + ", ".join(f"[{json.dumps(k)}] = {serialize_lua(v)}" for k, v in obj.items()) + "}"
+        return (
+            "{" + ", ".join(f"[{json.dumps(k)}] = {serialize_lua(v)}" for k, v in obj.items()) + "}"
+        )
     raise TypeError(f"Cannot serialize {type(obj)} to Lua")
 
 
@@ -219,6 +225,10 @@ local TICKS_TOTAL = """
 
 
 script.on_init(function()
+    game.forces.player.research_all_technologies()
+    if game.forces.player.recipes["steel-plate"] then
+        game.forces.player.recipes["steel-plate"].enabled = false
+    end
     local surface = game.surfaces[1]
     for cx = -10, 10 do
         for cy = -10, 10 do
@@ -270,9 +280,11 @@ script.on_init(function()
     -- Revive all ghosts
     local revived = 0
     for _, ghost in pairs(ghosts) do
-        local colliders, ent = ghost.revive()
-        if ent and ent.valid then
-            revived = revived + 1
+        if ghost.valid then
+            local colliders, ent = ghost.revive()
+            if ent and ent.valid then
+                revived = revived + 1
+            end
         end
     end
     storage.revived_count = revived
@@ -330,16 +342,43 @@ script.on_init(function()
     local machines_with_belts = 0
     for _, m in pairs(machines) do
         local box = m.bounding_box
-        -- Scan perimeter belts
+        -- Scan perimeter belts cardinally (exclude diagonal corners)
         local nearby_belts = surface.find_entities_filtered{
-            type = "transport-belt",
+            type = {"transport-belt", "underground-belt"},
             area = {{box.left_top.x - 1.2, box.left_top.y - 1.2}, {box.right_bottom.x + 1.2, box.right_bottom.y + 1.2}}
         }
-        if #nearby_belts > 0 then
+        local in_belts = {}
+        local out_belts = {}
+        for _, belt in pairs(nearby_belts) do
+            local bx = belt.position.x
+            local by = belt.position.y
+            local on_west = (bx < box.left_top.x) and (by >= box.left_top.y - 0.2 and by <= box.right_bottom.y + 0.2)
+            local on_north = (by < box.left_top.y) and (bx >= box.left_top.x - 0.2 and bx <= box.right_bottom.x + 0.2)
+            local on_east = (bx > box.right_bottom.x) and (by >= box.left_top.y - 0.2 and by <= box.right_bottom.y + 0.2)
+            local on_south = (by > box.right_bottom.y) and (bx >= box.left_top.x - 0.2 and bx <= box.right_bottom.x + 0.2)
+
+            local is_ug = (belt.type == "underground-belt")
+            local ug_type = is_ug and belt.belt_to_ground_type or ""
+
+            if on_west or on_north then
+                if not is_ug or ug_type == "output" then
+                    in_belts[#in_belts + 1] = belt
+                end
+            end
+            if on_east or on_south then
+                if not is_ug or ug_type == "input" then
+                    out_belts[#out_belts + 1] = belt
+                end
+            end
+        end
+
+        if #in_belts > 0 or #out_belts > 0 then
             machines_with_belts = machines_with_belts + 1
         end
         machine_map[#machine_map + 1] = {
             entity = m,
+            in_belts = in_belts,
+            out_belts = out_belts,
             belts = nearby_belts
         }
     end
@@ -387,6 +426,11 @@ script.on_event(defines.events.on_tick, function(event)
     local tick = event.tick
 
     if tick == 0 then
+        for k, v in pairs(defines.entity_status) do
+            if v == 70 or v == 28 or v == 18 or v == 1 then
+                log("DEFINES_STATUS: " .. k .. "=" .. tostring(v))
+            end
+        end
         log("BENCH_REVIVED: " .. tostring(storage.revived_count or 0))
         log("BENCH_INPUT_COUNT: " .. tostring(#(storage.input_entities or {})))
         for _, ie in ipairs(storage.input_entities or {}) do
@@ -419,10 +463,9 @@ script.on_event(defines.events.on_tick, function(event)
         if m.valid then
             m.energy = 1e9
 
-            -- Transfer items between adjacent belts and machine
-            for _, belt in pairs(entry.belts) do
+            -- Pull input items from input belts
+            for _, belt in pairs(entry.in_belts or {}) do
                 if belt.valid then
-                    -- Pull input items from belt
                     for line_idx = 1, 2 do
                         local line = belt.get_transport_line(line_idx)
                         for _, it in pairs(line.get_contents()) do
@@ -434,15 +477,20 @@ script.on_event(defines.events.on_tick, function(event)
                             end
                         end
                     end
+                end
+            end
 
-                    -- Push output items from machine onto belt
-                    local out_inv = m.get_output_inventory()
-                    if out_inv and not out_inv.is_empty() then
-                        for _, item_entry in pairs(out_inv.get_contents()) do
+            -- Push output items from machine onto output belts
+            local out_inv = m.get_output_inventory()
+            if out_inv and not out_inv.is_empty() then
+                for _, item_entry in pairs(out_inv.get_contents()) do
+                    for _, belt in pairs(entry.out_belts or {}) do
+                        if belt.valid then
                             local line = belt.get_transport_line(1)
                             if line.can_insert_at_back() then
                                 line.insert_at_back({name = item_entry.name, count = 1})
                                 out_inv.remove({name = item_entry.name, count = 1})
+                                break
                             end
                         end
                     end
@@ -518,6 +566,7 @@ script.on_event(defines.events.on_tick, function(event)
             total_count = total_count + 1
             if entry.entity.valid and entry.entity.is_crafting() then
                 active_count = active_count + 1
+                log("BENCH_ACTIVE_MACHINE: " .. entry.entity.name .. " pos=" .. entry.entity.position.x .. "," .. entry.entity.position.y)
             end
         end
         log(string.format("BENCH_STATUS: tick=%d active_machines=%d/%d", tick, active_count, total_count))
@@ -536,6 +585,54 @@ script.on_event(defines.events.on_tick, function(event)
     -- 6. Completion
     if tick >= TICKS_TOTAL - 1 then
         log("BENCH_COMPLETE: true")
+        for _, entry in pairs(storage.machine_map or {}) do
+            local m = entry.entity
+            if m.valid then
+                local inv = m.get_output_inventory()
+                local in_items = {}
+                for inv_id = 1, 5 do
+                    pcall(function()
+                        local inv_obj = m.get_inventory(inv_id)
+                        if inv_obj and not inv_obj.is_empty() then
+                            for _, it in pairs(inv_obj.get_contents()) do
+                                in_items[#in_items + 1] = it
+                            end
+                        end
+                    end)
+                end
+                local r = m.get_recipe()
+                local status_name = "unknown"
+                for k, v in pairs(defines.entity_status) do
+                    if v == m.status then status_name = k break end
+                end
+                log(string.format("BENCH_MACHINE_INV: %s pos=%.1f,%.1f recipe=%s status=%s(%s) crafting=%s energy=%.1f in_items=%s out_items=%s",
+                    m.name, m.position.x, m.position.y,
+                    r and r.name or "none",
+                    tostring(m.status),
+                    status_name,
+                    tostring(m.is_crafting()),
+                    m.energy,
+                    helpers.table_to_json(in_items),
+                    helpers.table_to_json(inv and inv.get_contents() or {})))
+            end
+        end
+        for _, out_ent in pairs(storage.output_entities or {}) do
+            local belt = out_ent.entity
+            if belt.valid then
+                log(string.format("BENCH_OUT_PIN_STATUS: %s pos=%.1f,%.1f", out_ent.name, belt.position.x, belt.position.y))
+            end
+        end
+        local belts = surface.find_entities_filtered{type = {"transport-belt", "underground-belt"}}
+        for _, b in pairs(belts) do
+            if b.valid then
+                local l1 = b.get_transport_line(1).get_contents()
+                local l2 = b.get_transport_line(2).get_contents()
+                if next(l1) or next(l2) then
+                    log(string.format("BENCH_BELT_ITEMS: pos=%.1f,%.1f name=%s l1=%s l2=%s",
+                        b.position.x, b.position.y, b.name, helpers.table_to_json(l1), helpers.table_to_json(l2)))
+                end
+            end
+        end
         for k, v in pairs(storage.stats.produced) do
             local rate_spm = (v / (TICKS_TOTAL / 3600.0))
             log(string.format("FINAL_RATE_%s: %d (%.2f/min)", k, v, rate_spm))
@@ -566,7 +663,9 @@ end)
     if res_create.returncode != 0:
         log_file = data_dir / "factorio-current.log"
         log_text = log_file.read_text() if log_file.is_file() else "No log"
-        raise RuntimeError(f"Factorio create failed:\nSTDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}")
+        raise RuntimeError(
+            f"Factorio create failed:\nSTDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}"
+        )
 
     cmd_bench = [
         str(game_bin),
@@ -584,7 +683,9 @@ end)
     if bench_res.returncode != 0:
         log_file = data_dir / "factorio-current.log"
         log_text = log_file.read_text() if log_file.is_file() else "No log"
-        raise RuntimeError(f"Factorio benchmark failed:\nSTDOUT:\n{bench_res.stdout}\nSTDERR:\n{bench_res.stderr}\nLOG:\n{log_text}")
+        raise RuntimeError(
+            f"Factorio benchmark failed:\nSTDOUT:\n{bench_res.stdout}\nSTDERR:\n{bench_res.stderr}\nLOG:\n{log_text}"
+        )
 
     log_path = data_dir / "factorio-current.log"
     results: dict[str, Any] = {
@@ -632,11 +733,19 @@ def main() -> int:
     parser.add_argument("netlist_file", type=Path, help="Path to netlist JSON file")
     parser.add_argument("--ticks", type=int, default=3600, help="Simulation ticks to run")
     parser.add_argument("--game", type=Path, default=None, help="Path to Factorio binary")
-    parser.add_argument("--def", dest="def_file", type=Path, default=None, help="Path to factory.def file")
-    parser.add_argument("--pins", dest="pins_file", type=Path, default=None, help="Path to pins.json file")
-    parser.add_argument("--trace-out", type=Path, default=None, help="Path to export telemetry trace JSON")
+    parser.add_argument(
+        "--def", dest="def_file", type=Path, default=None, help="Path to factory.def file"
+    )
+    parser.add_argument(
+        "--pins", dest="pins_file", type=Path, default=None, help="Path to pins.json file"
+    )
+    parser.add_argument(
+        "--trace-out", type=Path, default=None, help="Path to export telemetry trace JSON"
+    )
     parser.add_argument("--analyze", action="store_true", help="Run shape-based telemetry analysis")
-    parser.add_argument("--json-out", type=Path, default=None, help="Path to export analysis results as JSON")
+    parser.add_argument(
+        "--json-out", type=Path, default=None, help="Path to export analysis results as JSON"
+    )
 
     args = parser.parse_args()
     game_bin = find_factorio_binary(args.game)

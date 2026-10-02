@@ -27,6 +27,7 @@ def _openroad_stage_impl(ctx):
     # Podman command execution
     container_cmd = (
         "TMPDIR=/tmp podman run --rm --network none " +
+        "--security-opt label=disable " +
         "-v \"$(pwd)/%s\":/work " % work_dir +
         "-w /work " +
         "docker.io/openroad/orfs:latest " +
@@ -90,6 +91,7 @@ def _factorilog_synth_impl(ctx):
         extra_flags.append("--no-enable-circuit-readouts")
 
     flags_str = " ".join(extra_flags)
+    target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
 
     cmd = (
         "set -euo pipefail\n" +
@@ -98,8 +100,8 @@ def _factorilog_synth_impl(ctx):
         "DUMP_ABS=\"$(pwd)/%s\"\n" % ctx.file.dump.path +
         "NETBUILD_ABS=\"$(pwd)/%s\"\n" % script.path +
         "cd \"$OUT_DIR\"\n" +
-        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" --spc %s %s\n"
-    ) % (ctx.attr.spc, flags_str)
+        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" %s %s\n"
+    ) % (target_str, flags_str)
 
     ctx.actions.run_shell(
         inputs = [ctx.file.dump],
@@ -119,7 +121,8 @@ factorilog_synth = rule(
     implementation = _factorilog_synth_impl,
     attrs = {
         "dump": attr.label(allow_single_file = [".json"], mandatory = True, doc = "Dump fixture JSON file"),
-        "spc": attr.string(default = "60.0", doc = "Science packs per minute rate"),
+        "demand": attr.string(default = "", doc = "Item and rate demand string (e.g. 'automation-science-pack 60.0')"),
+        "spc": attr.string(default = "60.0", doc = "Science packs per minute rate (used if demand is not set)"),
         "telemetry_taps": attr.string(default = "none", doc = "Telemetry tap scope: none, io, merges, io,merges, all"),
         "enable_display_readouts": attr.bool(default = True, doc = "Enable display panel readouts"),
         "enable_circuit_readouts": attr.bool(default = False, doc = "Enable arithmetic combinator readouts"),

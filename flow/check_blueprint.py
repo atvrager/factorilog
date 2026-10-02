@@ -29,15 +29,21 @@ def find_factorio_binary(override: Path | None = None) -> Path:
     which_bin = shutil.which("factorio")
     if DEFAULT_GAME_PATH.is_file():
         return DEFAULT_GAME_PATH
-    for candidate in Path("/home").glob("*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"):
+    for candidate in [
+        Path("/scratch/opt/factorio/bin/x64/factorio"),
+        Path("/opt/factorio/bin/x64/factorio"),
+    ]:
+        if candidate.is_file():
+            return candidate
+    for candidate in Path("/home").glob(
+        "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
+    ):
         if candidate.is_file():
             return candidate
     raise FileNotFoundError("Factorio binary not found.")
 
 
-def validate_blueprint(
-    blueprint_string: str, game_bin: Path, work_dir: Path
-) -> dict[str, int]:
+def validate_blueprint(blueprint_string: str, game_bin: Path, work_dir: Path) -> dict[str, int]:
     """Load blueprint in headless Factorio and count placed entities."""
     mods_dir = work_dir / "mods"
     mod_dir = mods_dir / "bpcheck"
@@ -233,7 +239,14 @@ end)
     }
     if log_path.is_file():
         for line in log_path.read_text().splitlines():
-            for prefix in ("RESULT_", "COUNT_", "UNPLACED_", "REASON_", "BOUNDS_", "SAMPLE_FAILURE:"):
+            for prefix in (
+                "RESULT_",
+                "COUNT_",
+                "UNPLACED_",
+                "REASON_",
+                "BOUNDS_",
+                "SAMPLE_FAILURE:",
+            ):
                 if prefix in line:
                     idx = line.find(prefix)
                     payload = line[idx:].strip()
@@ -247,7 +260,12 @@ end)
                         if prefix == "BOUNDS_":
                             results["bounds"][key.replace("BOUNDS_", "")] = val_str
                         else:
-                            val_int = int(val_str) if val_str.isdigit() or (val_str.startswith("-") and val_str[1:].isdigit()) else val_str
+                            val_int = (
+                                int(val_str)
+                                if val_str.isdigit()
+                                or (val_str.startswith("-") and val_str[1:].isdigit())
+                                else val_str
+                            )
                             if prefix == "RESULT_":
                                 results["results"][key] = val_int
                             elif prefix == "COUNT_":

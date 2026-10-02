@@ -7,17 +7,18 @@ read_db 1_floorplan.odb
 
 set_thread_count [exec nproc]
 set block [ord::get_db_block]
-set CELL_PAD_SITES 1
+set CELL_PAD_SITES 4
 
-set density [expr {[gpl::get_global_placement_uniform_density \
-    -pad_left $CELL_PAD_SITES -pad_right $CELL_PAD_SITES] + 0.01}]
+set density 0.18
 puts "factorilog: placement density [format %.3f $density]"
 
 global_placement -density $density \
     -pad_left $CELL_PAD_SITES \
     -pad_right $CELL_PAD_SITES
 
+place_pins -hor_layers M1 -ver_layers M2
 set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+set_placement_padding -masters {belt_merge2 belt_split2} -left 5 -right 5
 detailed_placement
 
 if {[catch {check_placement} problem]} {

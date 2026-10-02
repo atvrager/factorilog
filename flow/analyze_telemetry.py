@@ -55,7 +55,9 @@ def calculate_net_rates(
             "total_items": total_items,
             "rate_spm": round(rate_spm, 2),
             "first_arrival_tick": first_tick,
-            "first_arrival_seconds": round(first_tick / 60.0, 2) if first_tick is not None else None,
+            "first_arrival_seconds": round(first_tick / 60.0, 2)
+            if first_tick is not None
+            else None,
             "samples": sample_counts,
         }
 
@@ -137,7 +139,9 @@ def analyze_outputs(
                 "total_items": total_items,
                 "achievement_pct": achievement_pct,
                 "first_arrival_tick": first_tick,
-                "first_arrival_sec": round(first_tick / 60.0, 2) if first_tick is not None else None,
+                "first_arrival_sec": round(first_tick / 60.0, 2)
+                if first_tick is not None
+                else None,
                 "status": status,
             }
         )
@@ -152,7 +156,7 @@ def analyze_merges(
     instances = netlist_data.get("instances", [])
     merges_by_mat: dict[str, int] = {}
     for inst in instances:
-        if inst.get("cell") == "belt_merge2":
+        if inst.get("cell") in ("belt_merge2", "belt_split2"):
             mat = inst.get("recipe", "")
             merges_by_mat[mat] = merges_by_mat.get(mat, 0) + 1
 
@@ -189,7 +193,13 @@ def analyze_transform_stages(
     recipe_instances: dict[str, list[dict[str, Any]]] = {}
     for inst in instances:
         cell_id = inst.get("cell", "")
-        if cell_id in ("belt_merge2", "display_panel", "arithmetic_combinator", "decider_combinator"):
+        if cell_id in (
+            "belt_merge2",
+            "belt_split2",
+            "display_panel",
+            "arithmetic_combinator",
+            "decider_combinator",
+        ):
             continue
         rec = inst.get("recipe", "")
         if rec:
@@ -317,7 +327,13 @@ def analyze_propagation_dag(
 
     for inst in instances:
         cell_id = inst.get("cell", "")
-        if cell_id in ("belt_merge2", "display_panel", "arithmetic_combinator", "decider_combinator"):
+        if cell_id in (
+            "belt_merge2",
+            "belt_split2",
+            "display_panel",
+            "arithmetic_combinator",
+            "decider_combinator",
+        ):
             continue
         cell_info = cells.get(cell_id, {})
         inputs = cell_info.get("inputs", [])
@@ -343,16 +359,16 @@ def analyze_propagation_dag(
                     "upstream_arrival_tick": inp_tick,
                     "downstream_arrival_tick": out_tick,
                     "transit_latency_ticks": latency_ticks,
-                    "transit_latency_sec": round(latency_ticks / 60.0, 2) if latency_ticks is not None else None,
+                    "transit_latency_sec": round(latency_ticks / 60.0, 2)
+                    if latency_ticks is not None
+                    else None,
                 }
             )
 
     return dag_edges
 
 
-def analyze_shapes(
-    trace_data: dict[str, Any], netlist_data: dict[str, Any]
-) -> dict[str, Any]:
+def analyze_shapes(trace_data: dict[str, Any], netlist_data: dict[str, Any]) -> dict[str, Any]:
     """Execute complete shape-based telemetry analysis."""
     ticks_total = int(trace_data.get("ticks_total", 0))
     sample_interval = int(trace_data.get("sample_interval", 60))
@@ -394,16 +410,22 @@ def format_markdown_report(analysis: dict[str, Any]) -> str:
 
     out.append("# Factory Telemetry Shape Analysis Report\n")
     out.append("## 1. Simulation Summary")
-    out.append(f"- **Simulation Duration**: {summary['simulation_ticks']} ticks ({summary['simulation_seconds']:.1f} seconds)")
-    out.append(f"- **Sample Interval**: {summary['sample_interval_ticks']} ticks ({summary['total_samples']} samples)")
+    out.append(
+        f"- **Simulation Duration**: {summary['simulation_ticks']} ticks ({summary['simulation_seconds']:.1f} seconds)"
+    )
+    out.append(
+        f"- **Sample Interval**: {summary['sample_interval_ticks']} ticks ({summary['total_samples']} samples)"
+    )
     out.append(f"- **Tapped Nets**: {summary['tapped_nets_count']} telemetry points")
     out.append(f"- **Item Movements Logged**: {summary['total_item_transfers_recorded']} units\n")
 
     out.append("## 2. Boundary Outputs (Science Pack Throughput)")
-    out.append("| Science Pack | Target (SPM) | Observed (SPM) | Progress | First Arrival | Status |")
+    out.append(
+        "| Science Pack | Target (SPM) | Observed (SPM) | Progress | First Arrival | Status |"
+    )
     out.append("|:---|:---:|:---:|:---:|:---:|:---|")
     for row in analysis["boundary_outputs"]:
-        arr = f"{row['first_arrival_sec']:.1f}s" if row['first_arrival_sec'] is not None else "None"
+        arr = f"{row['first_arrival_sec']:.1f}s" if row["first_arrival_sec"] is not None else "None"
         out.append(
             f"| `{row['material']}` | {row['target_rate_spm']:.1f} | {row['observed_rate_spm']:.2f} | "
             f"{row['achievement_pct']:.1f}% | {arr} | **{row['status']}** |"
@@ -421,7 +443,9 @@ def format_markdown_report(analysis: dict[str, Any]) -> str:
     out.append("")
 
     out.append("## 4. Boundary Inputs (Supply Continuity)")
-    out.append("| Input Material | Planned (SPM) | Observed (SPM) | Fulfillment | Total Units | Status |")
+    out.append(
+        "| Input Material | Planned (SPM) | Observed (SPM) | Fulfillment | Total Units | Status |"
+    )
     out.append("|:---|:---:|:---:|:---:|:---:|:---|")
     for row in analysis["boundary_inputs"]:
         out.append(
@@ -459,10 +483,14 @@ def format_markdown_report(analysis: dict[str, Any]) -> str:
 
 def main() -> int:
     """CLI entrypoint for standalone telemetry analysis."""
-    parser = argparse.ArgumentParser(description="Analyze Factorio factory telemetry traces based on netlist shapes.")
+    parser = argparse.ArgumentParser(
+        description="Analyze Factorio factory telemetry traces based on netlist shapes."
+    )
     parser.add_argument("trace_file", type=Path, help="Path to telemetry trace JSON file")
     parser.add_argument("netlist_file", type=Path, help="Path to netlist JSON file")
-    parser.add_argument("--json-out", type=Path, default=None, help="Path to export analysis results as JSON")
+    parser.add_argument(
+        "--json-out", type=Path, default=None, help="Path to export analysis results as JSON"
+    )
 
     args = parser.parse_args()
     trace_data = json.loads(args.trace_file.read_text())

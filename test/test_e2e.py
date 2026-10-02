@@ -95,9 +95,7 @@ class TestEndToEndFactory(unittest.TestCase):
                     f"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit {tcl_script}",
                 ]
                 podman_env = {**os.environ, "TMPDIR": "/tmp"}
-                res_orfs = subprocess.run(
-                    cmd_orfs, env=podman_env, capture_output=True, text=True
-                )
+                res_orfs = subprocess.run(cmd_orfs, env=podman_env, capture_output=True, text=True)
                 self.assertEqual(
                     res_orfs.returncode,
                     0,

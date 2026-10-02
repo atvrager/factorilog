@@ -67,15 +67,15 @@ py_binary(
 factorilog_synth(
     name = "synth",
     cells_v = "cells.v",
+    demand = "automation-science-pack 60.0",
     dump = "//test:data/dump-fixture.json",
-    enable_circuit_readouts = True,
-    enable_display_readouts = True,
+    enable_circuit_readouts = False,
+    enable_display_readouts = False,
     netlist_json = "netlist.json",
     netlist_v = "netlist.v",
-    spc = "60.0",
     tech_lef = "tech.lef",
     tech_lib = "tech.lib",
-    telemetry_taps = "io,merges",
+    telemetry_taps = "none",
 )
 
 # 2. Floorplan Stage: netlist + LEF + Lib -> 1_floorplan.odb
@@ -130,7 +130,7 @@ factorilog_blueprint(
     name = "blueprint",
     blueprint = "factory.blueprint",
     def_file = ":factory.def",
-    label_text = "factory_60spm",
+    label_text = "red_science_60spm",
     netlist_json = ":netlist.json",
     pins_json = "pins.json",
 )

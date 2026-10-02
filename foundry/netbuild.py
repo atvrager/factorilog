@@ -63,14 +63,15 @@ def build_all(
     allowed = data.allowed_recipes(["nauvis"])
     nl = netlist.build(data, demand, allowed)
     plans = netlist.merge_plans_of(nl)
+    split_plans = netlist.split_plans_of(nl)
     telemetry_records = netlist.insert_telemetry(
         nl, tap_scope, enable_display, enable_circuit, plans
     )
-    text = netlist.emit_verilog(nl, plans)
+    text = netlist.emit_verilog(nl, plans, split_plans)
     (out / "netlist.v").write_text(text)
     (out / "cells.v").write_text(netlist.emit_cells_v(nl))
 
-    cells = [*nl.cells.values(), netlist.merge_cell()]
+    cells = [*nl.cells.values(), netlist.merge_cell(), netlist.split_cell()]
     lef_text = lef.write_lef(tech, cells, str(out / "tech.lef"))
     lib_text = liberty.write_liberty(cells, str(out / "tech.lib"))
     problems = lef.check_lef(cells, lef_text)
@@ -86,7 +87,11 @@ def build_all(
         "inputs": nl.inputs,
         "outputs": nl.outputs,
         "raw_rates_per_min": {m: nl.nets[m].rate_per_min for m in nl.inputs},
-        "cells": dict(nl.cells),
+        "cells": {
+            **dict(nl.cells),
+            netlist.MERGE_CELL: netlist.merge_cell(),
+            netlist.SPLIT_CELL: netlist.split_cell(),
+        },
         "telemetry": telemetry_records,
         "instances": [
             {

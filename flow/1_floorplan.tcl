@@ -4,7 +4,7 @@
 # Computes die dimensions from target block fill.
 # Generates routing tracks and places perimeter pins.
 
-set BLOCK_FILL 0.28
+set BLOCK_FILL 0.08
 set CORE_MARGIN 4
 
 read_liberty tech.lib

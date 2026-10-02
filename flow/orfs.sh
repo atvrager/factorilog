@@ -14,6 +14,7 @@ IMAGE="docker.io/openroad/orfs:latest"
 TCL="${1:-flow/factorilog.tcl}"
 
 exec podman run --rm \
+    --security-opt label=disable \
     -v "$PWD":/repo \
     -v "$PWD/foundry":/work \
     -w /work \

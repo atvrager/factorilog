@@ -128,9 +128,7 @@ end)
         log_file = data_dir / "factorio-current.log"
         if not log_file.is_file():
             return []
-        return [
-            line for line in log_file.read_text().splitlines() if "TEST_RESULT:" in line
-        ]
+        return [line for line in log_file.read_text().splitlines() if "TEST_RESULT:" in line]
 
 
 class TestRoutingPrimitives(unittest.TestCase):
@@ -152,7 +150,9 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
-        self.assertTrue(any("b3_iron=1" in r for r in results), f"Expected b3_iron=1, got {results}")
+        self.assertTrue(
+            any("b3_iron=1" in r for r in results), f"Expected b3_iron=1, got {results}"
+        )
 
     def test_underground_belt_span_and_clearance(self) -> None:
         """Underground belt requires 2 surface cells on M1 and 0-4 cells between on M3."""
@@ -195,7 +195,10 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=40)
-        self.assertTrue(any("p_out_water=50.0" in r for r in results), f"Expected p_out_water=50.0, got {results}")
+        self.assertTrue(
+            any("p_out_water=50.0" in r for r in results),
+            f"Expected p_out_water=50.0, got {results}",
+        )
 
     def test_obstacle_bypass_underground(self) -> None:
         """Bypass a 2x2 obstacle using underground belt on M3 with entrance/exit outside."""
@@ -335,8 +338,13 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
-        self.assertTrue(any("u1_shape=left" in r for r in results), f"Expected u1_shape=left, got {results}")
-        self.assertTrue(any("u3_end l1_plate=1 l2_ore=1" in r for r in results), f"Expected 1:1 lane flow, got {results}")
+        self.assertTrue(
+            any("u1_shape=left" in r for r in results), f"Expected u1_shape=left, got {results}"
+        )
+        self.assertTrue(
+            any("u3_end l1_plate=1 l2_ore=1" in r for r in results),
+            f"Expected 1:1 lane flow, got {results}",
+        )
 
     def test_belt_intersection_middle_unit_sideloads(self) -> None:
         """An intersecting belt entering the middle unit sideloads onto a single lane."""
@@ -363,8 +371,14 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
-        self.assertTrue(any("u2_shape=straight in_count=2" in r for r in results), f"Expected straight with 2 inputs, got {results}")
-        self.assertTrue(any("u3_lanes l1_count=2 l2_count=1" in r for r in results), f"Expected sideloaded 2 on L1 and 1 on L2, got {results}")
+        self.assertTrue(
+            any("u2_shape=straight in_count=2" in r for r in results),
+            f"Expected straight with 2 inputs, got {results}",
+        )
+        self.assertTrue(
+            any("u3_lanes l1_count=2 l2_count=1" in r for r in results),
+            f"Expected sideloaded 2 on L1 and 1 on L2, got {results}",
+        )
 
     def test_belt_intersection_rotated_third_unit(self) -> None:
         """Rotated third unit straightens when fed from behind, making prior unit a sideload."""
@@ -382,7 +396,10 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=5)
-        self.assertTrue(any("u3_rot_shape=straight in_count=2" in r for r in results), f"Expected straight with 2 inputs, got {results}")
+        self.assertTrue(
+            any("u3_rot_shape=straight in_count=2" in r for r in results),
+            f"Expected straight with 2 inputs, got {results}",
+        )
 
     def test_belt_3x3_crossing_requires_underground(self) -> None:
         """Crossing two 3-unit belt lines in 3x3 requires an underground belt for isolation."""
@@ -408,7 +425,10 @@ class TestRoutingPrimitives(unittest.TestCase):
         end
         """
         results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
-        self.assertTrue(any("3x3_ug_cross h_count=1 v_count=1" in r for r in results), f"Expected h_count=1 v_count=1, got {results}")
+        self.assertTrue(
+            any("3x3_ug_cross h_count=1 v_count=1" in r for r in results),
+            f"Expected h_count=1 v_count=1, got {results}",
+        )
 
 
 if __name__ == "__main__":
