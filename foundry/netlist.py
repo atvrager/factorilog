@@ -134,7 +134,12 @@ class Netlist:
         return self.nets[material]
 
 
-def build(data: solve.Data, demand: dict[str, float], allowed: set[str]) -> Netlist:
+def build(
+    data: solve.Data,
+    demand: dict[str, float],
+    allowed: set[str],
+    machine_override: str | None = None,
+) -> Netlist:
     """Solve the plan, then lower it to instances and nets."""
     tech = pdk.Pdk(data)
     rates, raw, _surplus = solve.solve_rates(data, demand, allowed)
@@ -144,7 +149,10 @@ def build(data: solve.Data, demand: dict[str, float], allowed: set[str]) -> Netl
     nl = Netlist("factory")
     for recipe, rate in sorted(rates.items()):
         recipe_proto = data.recipes[recipe]
-        machine, _speed = data.machine_for(recipe_proto)
+        if machine_override:
+            machine = machine_override
+        else:
+            machine, _speed = data.machine_for(recipe_proto)
         cell = tech.cell(machine, recipe)
         if cell is None:
             raise RuntimeError(f"no cell for {machine} running {recipe}")

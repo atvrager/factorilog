@@ -155,10 +155,19 @@ def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
 
 def entity_size(name: str) -> tuple[float, float]:
     """Return width and height of named entity."""
-    if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
-        return 3.0, 3.0
+    if "rocket-silo" in name:
+        return 9.0, 9.0
     if "oil-refinery" in name:
         return 5.0, 5.0
+    if (
+        "assembling-machine" in name
+        or "electric-furnace" in name
+        or "chemical-plant" in name
+        or "centrifuge" in name
+    ):
+        return 3.0, 3.0
+    if "steel-furnace" in name or "stone-furnace" in name:
+        return 2.0, 2.0
     if "pump" in name:
         return 1.0, 2.0
     return 1.0, 1.0
@@ -166,11 +175,18 @@ def entity_size(name: str) -> tuple[float, float]:
 
 def entity_collision_half_size(name: str) -> tuple[float, float]:
     """Return half width and half height of entity collision box."""
-    if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
-        return 1.2, 1.2
+    if "rocket-silo" in name:
+        return 4.2, 4.2
     if "oil-refinery" in name:
         return 2.2, 2.2
-    if "steel-furnace" in name:
+    if (
+        "assembling-machine" in name
+        or "electric-furnace" in name
+        or "chemical-plant" in name
+        or "centrifuge" in name
+    ):
+        return 1.2, 1.2
+    if "furnace" in name:
         return 0.7, 0.7
     if "pump" in name:
         return 0.29, 0.9
@@ -184,7 +200,17 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
         e
         for e in entities
         if any(
-            k in e.get("name", "") for k in ("assembling-machine", "furnace", "inserter", "pump")
+            k in e.get("name", "")
+            for k in (
+                "assembling-machine",
+                "electric-furnace",
+                "chemical-plant",
+                "oil-refinery",
+                "centrifuge",
+                "rocket-silo",
+                "inserter",
+                "pump",
+            )
         )
     ]
     unpowered = []
@@ -192,14 +218,22 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
         ex = e["position"]["x"]
         ey = e["position"]["y"]
         w, h = entity_size(e.get("name", ""))
-        covered = any(
-            max(
-                max(0.0, abs(ex - p["position"]["x"]) - w / 2.0),
-                max(0.0, abs(ey - p["position"]["y"]) - h / 2.0),
-            )
-            <= supply_radius
-            for p in poles
-        )
+        max_dist = supply_radius + max(w, h) / 2.0
+        covered = False
+        for p in poles:
+            px = p["position"]["x"]
+            py = p["position"]["y"]
+            if abs(ex - px) > max_dist or abs(ey - py) > max_dist:
+                continue
+            if (
+                max(
+                    max(0.0, abs(ex - px) - w / 2.0),
+                    max(0.0, abs(ey - py) - h / 2.0),
+                )
+                <= supply_radius
+            ):
+                covered = True
+                break
         if not covered:
             unpowered.append(e)
     return unpowered
@@ -1056,7 +1090,7 @@ def build_entities(
         net_list = list(tile_to_nets[pos])
         best_candidate = None
         best_jump = None
-        best_score = -1
+        best_score = -999999
 
         for candidate in net_list:
             d = net_surface_tiles[candidate].get(pos)

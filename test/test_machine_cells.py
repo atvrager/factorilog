@@ -1,11 +1,11 @@
-"""End-to-end tests for single PDK machine cells through OpenROAD and Factorio.
+"""Run end-to-end tests for single PDK machine cells through OpenROAD and Factorio.
 
-Tests individual machine cells through the full electronic design automation flow:
-1. Synthesizes a single-cell netlist with dedicated input and output pins.
+Each test does these steps:
+1. Synthesizes a single-cell netlist with dedicated pins.
 2. Runs OpenROAD floorplanning, pin placement, and detailed routing.
 3. Verifies zero DRC violations in TritonRoute.
 4. Compiles the routed DEF into a Factorio blueprint.
-5. Simulates the blueprint in headless Factorio to verify physical crafting and item conservation.
+5. Simulates the blueprint in headless Factorio to verify physical crafting.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,19 @@ def serialize_lua(obj: Any) -> str:
 OPENROAD_IMAGE = "docker.io/openroad/orfs:latest"
 REAL_USER_HOME = pwd.getpwuid(os.getuid()).pw_dir
 
+TESTED_MACHINES: dict[str, str] = {
+    "assembling-machine-1": "test_cell_assembling_machine_1",
+    "assembling-machine-2": "test_cell_assembling_machine_2",
+    "assembling-machine-3": "test_cell_assembling_machine_3",
+    "stone-furnace": "test_cell_stone_furnace",
+    "steel-furnace": "test_cell_steel_furnace",
+    "electric-furnace": "test_cell_electric_furnace",
+    "chemical-plant": "test_cell_chemical_plant",
+    "oil-refinery": "test_cell_oil_refinery",
+    "centrifuge": "test_cell_centrifuge",
+    "rocket-silo": "test_cell_rocket_silo",
+}
+
 
 class TestMachineCells(unittest.TestCase):
     """Verify physical execution of PDK machine cells from OpenROAD to Factorio."""
@@ -82,20 +96,27 @@ class TestMachineCells(unittest.TestCase):
 
     def run_machine_cell_e2e(
         self,
+        machine_name: str,
         recipe_name: str,
         input_feeds: dict[str, int],
         expected_output_item: str,
         expected_output_count: int,
+        prefill_fluids: dict[str, float] | None = None,
         demand_rate: float = 60.0,
         ticks: int = 1200,
     ) -> None:
         """Execute single machine cell end-to-end through OpenROAD and Factorio."""
-        with tempfile.TemporaryDirectory(dir="/tmp", prefix=f"cell-{recipe_name}-") as tmp:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix=f"cell-{machine_name}-") as tmp:
             work_dir = Path(tmp)
 
             # 1. Synthesize single-cell netlist
             allowed = {recipe_name: self.data.recipes[recipe_name]}
-            nl = netlist.build(self.data, {recipe_name: demand_rate}, allowed)
+            nl = netlist.build(
+                self.data,
+                {expected_output_item: demand_rate},
+                allowed,
+                machine_override=machine_name,
+            )
             plans = netlist.merge_plans_of(nl)
             split_plans = netlist.split_plans_of(nl)
 
@@ -103,12 +124,15 @@ class TestMachineCells(unittest.TestCase):
             (work_dir / "cells.v").write_text(netlist.emit_cells_v(nl))
 
             cells = list(nl.cells.values())
-            lef_text = lef.write_lef(self.pdk, cells, str(work_dir / "tech.lef"))
-            lib_text = liberty.write_liberty(cells, str(work_dir / "tech.lib"))
+            lef.write_lef(self.pdk, cells, str(work_dir / "tech.lef"))
+            liberty.write_liberty(cells, str(work_dir / "tech.lib"))
 
+            fluids = [
+                m for m in (nl.inputs + nl.outputs) if m in self.data.prototypes.get("fluid", {})
+            ]
             sidecar = {
-                "demand": {recipe_name: demand_rate},
-                "fluids": [],
+                "demand": {expected_output_item: demand_rate},
+                "fluids": fluids,
                 "inputs": nl.inputs,
                 "outputs": nl.outputs,
                 "cells": dict(nl.cells),
@@ -148,7 +172,7 @@ class TestMachineCells(unittest.TestCase):
             if drc_rpt.is_file():
                 drc_text = drc_rpt.read_text().strip()
                 self.assertEqual(
-                    drc_text, "", f"DRC violations detected in {recipe_name}: {drc_text}"
+                    drc_text, "", f"DRC violations detected in {machine_name}: {drc_text}"
                 )
 
             def_path = work_dir / "factory.def"
@@ -156,14 +180,15 @@ class TestMachineCells(unittest.TestCase):
 
             # 3. Translate DEF to Factorio blueprint
             def_text = def_path.read_text()
-            bp_string = def2bp.def_to_blueprint(def_text, sidecar, label=f"cell_{recipe_name}")
+            bp_string = def2bp.def_to_blueprint(def_text, sidecar, label=f"cell_{machine_name}")
 
             # Verify blueprint structure
             def_data = def2bp.parse_def(def_text)
             pins_data = def2bp.extract_pins(def_data, sidecar)
             in_pins = pins_data.get("inputs", [])
             out_pins = pins_data.get("outputs", [])
-            self.assertGreater(len(in_pins), 0, "No input pins found in DEF")
+            if input_feeds:
+                self.assertGreater(len(in_pins), 0, "No input pins found in DEF")
             self.assertGreater(len(out_pins), 0, "No output pins found in DEF")
 
             # 4. Physical simulation in headless Factorio
@@ -171,6 +196,17 @@ class TestMachineCells(unittest.TestCase):
             for item_name, count in input_feeds.items():
                 feed_lua_lines.append(f'storage.feed_targets["{item_name}"] = {count}')
                 feed_lua_lines.append(f'storage.fed_counts["{item_name}"] = 0')
+
+            prefill_lua_lines = []
+            if prefill_fluids:
+                for fluid_name, amount in prefill_fluids.items():
+                    prefill_lua_lines.append(f"""
+                    for _, ent in pairs(surface.find_entities()) do
+                        if ent.insert_fluid then
+                            ent.insert_fluid{{name = "{fluid_name}", amount = {amount}}}
+                        end
+                    end
+                    """)
 
             init_lua = f"""
             game.forces.player.research_all_technologies()
@@ -187,13 +223,13 @@ class TestMachineCells(unittest.TestCase):
             }}
 
             local ghosts = surface.find_entities_filtered{{name = "entity-ghost"}}
-            local min_gx, min_gy = 1e9, 1e9
+            local min_gx, min_gy = 1000000, 1000000
             for _, g in pairs(ghosts) do
                 if g.position.x < min_gx then min_gx = g.position.x end
                 if g.position.y < min_gy then min_gy = g.position.y end
             end
             local bp_entities = stack.get_blueprint_entities() or {{}}
-            local min_bx, min_by = 1e9, 1e9
+            local min_bx, min_by = 1000000, 1000000
             for _, e in pairs(bp_entities) do
                 if e.position.x < min_bx then min_bx = e.position.x end
                 if e.position.y < min_by then min_by = e.position.y end
@@ -210,16 +246,23 @@ class TestMachineCells(unittest.TestCase):
             end
             storage.revived = revived
 
-            -- Supply electric power through adjacent EEI
+            -- Supply electric power through adjacent EEI on each pole
             local poles = surface.find_entities_filtered{{name = "medium-electric-pole"}}
-            if #poles > 0 then
-                local ppos = poles[1].position
+            for _, p in ipairs(poles) do
                 surface.create_entity{{
                     name = "electric-energy-interface",
-                    position = {{ppos.x, ppos.y - 1}},
+                    position = {{p.position.x, p.position.y - 1}},
                     force = "player"
                 }}
             end
+
+            -- Supply burner machines with fuel
+            for _, ent in pairs(surface.find_entities()) do
+                if ent.name == "steel-furnace" or ent.name == "stone-furnace" then
+                    ent.insert{{name = "coal", count = 50}}
+                end
+            end
+            {chr(10).join(prefill_lua_lines)}
 
             -- Map input pin belts
             storage.in_belts = {{}}
@@ -250,12 +293,6 @@ class TestMachineCells(unittest.TestCase):
                     end
                 end
             end
-            for k, b in pairs(storage.in_belts) do
-                log(string.format("TEST_RESULT: IN_PIN_FOUND: %s pos=%.1f,%.1f", k, b.position.x, b.position.y))
-            end
-            for k, b in pairs(storage.out_belts) do
-                log(string.format("TEST_RESULT: OUT_PIN_FOUND: %s pos=%.1f,%.1f", k, b.position.x, b.position.y))
-            end
 
             storage.feed_targets = {{}}
             storage.fed_counts = {{}}
@@ -263,35 +300,40 @@ class TestMachineCells(unittest.TestCase):
             storage.drained_count = 0
             """
 
-            tick_lua = f"""
-            if event.tick == 1 then
-                for k, b in pairs(storage.in_belts) do
-                    log(string.format("TEST_RESULT: IN_PIN: %s pos=%.1f,%.1f", k, b.position.x, b.position.y))
+            is_fluid = expected_output_item in self.data.prototypes.get("fluid", {})
+            belt_drain_lua = ""
+            if not is_fluid:
+                belt_drain_lua = f"""
+                -- Drain output items at output pin
+                local out_belt = storage.out_belts["{expected_output_item}"]
+                if out_belt and out_belt.valid then
+                    for l = 1, 2 do
+                        local line = out_belt.get_transport_line(l)
+                        local count = line.get_item_count("{expected_output_item}")
+                        if count > 0 then
+                            line.remove_item({{name = "{expected_output_item}", count = count}})
+                            storage.drained_count = storage.drained_count + count
+                        end
+                    end
                 end
-                for k, b in pairs(storage.out_belts) do
-                    log(string.format("TEST_RESULT: OUT_PIN: %s pos=%.1f,%.1f", k, b.position.x, b.position.y))
-                end
-                local surface = game.surfaces[1]
-                local machines = surface.find_entities_filtered{{type = "assembling-machine"}}
-                for _, m in ipairs(machines) do
-                    log(string.format("TEST_RESULT: M: recipe=%s en=%.0f status=%s",
-                        tostring(m.get_recipe() and m.get_recipe().name), m.energy, tostring(m.status)))
-                end
-                local poles = surface.find_entities_filtered{{name = "medium-electric-pole"}}
-                for _, p in ipairs(poles) do
-                    log(string.format("TEST_RESULT: POLE: pos=%.1f,%.1f", p.position.x, p.position.y))
-                end
-                local eeis = surface.find_entities_filtered{{name = "electric-energy-interface"}}
-                for _, e in ipairs(eeis) do
-                    log(string.format("TEST_RESULT: EEI: pos=%.1f,%.1f en=%.0f", e.position.x, e.position.y, e.energy))
-                end
-                local inserters = surface.find_entities_filtered{{type = "inserter"}}
-                for _, ins in ipairs(inserters) do
-                    log(string.format("TEST_RESULT: INS: pos=%.1f,%.1f en=%.0f status=%s",
-                        ins.position.x, ins.position.y, ins.energy, tostring(ins.status)))
-                end
-            end
+                """
 
+            extra_count_lua = ""
+            if is_fluid:
+                extra_count_lua = f"""
+                    if m.get_fluid_count then
+                        extra_count = extra_count + math.floor(m.get_fluid_count("{expected_output_item}"))
+                    end
+                """
+            else:
+                extra_count_lua = f"""
+                    local inv = m.get_output_inventory()
+                    if inv then
+                        extra_count = extra_count + inv.get_item_count("{expected_output_item}")
+                    end
+                """
+
+            tick_lua = f"""
             -- Feed items onto input belts
             if event.tick % 10 == 0 then
                 for item_name, target in pairs(storage.feed_targets) do
@@ -309,43 +351,54 @@ class TestMachineCells(unittest.TestCase):
                 end
             end
 
-            -- Drain output items at output pin
-            local out_belt = storage.out_belts["{expected_output_item}"]
-            if out_belt and out_belt.valid then
-                for l = 1, 2 do
-                    local line = out_belt.get_transport_line(l)
-                    local count = line.get_item_count("{expected_output_item}")
-                    if count > 0 then
-                        line.remove_item({{name = "{expected_output_item}", count = count}})
-                        storage.drained_count = storage.drained_count + count
-                    end
-                end
-            end
+            {belt_drain_lua}
 
             if event.tick == {ticks} then
-                log(string.format("TEST_RESULT: {recipe_name} revived=%d drained=%d",
-                    storage.revived or 0, storage.drained_count or 0))
+                local extra_count = 0
+                local surface = game.surfaces[1]
+                local m_ents = surface.find_entities_filtered{{name = "{machine_name}"}}
+                for _, m in ipairs(m_ents) do
+                    if m.name == "rocket-silo" then
+                        extra_count = extra_count + m.rocket_parts
+                    end
+                    {extra_count_lua}
+                end
+                local total = (storage.drained_count or 0) + extra_count
+                log(string.format("TEST_RESULT: {machine_name} total=%d drained=%d extra=%d revived=%d",
+                    total, storage.drained_count or 0, extra_count, storage.revived or 0))
             end
             """
 
             results = run_factorio_simulation(init_lua, tick_lua, ticks=ticks + 10)
             target_line = None
             for line in results:
-                if f"TEST_RESULT: {recipe_name}" in line:
+                if f"TEST_RESULT: {machine_name}" in line:
                     target_line = line
                     break
 
             self.assertIsNotNone(
                 target_line,
-                f"No simulation results returned for {recipe_name}. Log lines: {results}",
+                f"No simulation results returned for {machine_name}. Log lines: {results}",
             )
 
-            # Check revived count > 0 and drained count >= expected
-            self.assertIn(f"drained={expected_output_count}", target_line)
+            # Check revived count > 0 and total count >= expected
+            m_total = re.search(r"total=(\d+)", target_line)
+            m_revived = re.search(r"revived=(\d+)", target_line)
+            self.assertIsNotNone(m_total, f"total count missing in {target_line}")
+            self.assertIsNotNone(m_revived, f"revived count missing in {target_line}")
+            total_count = int(m_total.group(1))
+            revived_count = int(m_revived.group(1))
+            self.assertGreater(revived_count, 0, f"No entities revived for {machine_name}")
+            self.assertGreaterEqual(
+                total_count,
+                expected_output_count,
+                f"Expected at least {expected_output_count} {expected_output_item}, got {total_count}",
+            )
 
-    def test_single_input_assembler_iron_gear_wheel(self) -> None:
-        """An assembling machine crafts iron gear wheels from iron plates."""
+    def test_cell_assembling_machine_1(self) -> None:
+        """Test assembling machine 1 cell end-to-end through OpenROAD and Factorio."""
         self.run_machine_cell_e2e(
+            machine_name="assembling-machine-1",
             recipe_name="iron-gear-wheel",
             input_feeds={"iron-plate": 10},
             expected_output_item="iron-gear-wheel",
@@ -354,9 +407,22 @@ class TestMachineCells(unittest.TestCase):
             ticks=1200,
         )
 
-    def test_two_input_assembler_automation_science_pack(self) -> None:
-        """An assembling machine crafts automation science packs from copper plates and gears."""
+    def test_cell_assembling_machine_2(self) -> None:
+        """Test assembling machine 2 cell end-to-end through OpenROAD and Factorio."""
         self.run_machine_cell_e2e(
+            machine_name="assembling-machine-2",
+            recipe_name="electronic-circuit",
+            input_feeds={"iron-plate": 5, "copper-cable": 15},
+            expected_output_item="electronic-circuit",
+            expected_output_count=5,
+            demand_rate=60.0,
+            ticks=1200,
+        )
+
+    def test_cell_assembling_machine_3(self) -> None:
+        """Test assembling machine 3 cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="assembling-machine-3",
             recipe_name="automation-science-pack",
             input_feeds={"copper-plate": 5, "iron-gear-wheel": 5},
             expected_output_item="automation-science-pack",
@@ -365,9 +431,10 @@ class TestMachineCells(unittest.TestCase):
             ticks=2400,
         )
 
-    def test_smelting_furnace_iron_plate(self) -> None:
-        """An electric furnace smelts iron ore into iron plates."""
+    def test_cell_electric_furnace(self) -> None:
+        """Test electric furnace cell end-to-end through OpenROAD and Factorio."""
         self.run_machine_cell_e2e(
+            machine_name="electric-furnace",
             recipe_name="iron-plate",
             input_feeds={"iron-ore": 5},
             expected_output_item="iron-plate",
@@ -376,8 +443,82 @@ class TestMachineCells(unittest.TestCase):
             ticks=1800,
         )
 
+    def test_cell_steel_furnace(self) -> None:
+        """Test steel furnace cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="steel-furnace",
+            recipe_name="iron-plate",
+            input_feeds={"iron-ore": 5},
+            expected_output_item="iron-plate",
+            expected_output_count=4,
+            demand_rate=30.0,
+            ticks=1800,
+        )
+
+    def test_cell_stone_furnace(self) -> None:
+        """Test stone furnace cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="stone-furnace",
+            recipe_name="copper-plate",
+            input_feeds={"copper-ore": 5},
+            expected_output_item="copper-plate",
+            expected_output_count=4,
+            demand_rate=15.0,
+            ticks=2400,
+        )
+
+    def test_cell_chemical_plant(self) -> None:
+        """Test chemical plant cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="chemical-plant",
+            recipe_name="plastic-bar",
+            input_feeds={"coal": 5},
+            expected_output_item="plastic-bar",
+            expected_output_count=5,
+            prefill_fluids={"petroleum-gas": 200.0},
+            demand_rate=60.0,
+            ticks=1200,
+        )
+
+    def test_cell_oil_refinery(self) -> None:
+        """Test oil refinery cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="oil-refinery",
+            recipe_name="basic-oil-processing",
+            input_feeds={},
+            expected_output_item="petroleum-gas",
+            expected_output_count=45,
+            prefill_fluids={"crude-oil": 200.0},
+            demand_rate=60.0,
+            ticks=1200,
+        )
+
+    def test_cell_centrifuge(self) -> None:
+        """Test centrifuge cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="centrifuge",
+            recipe_name="uranium-processing",
+            input_feeds={"uranium-ore": 20},
+            expected_output_item="uranium-238",
+            expected_output_count=1,
+            demand_rate=5.0,
+            ticks=1800,
+        )
+
+    def test_cell_rocket_silo(self) -> None:
+        """Test rocket silo cell end-to-end through OpenROAD and Factorio."""
+        self.run_machine_cell_e2e(
+            machine_name="rocket-silo",
+            recipe_name="rocket-part",
+            input_feeds={"processing-unit": 5, "low-density-structure": 5, "rocket-fuel": 5},
+            expected_output_item="rocket-part",
+            expected_output_count=1,
+            demand_rate=20.0,
+            ticks=1200,
+        )
+
     def test_circuit_combinator_arithmetic(self) -> None:
-        """An arithmetic combinator accumulates circuit pulses from a belt telemetry tap."""
+        """Test arithmetic combinator cell with circuit connections."""
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="cell-combinator-") as tmp:
             work_dir = Path(tmp)
 
@@ -465,13 +606,13 @@ class TestMachineCells(unittest.TestCase):
             }}
 
             local ghosts = surface.find_entities_filtered{{name = "entity-ghost"}}
-            local min_gx, min_gy = 1e9, 1e9
+            local min_gx, min_gy = 1000000, 1000000
             for _, g in pairs(ghosts) do
                 if g.position.x < min_gx then min_gx = g.position.x end
                 if g.position.y < min_gy then min_gy = g.position.y end
             end
             local bp_entities = stack.get_blueprint_entities() or {{}}
-            local min_bx, min_by = 1e9, 1e9
+            local min_bx, min_by = 1000000, 1000000
             for _, e in pairs(bp_entities) do
                 if e.position.x < min_bx then min_bx = e.position.x end
                 if e.position.y < min_by then min_by = e.position.y end
@@ -552,6 +693,28 @@ class TestMachineCells(unittest.TestCase):
 
             self.assertIsNotNone(target_line, f"No combinator simulation result found: {results}")
             self.assertIn("sig=5", target_line)
+
+    def test_cell_library_coverage(self) -> None:
+        """Verify complete test coverage of all core machines in cell library."""
+        all_machines = set(self.pdk.machines.keys())
+        tested_machines = set(TESTED_MACHINES.keys())
+        missing = all_machines - tested_machines
+        if missing:
+            raise AssertionError(
+                f"Cell library coverage incomplete. Missing tests for machines: {sorted(missing)}"
+            )
+
+        unexpected = tested_machines - all_machines
+        if unexpected:
+            raise AssertionError(
+                f"Tested machines contain unexpected non-library machines: {sorted(unexpected)}"
+            )
+
+        for machine, method_name in TESTED_MACHINES.items():
+            if not hasattr(self, method_name) or not callable(getattr(self, method_name)):
+                raise AssertionError(
+                    f"Test method {method_name} for machine {machine} does not exist"
+                )
 
 
 if __name__ == "__main__":

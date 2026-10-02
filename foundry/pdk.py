@@ -153,10 +153,27 @@ def watts_of(text: float | str) -> float:
     return solve.power_watts(text)
 
 
+# Core base game machines (exclude Space Age expansion machines).
+CORE_MACHINES: frozenset[str] = frozenset(
+    {
+        "assembling-machine-1",
+        "assembling-machine-2",
+        "assembling-machine-3",
+        "stone-furnace",
+        "steel-furnace",
+        "electric-furnace",
+        "chemical-plant",
+        "oil-refinery",
+        "centrifuge",
+        "rocket-silo",
+    }
+)
+
+
 class Pdk:
     """The tech layer, read from one prototype dump."""
 
-    def __init__(self, data: solve.Data) -> None:
+    def __init__(self, data: solve.Data, core_only: bool = True) -> None:
         self.data = data
         self.belts = data.prototypes.get(BELT_TABLE, {})
         self.undergrounds = data.prototypes.get(UNDERGROUND_TABLE, {})
@@ -164,7 +181,9 @@ class Pdk:
         self.poles = data.prototypes.get(POLE_TABLE, {})
         self.machines: dict[str, dict[str, Any]] = {}
         for table in MACHINE_TABLES:
-            self.machines.update(data.prototypes.get(table, {}))
+            for name, proto in data.prototypes.get(table, {}).items():
+                if not core_only or name in CORE_MACHINES:
+                    self.machines[name] = proto
 
     def belt_tiers(self) -> list[dict[str, Any]]:
         """Belt tiers, slowest first: name, items/s per lane, tunnel span."""

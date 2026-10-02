@@ -515,24 +515,28 @@ The file `test/test_routing_primitives.py` tests transport elements in small Fac
   - Powered pumps enforce unidirectional flow and prevent reverse fluid movement.
 
 ### 12.2 Level 1: Single Machine Cells
-The file `test/test_machine_cells.py` tests individual PDK standard cells through OpenROAD and headless Factorio:
-- **Single-Input Assembler**:
-  - An `assembling-machine-1` crafts `iron-gear-wheel` from `iron-plate`.
-  - OpenROAD routes the `iron-plate` input pin and `iron-gear-wheel` output pin.
-  - A fast inserter picks up iron plates from the routed input belt and drops them into the machine.
-  - An output fast inserter picks up completed gears and drops them onto the routed output belt.
-- **Multi-Input Assembler**:
-  - An `assembling-machine-1` crafts `automation-science-pack` from `copper-plate` and `iron-gear-wheel`.
-  - OpenROAD routes two independent input nets to the cell input ports.
-  - Multiple inserters supply required input ingredients simultaneously.
-- **Smelting Furnace**:
-  - An `electric-furnace` smelts `iron-ore` into `iron-plate`.
-- **Combinator Cell**:
-  - An `arithmetic-combinator` reads circuit signals and calculates running totals.
+The file `test/test_machine_cells.py` tests individual PDK standard cells through OpenROAD and headless Factorio.
+
+#### 100% Core Machine Library Coverage
+The PDK extracts ten core machines from Factorio. The test suite enforces 100 percent bidirectional test coverage of this machine cell library. If any core machine lacks an end-to-end test, the test suite raises an error.
+
+The ten core machines are:
+1. `assembling-machine-1`: 3x3 electric crafting cell (recipe: `iron-gear-wheel`).
+2. `assembling-machine-2`: 3x3 electric crafting cell (recipe: `electronic-circuit`).
+3. `assembling-machine-3`: 3x3 electric crafting cell (recipe: `automation-science-pack`).
+4. `stone-furnace`: 2x2 burner smelting cell (recipe: `copper-plate`).
+5. `steel-furnace`: 2x2 burner smelting cell (recipe: `iron-plate`).
+6. `electric-furnace`: 3x3 electric smelting cell (recipe: `iron-plate`).
+7. `chemical-plant`: 3x3 electric chemical cell with solid and fluid pins (recipe: `plastic-bar`).
+8. `oil-refinery`: 5x5 electric oil processing cell with fluid pins (recipe: `basic-oil-processing`).
+9. `centrifuge`: 3x3 electric centrifuging cell (recipe: `uranium-processing`).
+10. `rocket-silo`: 9x9 electric rocket assembly cell (recipe: `rocket-part`).
+
+The test suite also verifies circuit network macros:
+- `arithmetic-combinator`: 1x2 circuit network cell for telemetry signal accumulation.
 
 #### End-to-End Pipeline for Machine Cells
-Every single-cell test executes the full electronic design automation flow.
-
+Each cell test executes the full EDA flow:
 1. Generate Verilog netlist, LEF, and Liberty files for the single cell.
 2. Execute OpenROAD to place the cell and edge pins.
 3. Run detailed routing on surface and underground layers.
@@ -541,8 +545,7 @@ Every single-cell test executes the full electronic design automation flow.
 6. Load the blueprint into headless Factorio for physical simulation.
 
 #### Verification Criteria for Machine Cells
-Every cell test must satisfy six criteria.
-
+Every cell test must satisfy six criteria:
 1. **Zero DRC Violations**: OpenROAD detailed routing completes with zero violations.
 2. **Zero Collision Placement**: Headless Factorio builds 100 percent of blueprint entities without collision errors.
 3. **Physical Electric Supply**: An `electric-energy-interface` supplies power to a `medium-electric-pole`. The pole powers the machine and inserters. The test uses no artificial Lua energy injection.
