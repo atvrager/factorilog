@@ -24,12 +24,32 @@ def encode(
     entities: list[dict[str, Any]],
     label: str,
     wires: list[list[int]] | None = None,
+    icons: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Entities -> exchange string."""
+    """Encode a list of entities into an exchange string."""
+    if icons is None:
+        icons = []
+        seen: set[str] = set()
+        for ent in entities:
+            name = ent.get("name")
+            if name and name not in seen:
+                seen.add(name)
+                icons.append(
+                    {
+                        "index": len(icons) + 1,
+                        "signal": {"type": "item", "name": name},
+                    }
+                )
+                if len(icons) == 4:
+                    break
+        if not icons:
+            icons = [{"index": 1, "signal": {"type": "item", "name": "assembling-machine-1"}}]
+
     bp_dict: dict[str, Any] = {
         "item": "blueprint",
         "label": label,
         "version": VERSION_2_0,
+        "icons": icons,
         "entities": entities,
     }
     if wires:
