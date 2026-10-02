@@ -164,9 +164,20 @@ def entity_size(name: str) -> tuple[float, float]:
     return 1.0, 1.0
 
 
-def check_power(
-    entities: list[dict[str, Any]], supply_radius: float = 3.5
-) -> list[dict[str, Any]]:
+def entity_collision_half_size(name: str) -> tuple[float, float]:
+    """Return half width and half height of entity collision box."""
+    if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
+        return 1.2, 1.2
+    if "oil-refinery" in name:
+        return 2.2, 2.2
+    if "steel-furnace" in name:
+        return 0.7, 0.7
+    if "pump" in name:
+        return 0.29, 0.9
+    return 0.15, 0.15
+
+
+def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> list[dict[str, Any]]:
     """Return list of powered entities lacking electric pole supply coverage."""
     poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
     powered = [
@@ -238,25 +249,19 @@ def check_underground_pairing(
             od = o.get("direction", 0)
             if od != d:
                 continue
-            if d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= max_span:
-                found = o
-                break
-            elif d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= max_span:
-                found = o
-                break
-            elif d == DIRECTION_SOUTH and ix == ox and 1 <= oy - iy <= max_span:
-                found = o
-                break
-            elif d == DIRECTION_NORTH and ix == ox and 1 <= iy - oy <= max_span:
+            if (
+                (d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= max_span)
+                or (d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= max_span)
+                or (d == DIRECTION_SOUTH and ix == ox and 1 <= oy - iy <= max_span)
+                or (d == DIRECTION_NORTH and ix == ox and 1 <= iy - oy <= max_span)
+            ):
                 found = o
                 break
         if found:
             matched_outputs.add(id(found))
         else:
             unpaired.append(inp)
-    for o in outputs:
-        if id(o) not in matched_outputs:
-            unpaired.append(o)
+    unpaired.extend([o for o in outputs if id(o) not in matched_outputs])
     return unpaired
 
 
@@ -1049,20 +1054,20 @@ def build_entities(
             continue
         cx, cy = pos
         net_list = list(tile_to_nets[pos])
-        resolved = False
+        best_candidate = None
+        best_jump = None
+        best_score = -1
+
         for candidate in net_list:
-            if resolved:
-                break
             d = net_surface_tiles[candidate].get(pos)
             if d not in DIR_STEPS:
                 continue
             dx, dy = DIR_STEPS[d]
             opp_d = OPPOSITE_DIR.get(d)
             is_fluid = is_fluid_wire(net_map.get(candidate, {}), "M1")
+            max_allowed_span = 10 if is_fluid else 5
 
-            for bspan in range(1, 5):
-                if resolved:
-                    break
+            for bspan in range(1, max_allowed_span):
                 in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
                 prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
                 if (
@@ -1075,8 +1080,8 @@ def build_entities(
                     or used_underground_endpoints.get(prev_pos) == opp_d
                 ):
                     continue
-                for fspan in range(1, 10):
-                    if bspan + fspan > 10:
+                for fspan in range(1, max_allowed_span):
+                    if bspan + fspan > max_allowed_span:
                         break
                     out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
                     next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
@@ -1093,6 +1098,7 @@ def build_entities(
 
                     # Verify straight run
                     valid_span = True
+                    conflicts_cleared = 0
                     for s in range(-bspan + 1, fspan):
                         it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
                         if (
@@ -1105,20 +1111,30 @@ def build_entities(
                         ):
                             valid_span = False
                             break
+                        if len(tile_to_nets.get(it, set())) > 1:
+                            conflicts_cleared += 1
                     if not valid_span:
                         continue
 
-                    used_underground_endpoints[in_pos] = d
-                    used_underground_endpoints[out_pos] = d
-                    jumpers.append((candidate, in_pos, out_pos, d, is_fluid))
-                    for s in range(-bspan + 1, fspan):
-                        it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                        if it in net_surface_tiles[candidate]:
-                            del net_surface_tiles[candidate][it]
-                        if candidate in tile_to_nets[it]:
-                            tile_to_nets[it].remove(candidate)
-                    resolved = True
-                    break
+                    penalty = 100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
+                    score = conflicts_cleared * 10 - penalty - (bspan + fspan)
+                    if score > best_score:
+                        best_score = score
+                        best_jump = (in_pos, out_pos, bspan, fspan, d, is_fluid)
+                        best_candidate = candidate
+
+        if best_jump and best_candidate:
+            in_pos, out_pos, bspan, fspan, d, is_fluid = best_jump
+            dx, dy = DIR_STEPS[d]
+            used_underground_endpoints[in_pos] = d
+            used_underground_endpoints[out_pos] = d
+            jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+            for s in range(-bspan + 1, fspan):
+                it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                if it in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][it]
+                if best_candidate in tile_to_nets[it]:
+                    tile_to_nets[it].remove(best_candidate)
 
     # Add underground jumpers to underground_entities
     for _candidate, in_pos, out_pos, d, is_fluid in jumpers:
@@ -1303,11 +1319,11 @@ def build_entities(
         def is_covered(ent: dict[str, Any], cand_pos: tuple[float, float]) -> bool:
             ex = ent["position"]["x"]
             ey = ent["position"]["y"]
-            w, h = entity_size(ent.get("name", ""))
+            cx, cy = entity_collision_half_size(ent.get("name", ""))
             return (
                 max(
-                    max(0.0, abs(ex - cand_pos[0]) - w / 2.0),
-                    max(0.0, abs(ey - cand_pos[1]) - h / 2.0),
+                    max(0.0, abs(ex - cand_pos[0]) - cx),
+                    max(0.0, abs(ey - cand_pos[1]) - cy),
                 )
                 <= 3.5
             )
@@ -1331,18 +1347,23 @@ def build_entities(
 
         for i in list(uncovered):
             px, py = powered[i]["position"]["x"], powered[i]["position"]["y"]
-            w, h = entity_size(powered[i].get("name", ""))
-            reach = int(math.ceil(3.5 + max(w, h) / 2.0))
+            cx, cy = entity_collision_half_size(powered[i].get("name", ""))
+            reach = math.ceil(3.5 + max(cx, cy))
+            found_cand = False
             for dx in range(-reach, reach + 1):
                 for dy in range(-reach, reach + 1):
                     cand = (math.floor(px + dx) + 0.5, math.floor(py + dy) + 0.5)
-                    if cand not in surface_occupied and cand not in chosen:
-                        if is_covered(powered[i], cand):
-                            chosen.add(cand)
-                            cands.append(cand)
-                            uncovered.remove(i)
-                            break
-                if i not in uncovered:
+                    if (
+                        cand not in surface_occupied
+                        and cand not in chosen
+                        and is_covered(powered[i], cand)
+                    ):
+                        chosen.add(cand)
+                        cands.append(cand)
+                        uncovered.remove(i)
+                        found_cand = True
+                        break
+                if found_cand:
                     break
 
         # Connect chosen poles through Steiner MST with maximum wire span 9.0 tiles

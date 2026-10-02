@@ -118,7 +118,19 @@ puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid
 # The router connects blocks across four layers:
 # M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
 # FastRoute runs global routing. TritonRoute runs detailed routing.
-set_routing_layers -signal M1-M2
+set has_circuit 0
+foreach inst [$block getInsts] {
+    set master_name [[$inst getMaster] getName]
+    if {[string match "*combinator*" $master_name] || [string match "*display*" $master_name]} {
+        set has_circuit 1
+        break
+    }
+}
+if {$has_circuit} {
+    set_routing_layers -signal M1-M6
+} else {
+    set_routing_layers -signal M1-M2
+}
 ::drt::detailed_route_set_unidirectional_layer M1
 ::drt::detailed_route_set_unidirectional_layer M2
 global_route -verbose
