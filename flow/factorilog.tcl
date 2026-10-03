@@ -22,9 +22,15 @@
 #   fill 28 percent: legalizer settles in 5 passes, wirelength +66
 #   fill 35 percent: 147 passes, wirelength +287
 # Above 35 percent it does not converge at all.
-set BLOCK_FILL 0.08
-set CELL_PAD_SITES 4
-set CORE_MARGIN 4
+if {![info exists BLOCK_FILL]} {
+    set BLOCK_FILL 0.08
+}
+if {![info exists CELL_PAD_SITES]} {
+    set CELL_PAD_SITES 4
+}
+if {![info exists CORE_MARGIN]} {
+    set CORE_MARGIN 4
+}
 
 read_liberty tech.lib
 read_lef tech.lef
@@ -104,7 +110,9 @@ if {$fluid_count > 0} {
 # Place pins on the die edge closest to their connected instances.
 place_pins -hor_layers M1 -ver_layers M2
 
-set density 0.18
+if {![info exists density]} {
+    set density 0.18
+}
 puts "factorilog: placement density [format %.3f $density]"
 global_placement -density $density \
     -pad_left $CELL_PAD_SITES \

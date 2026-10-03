@@ -52,6 +52,14 @@ py_binary(
     deps = [":pdk_lib"],
 )
 
+py_binary(
+    name = "render_bp",
+    srcs = ["render_bp.py"],
+    data = ["//tools:render_blueprint.js"],
+    main = "render_bp.py",
+    deps = [":pdk_lib"],
+)
+
 py_test(
     name = "solve_test",
     size = "small",

@@ -73,11 +73,6 @@ def _factorilog_synth_impl(ctx):
 
     script = ctx.executable._netbuild
 
-    args = ctx.actions.args()
-    args.add(ctx.file.dump.path)
-    args.add("--spc")
-    args.add(str(ctx.attr.spc))
-
     extra_flags = []
     if ctx.attr.telemetry_taps:
         extra_flags.append("--telemetry-taps '%s'" % ctx.attr.telemetry_taps)
@@ -93,20 +88,37 @@ def _factorilog_synth_impl(ctx):
     flags_str = " ".join(extra_flags)
     target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
 
-    cmd = (
-        "set -euo pipefail\n" +
-        "OUT_DIR='%s'\n" % out_dir +
-        "mkdir -p \"$OUT_DIR\"\n" +
-        "DUMP_ABS=\"$(pwd)/%s\"\n" % ctx.file.dump.path +
-        "NETBUILD_ABS=\"$(pwd)/%s\"\n" % script.path +
-        "cd \"$OUT_DIR\"\n" +
-        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" %s %s\n"
-    ) % (target_str, flags_str)
+    cmd_parts = [
+        "set -euo pipefail",
+        "OUT_DIR=\"$(pwd)/%s\"" % out_dir,
+        "WORK_DIR=\"$OUT_DIR/%s_synth_work\"" % ctx.attr.name,
+        "mkdir -p \"$WORK_DIR\"",
+        "DUMP_ABS=\"$(pwd)/%s\"" % ctx.file.dump.path,
+        "NETBUILD_ABS=\"$(pwd)/%s\"" % script.path,
+        "cd \"$WORK_DIR\"",
+        "START_NS=$(date +%s%N)",
+        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" %s %s" % (target_str, flags_str),
+        "END_NS=$(date +%s%N)",
+        "ELAPSED_NS=$((END_NS - START_NS))",
+        "ELAPSED_SEC=$(awk \"BEGIN {printf \\\"%.3f\\\", $ELAPSED_NS / 1000000000}\")",
+        "cp -f \"$WORK_DIR/cells.v\" \"$OUT_DIR/%s\"" % ctx.outputs.cells_v.basename,
+        "cp -f \"$WORK_DIR/netlist.v\" \"$OUT_DIR/%s\"" % ctx.outputs.netlist_v.basename,
+        "cp -f \"$WORK_DIR/netlist.json\" \"$OUT_DIR/%s\"" % ctx.outputs.netlist_json.basename,
+        "cp -f \"$WORK_DIR/tech.lef\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lef.basename,
+        "cp -f \"$WORK_DIR/tech.lib\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lib.basename,
+        "rm -rf \"$WORK_DIR\"",
+    ]
+
+    if ctx.outputs.time_json:
+        outputs.append(ctx.outputs.time_json)
+        cmd_parts.append("echo \"{\\\"stage\\\": \\\"synth\\\", \\\"elapsed_seconds\\\": $ELAPSED_SEC}\" > \"$OUT_DIR/%s\"" % ctx.outputs.time_json.basename)
+
+    cmd_parts.append("echo \"factorilog [%s]: Synth completed in ${ELAPSED_SEC}s\"" % ctx.attr.name)
 
     ctx.actions.run_shell(
         inputs = [ctx.file.dump],
         outputs = outputs,
-        command = cmd,
+        command = "\n".join(cmd_parts),
         mnemonic = "FactorilogSynth",
         tools = [script],
         execution_requirements = {
@@ -131,6 +143,7 @@ factorilog_synth = rule(
         "netlist_json": attr.output(mandatory = True),
         "tech_lef": attr.output(mandatory = True),
         "tech_lib": attr.output(mandatory = True),
+        "time_json": attr.output(doc = "Optional output synthesis timing JSON file"),
         "_netbuild": attr.label(
             default = Label("//foundry:netbuild"),
             executable = True,
@@ -141,9 +154,107 @@ factorilog_synth = rule(
 )
 
 
+def _factorilog_pnr_impl(ctx):
+    out_def = ctx.outputs.def_file
+    out_drc = ctx.outputs.route_drc
+    out_timing = ctx.outputs.timing_rpt
+    out_time = ctx.outputs.time_json
+
+    inputs = [ctx.file.netlist_v, ctx.file.tech_lef, ctx.file.tech_lib, ctx.file.script]
+    outputs = [out_def, out_time]
+    if out_drc:
+        outputs.append(out_drc)
+    if out_timing:
+        outputs.append(out_timing)
+
+    work_dir = "%s/%s_pnr_work" % (out_def.dirname, ctx.attr.name)
+
+    cmd_parts = [
+        "set -euo pipefail",
+        "WORK_DIR='%s'" % work_dir,
+        "mkdir -p \"$WORK_DIR\"",
+        "cp -f '%s' \"$WORK_DIR/netlist.v\"" % ctx.file.netlist_v.path,
+        "cp -f '%s' \"$WORK_DIR/tech.lef\"" % ctx.file.tech_lef.path,
+        "cp -f '%s' \"$WORK_DIR/tech.lib\"" % ctx.file.tech_lib.path,
+        "cp -f '%s' \"$WORK_DIR/factorilog.tcl\"" % ctx.file.script.path,
+        "cat << 'EOF' > \"$WORK_DIR/run_pnr.tcl\"",
+        "set BLOCK_FILL %s" % ctx.attr.block_fill,
+        "set CELL_PAD_SITES %d" % ctx.attr.cell_pad_sites,
+        "set CORE_MARGIN %d" % ctx.attr.core_margin,
+        "set density %s" % ctx.attr.density,
+        "source [file join [file dirname [info script]] factorilog.tcl]",
+        "EOF",
+        "START_NS=$(date +%s%N)",
+        "TMPDIR=/tmp podman run --rm --network none " +
+        "--security-opt label=disable " +
+        "-v \"$(pwd)/$WORK_DIR\":/work " +
+        "-w /work " +
+        "docker.io/openroad/orfs:latest " +
+        "bash -lc \"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit /work/run_pnr.tcl\"",
+        "END_NS=$(date +%s%N)",
+        "ELAPSED_NS=$((END_NS - START_NS))",
+        "ELAPSED_SEC=$(awk \"BEGIN {printf \\\"%.3f\\\", $ELAPSED_NS / 1000000000}\")",
+        "cp -f \"$WORK_DIR/factory.def\" '%s'" % out_def.path,
+    ]
+
+    if out_drc:
+        cmd_parts.append(
+            "if [ -f \"$WORK_DIR/route_drc.rpt\" ]; then cp -f \"$WORK_DIR/route_drc.rpt\" '%s'; else touch '%s'; fi" %
+            (out_drc.path, out_drc.path),
+        )
+    if out_timing:
+        cmd_parts.append(
+            "if [ -f \"$WORK_DIR/timing.rpt\" ]; then cp -f \"$WORK_DIR/timing.rpt\" '%s'; else touch '%s'; fi" %
+            (out_timing.path, out_timing.path),
+        )
+
+    cmd_parts.append("echo \"{\\\"stage\\\": \\\"pnr\\\", \\\"elapsed_seconds\\\": $ELAPSED_SEC}\" > '%s'" % out_time.path)
+    cmd_parts.append("echo \"factorilog [%s]: PnR completed in ${ELAPSED_SEC}s\"" % ctx.attr.name)
+    cmd_parts.append("rm -rf \"$WORK_DIR\"")
+
+    full_cmd = "\n".join(cmd_parts)
+
+    ctx.actions.run_shell(
+        inputs = inputs,
+        outputs = outputs,
+        command = full_cmd,
+        mnemonic = "FactorilogPnR",
+        execution_requirements = {
+            "no-sandbox": "1",
+            "local": "1",
+        },
+    )
+
+    return [DefaultInfo(files = depset(outputs))]
+
+factorilog_pnr = rule(
+    implementation = _factorilog_pnr_impl,
+    attrs = {
+        "netlist_v": attr.label(allow_single_file = [".v"], mandatory = True, doc = "Structural Verilog netlist"),
+        "tech_lef": attr.label(allow_single_file = [".lef"], mandatory = True, doc = "Technology LEF file"),
+        "tech_lib": attr.label(allow_single_file = [".lib"], mandatory = True, doc = "Technology Liberty file"),
+        "script": attr.label(
+            default = Label("//flow:factorilog.tcl"),
+            allow_single_file = [".tcl"],
+            doc = "OpenROAD flow script template",
+        ),
+        "block_fill": attr.string(default = "0.08", doc = "Target cell fill fraction"),
+        "cell_pad_sites": attr.int(default = 4, doc = "Cell padding sites"),
+        "density": attr.string(default = "0.18", doc = "Target placement density"),
+        "core_margin": attr.int(default = 4, doc = "Core margin in sites"),
+        "def_file": attr.output(mandatory = True, doc = "Routed DEF output file"),
+        "route_drc": attr.output(doc = "DRC report output file"),
+        "timing_rpt": attr.output(doc = "Timing STA report output file"),
+        "time_json": attr.output(mandatory = True, doc = "Timing JSON output file"),
+    },
+    doc = "Executes OpenROAD placement and routing for a factory design.",
+)
+
+
 def _factorilog_blueprint_impl(ctx):
     out_bp = ctx.outputs.blueprint
     out_pins = ctx.outputs.pins_json
+    out_time = ctx.outputs.time_json
     def_file = ctx.file.def_file
     netlist_json = ctx.file.netlist_json
     label = ctx.attr.label_text
@@ -160,6 +271,9 @@ def _factorilog_blueprint_impl(ctx):
     if out_pins:
         args.extend(["--pins-out", out_pins.path])
         outputs.append(out_pins)
+    if out_time:
+        args.extend(["--time-out", out_time.path])
+        outputs.append(out_time)
 
     ctx.actions.run(
         inputs = [def_file, netlist_json],
@@ -180,6 +294,7 @@ factorilog_blueprint = rule(
         "label_text": attr.string(default = "factory", doc = "Blueprint label"),
         "blueprint": attr.output(mandatory = True, doc = "Output blueprint file"),
         "pins_json": attr.output(doc = "Optional output pins JSON metadata file"),
+        "time_json": attr.output(doc = "Optional output blueprint timing JSON file"),
         "_def2bp": attr.label(
             default = Label("//foundry:def2bp"),
             executable = True,
@@ -188,3 +303,214 @@ factorilog_blueprint = rule(
     },
     doc = "Converts placed DEF geometry and netlist sidecar into a blueprint file.",
 )
+
+
+def _factorilog_render_impl(ctx):
+    blueprint = ctx.file.blueprint
+    png = ctx.outputs.png
+    time_json = ctx.outputs.time_json
+    script = ctx.executable._render_bp
+
+    args = [
+        blueprint.path,
+        "-o",
+        png.path,
+    ]
+    outputs = [png]
+    if time_json:
+        args.extend(["--time-out", time_json.path])
+        outputs.append(time_json)
+
+    ctx.actions.run(
+        inputs = [blueprint],
+        outputs = outputs,
+        executable = script,
+        tools = [script],
+        arguments = args,
+        mnemonic = "FactorilogRender",
+        use_default_shell_env = True,
+        execution_requirements = {
+            "no-sandbox": "1",
+            "local": "1",
+        },
+    )
+
+    return [DefaultInfo(files = depset(outputs))]
+
+factorilog_render = rule(
+    implementation = _factorilog_render_impl,
+    attrs = {
+        "blueprint": attr.label(allow_single_file = [".blueprint", ".txt"], mandatory = True, doc = "Blueprint exchange string file"),
+        "png": attr.output(mandatory = True, doc = "Output rendered PNG image"),
+        "time_json": attr.output(doc = "Optional output render timing JSON file"),
+        "_render_bp": attr.label(
+            default = Label("//foundry:render_bp"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+    doc = "Renders Factorio blueprint string to a PNG image.",
+)
+
+
+def _factorilog_timing_summary_impl(ctx):
+    summary_out = ctx.outputs.summary_json
+    factory_name = ctx.attr.factory_name
+    time_files = ctx.files.time_files
+
+    cmd = """set -euo pipefail
+python3 - '%s' '%s' %s << 'PYEOF'
+import json, sys
+from pathlib import Path
+
+target = sys.argv[1]
+summary_file = Path(sys.argv[2])
+file_paths = sys.argv[3:]
+
+stages = {}
+total = 0.0
+
+for fp in file_paths:
+    p = Path(fp)
+    if p.is_file():
+        try:
+            data = json.loads(p.read_text(encoding='utf-8'))
+            stage = data.get('stage', p.stem)
+            sec = float(data.get('elapsed_seconds', 0.0))
+            stages[stage] = round(sec, 3)
+            total += sec
+        except Exception as err:
+            sys.stderr.write(f'Warning: failed to read {fp}: {err}\\n')
+
+summary = {
+    'target': target,
+    'stages': stages,
+    'total_seconds': round(total, 3),
+}
+summary_file.parent.mkdir(parents=True, exist_ok=True)
+summary_file.write_text(json.dumps(summary, indent=2) + '\\n', encoding='utf-8')
+stage_strs = [f'{k}={v:.2f}s' for k, v in stages.items()]
+print(f'factorilog [{target}]: ' + ' '.join(stage_strs) + f' total={total:.2f}s')
+PYEOF
+""" % (factory_name, summary_out.path, " ".join(["'%s'" % f.path for f in time_files]))
+
+    ctx.actions.run_shell(
+        inputs = time_files,
+        outputs = [summary_out],
+        command = cmd,
+        mnemonic = "FactorilogTimingSummary",
+        execution_requirements = {
+            "no-sandbox": "1",
+            "local": "1",
+        },
+    )
+
+    return [DefaultInfo(files = depset([summary_out]))]
+
+factorilog_timing_summary = rule(
+    implementation = _factorilog_timing_summary_impl,
+    attrs = {
+        "factory_name": attr.string(mandatory = True, doc = "Name of factory design"),
+        "time_files": attr.label_list(allow_files = [".json"], mandatory = True, doc = "Input timing JSON files"),
+        "summary_json": attr.output(mandatory = True, doc = "Aggregated timing summary JSON output"),
+    },
+    doc = "Aggregates execution time measurements across flow stages.",
+)
+
+
+def factorilog_science_factory(
+        name,
+        demand,
+        dump = "//test:data/dump-fixture.json",
+        block_fill = "0.08",
+        cell_pad_sites = 4,
+        density = "0.18",
+        core_margin = 4,
+        enable_display_readouts = False,
+        enable_circuit_readouts = False,
+        telemetry_taps = "none",
+        tags = None):
+    """Builds full physical design flow for a science pack factory."""
+    merged_tags = list(tags) if tags else []
+    if "manual" not in merged_tags:
+        merged_tags.append("manual")
+
+    synth_name = name + "_synth"
+    pnr_name = name + "_pnr"
+    bp_name = name + "_bp"
+    render_name = name + "_render"
+    timing_name = name + "_timing"
+
+    factorilog_synth(
+        name = synth_name,
+        cells_v = name + "_cells.v",
+        netlist_v = name + "_netlist.v",
+        netlist_json = name + "_netlist.json",
+        tech_lef = name + "_tech.lef",
+        tech_lib = name + "_tech.lib",
+        time_json = name + "_synth_time.json",
+        dump = dump,
+        demand = demand,
+        enable_display_readouts = enable_display_readouts,
+        enable_circuit_readouts = enable_circuit_readouts,
+        telemetry_taps = telemetry_taps,
+        tags = merged_tags,
+    )
+
+    factorilog_pnr(
+        name = pnr_name,
+        netlist_v = ":" + name + "_netlist.v",
+        tech_lef = ":" + name + "_tech.lef",
+        tech_lib = ":" + name + "_tech.lib",
+        def_file = name + ".def",
+        route_drc = name + "_route_drc.rpt",
+        timing_rpt = name + "_sta.rpt",
+        time_json = name + "_pnr_time.json",
+        block_fill = block_fill,
+        cell_pad_sites = cell_pad_sites,
+        density = density,
+        core_margin = core_margin,
+        tags = merged_tags,
+    )
+
+    factorilog_blueprint(
+        name = bp_name,
+        def_file = ":" + name + ".def",
+        netlist_json = ":" + name + "_netlist.json",
+        blueprint = name + ".blueprint",
+        pins_json = name + "_pins.json",
+        time_json = name + "_bp_time.json",
+        label_text = name,
+        tags = merged_tags,
+    )
+
+    factorilog_render(
+        name = render_name,
+        blueprint = ":" + name + ".blueprint",
+        png = name + ".png",
+        time_json = name + "_render_time.json",
+        tags = merged_tags,
+    )
+
+    factorilog_timing_summary(
+        name = timing_name,
+        factory_name = name,
+        time_files = [
+            ":" + name + "_synth_time.json",
+            ":" + name + "_pnr_time.json",
+            ":" + name + "_bp_time.json",
+            ":" + name + "_render_time.json",
+        ],
+        summary_json = name + "_timing.json",
+        tags = merged_tags,
+    )
+
+    native.filegroup(
+        name = name,
+        srcs = [
+            ":" + name + ".blueprint",
+            ":" + name + ".png",
+            ":" + name + "_timing.json",
+        ],
+        tags = merged_tags,
+    )

@@ -6,11 +6,14 @@ The module validates the archive checksum and renders blueprints to PNG images.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -20,7 +23,25 @@ FBE_SHA256 = "10bdd7d9ff74944a985f4c517e037ccda55aef1428a58f0787fc522f02a66cd0"
 FBE_ARCHIVE_URL = f"https://github.com/Teoxoy/factorio-blueprint-editor/archive/{FBE_COMMIT}.tar.gz"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RENDER_SCRIPT = REPO_ROOT / "tools" / "render_blueprint.js"
+
+
+def _find_render_script() -> Path:
+    """Find the render_blueprint.js helper script path."""
+    if "FACTORILOG_RENDER_SCRIPT" in os.environ:
+        return Path(os.environ["FACTORILOG_RENDER_SCRIPT"]).resolve()
+    candidate = REPO_ROOT / "tools" / "render_blueprint.js"
+    if candidate.is_file():
+        return candidate.resolve()
+    runfiles_dir = os.environ.get("RUNFILES_DIR")
+    if runfiles_dir:
+        for prefix in ["_main", "factorilog"]:
+            candidate = Path(runfiles_dir) / prefix / "tools" / "render_blueprint.js"
+            if candidate.is_file():
+                return candidate.resolve()
+    candidate = Path("tools/render_blueprint.js").resolve()
+    if candidate.is_file():
+        return candidate
+    raise FileNotFoundError("Could not locate tools/render_blueprint.js")
 
 
 def _download_and_verify(url: str, expected_sha256: str, target_file: Path) -> None:
@@ -109,11 +130,11 @@ def ensure_fbe() -> Path:
     return commit_dir
 
 
-def render_blueprint(bp_string: str, out_path: str | Path) -> Path:
+def render_blueprint(bp_input: str | Path, out_path: str | Path) -> Path:
     """Render a blueprint exchange string to a PNG image file.
 
     Args:
-        bp_string: The Factorio blueprint exchange string.
+        bp_input: The Factorio blueprint string or file path.
         out_path: The target file path for the output PNG image.
 
     Returns:
@@ -121,18 +142,52 @@ def render_blueprint(bp_string: str, out_path: str | Path) -> Path:
     """
     fbe_dir = ensure_fbe()
     dist_dir = fbe_dir / "packages" / "website" / "dist"
+    script_path = _find_render_script()
 
     out_file = Path(out_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
-    env = {
-        **os.environ,
-        "NODE_PATH": str(fbe_dir / "node_modules"),
-    }
+    bp_path = Path(bp_input)
+    bp_arg = str(bp_path.resolve()) if bp_path.is_file() else str(bp_input).strip()
+
+    uid = os.getuid()
+    env = {**os.environ}
+
+    if "HOME" not in env:
+        try:
+            import pwd
+
+            env["HOME"] = pwd.getpwuid(uid).pw_dir
+        except Exception:
+            pass
+
+    if "XDG_RUNTIME_DIR" not in env:
+        xdg_run = Path(f"/run/user/{uid}")
+        if xdg_run.is_dir():
+            env["XDG_RUNTIME_DIR"] = str(xdg_run)
+
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        bus_sock = Path(f"/run/user/{uid}/bus")
+        if bus_sock.is_socket():
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_sock}"
+
+    if "WAYLAND_DISPLAY" not in env:
+        wayland_sock = Path(f"/run/user/{uid}/wayland-0")
+        if wayland_sock.is_socket():
+            env["WAYLAND_DISPLAY"] = "wayland-0"
+
+    if "DISPLAY" not in env:
+        for disp in [":1", ":0"]:
+            sock = Path(f"/tmp/.X11-unix/X{disp[1:]}")
+            if sock.is_socket():
+                env["DISPLAY"] = disp
+                break
+
+    env["NODE_PATH"] = str(fbe_dir / "node_modules")
     cmd = [
         "node",
-        str(RENDER_SCRIPT),
-        bp_string,
+        str(script_path),
+        bp_arg,
         str(out_file),
         str(dist_dir),
     ]
@@ -148,3 +203,33 @@ def render_blueprint(bp_string: str, out_path: str | Path) -> Path:
         raise RuntimeError(f"Blueprint render failed:\n{res.stderr}\n{res.stdout}")
 
     return out_file
+
+
+def main() -> int:
+    """Command-line entry point to render blueprint files to PNG images."""
+    parser = argparse.ArgumentParser(description="Render Factorio blueprint to PNG.")
+    parser.add_argument("blueprint", help="Path to blueprint file or raw blueprint string")
+    parser.add_argument("-o", "--output", required=True, help="Output PNG file path")
+    parser.add_argument("--time-out", help="Optional output JSON file path for render duration")
+    args = parser.parse_args()
+
+    t0 = time.perf_counter()
+    out = render_blueprint(args.blueprint, args.output)
+    t1 = time.perf_counter()
+    elapsed = round(t1 - t0, 3)
+
+    if args.time_out:
+        out_time = Path(args.time_out)
+        out_time.parent.mkdir(parents=True, exist_ok=True)
+        time_data = {
+            "stage": "render",
+            "elapsed_seconds": elapsed,
+        }
+        out_time.write_text(json.dumps(time_data, indent=2) + "\n", encoding="utf-8")
+
+    print(f"factorilog: rendered blueprint to {out} in {elapsed}s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

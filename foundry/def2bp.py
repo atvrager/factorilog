@@ -13,6 +13,7 @@ import json
 import math
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1939,9 +1940,16 @@ def main() -> int:
         action="store_true",
         help="Emit raw blueprint JSON document instead of exchange string",
     )
+    parser.add_argument(
+        "--time-out",
+        type=Path,
+        default=None,
+        help="Path to write execution time JSON",
+    )
 
     args = parser.parse_args()
 
+    t0 = time.perf_counter()
     def_text = args.def_file.read_text()
     netlist_data = json.loads(args.netlist_file.read_text())
 
@@ -1972,6 +1980,17 @@ def main() -> int:
         pins_data = extract_pins(def_data, netlist_data)
         args.pins_out.parent.mkdir(parents=True, exist_ok=True)
         args.pins_out.write_text(json.dumps(pins_data, indent=2) + "\n")
+
+    t1 = time.perf_counter()
+    elapsed = round(t1 - t0, 3)
+
+    if args.time_out:
+        args.time_out.parent.mkdir(parents=True, exist_ok=True)
+        time_data = {
+            "stage": "bp",
+            "elapsed_seconds": elapsed,
+        }
+        args.time_out.write_text(json.dumps(time_data, indent=2) + "\n")
 
     return 0
 
