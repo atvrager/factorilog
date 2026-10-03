@@ -29,8 +29,16 @@ DIRECTION_EAST = 4
 DIRECTION_SOUTH = 8
 DIRECTION_WEST = 12
 
-# Factorio 2.0 wire connector IDs: pole_copper = 5.
+# Factorio 2.0 wire connector IDs.
+WIRE_CONNECTOR_CIRCUIT_RED = 1
+WIRE_CONNECTOR_CIRCUIT_GREEN = 2
+WIRE_CONNECTOR_COMBINATOR_INPUT_RED = 1
+WIRE_CONNECTOR_COMBINATOR_INPUT_GREEN = 2
+WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED = 3
+WIRE_CONNECTOR_COMBINATOR_OUTPUT_GREEN = 4
 WIRE_CONNECTOR_POLE_COPPER = 5
+WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER = 5
+WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER = 6
 
 
 def parse_def(text: str) -> dict[str, Any]:
@@ -171,7 +179,7 @@ def entity_size(name: str) -> tuple[float, float]:
         or "centrifuge" in name
     ):
         return 3.0, 3.0
-    if "steel-furnace" in name or "stone-furnace" in name:
+    if "steel-furnace" in name or "stone-furnace" in name or "power-switch" in name:
         return 2.0, 2.0
     if "pump" in name:
         return 1.0, 2.0
@@ -191,7 +199,7 @@ def entity_collision_half_size(name: str) -> tuple[float, float]:
         or "centrifuge" in name
     ):
         return 1.2, 1.2
-    if "furnace" in name:
+    if "furnace" in name or "power-switch" in name:
         return 0.7, 0.7
     if "pump" in name:
         return 0.29, 0.9
@@ -450,6 +458,31 @@ def build_entities(
             ent = add_entity("constant-combinator", center_x, center_y, direction=DIRECTION_NORTH)
             inst_to_entity[cname] = ent
             occupied_positions.add((round(gx + 0.5, 2), round(gy + 0.5, 2)))
+        elif macro == "power_switch" or cell_id == "power_switch":
+            cw, ch = 2, 2
+            center_x, center_y = gx + 1.0, gy + 1.0
+            cond = inst.get(
+                "circuit_condition",
+                {
+                    "first_signal": {"type": "virtual", "name": "signal-T"},
+                    "comparator": "<",
+                    "constant": 30,
+                },
+            )
+            extra = {
+                "control_behavior": {
+                    "circuit_enabled": True,
+                    "circuit_condition": cond,
+                },
+                "switch_state": False,
+            }
+            ent = add_entity(
+                "power-switch", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
+            )
+            inst_to_entity[cname] = ent
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
         else:
             cw = int(cell.get("width", 3))
             ch = int(cell.get("height", 3))

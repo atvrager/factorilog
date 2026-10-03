@@ -106,10 +106,6 @@ py_test(
     name = "def2bp_test",
     size = "small",
     srcs = ["test_def2bp.py"],
-    data = [
-        "factory.def",
-        "netlist.json",
-    ],
     main = "test_def2bp.py",
     deps = [":pdk_lib"],
 )

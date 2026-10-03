@@ -128,4 +128,23 @@ py_test(
     ],
 )
 
+py_test(
+    name = "circuit_power_test",
+    size = "medium",
+    srcs = ["test_circuit_power.py"],
+    data = ["//test:fixture"],
+    local = True,
+    main = "test_circuit_power.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        ":routing_primitives_test",
+        "//flow:check_blueprint_lib",
+        "//foundry:pdk_lib",
+    ],
+)
+
 

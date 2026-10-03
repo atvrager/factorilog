@@ -72,6 +72,7 @@ DISPLAY_PANEL_CELL = "display_panel"
 ARITHMETIC_COMBINATOR_CELL = "arithmetic_combinator"
 DECIDER_COMBINATOR_CELL = "decider_combinator"
 CONSTANT_COMBINATOR_CELL = "constant_combinator"
+POWER_SWITCH_CELL = "power_switch"
 
 
 def display_panel_cell() -> dict[str, Any]:
@@ -134,6 +135,22 @@ def constant_combinator_cell() -> dict[str, Any]:
         "crafts_per_minute": 0.0,
         "inputs": [],
         "outputs": ["y"],
+        "circuit_cell": True,
+    }
+
+
+def power_switch_cell() -> dict[str, Any]:
+    """The power switch cell as a PDK macro record."""
+    return {
+        "cell": POWER_SWITCH_CELL,
+        "machine": "power-switch",
+        "recipe": "switch",
+        "width": 2,
+        "height": 2,
+        "watts": 0.0,
+        "crafts_per_minute": 0.0,
+        "inputs": ["a"],
+        "outputs": [],
         "circuit_cell": True,
     }
 
