@@ -88,6 +88,7 @@ openroad_stage(
         ":tech.lef",
         ":tech.lib",
     ],
+    tags = ["manual"],
 )
 
 # 3. Placement Stage: 1_floorplan.odb -> 2_placed.odb
@@ -98,6 +99,7 @@ openroad_stage(
     srcs = [
         ":1_floorplan.odb",
     ],
+    tags = ["manual"],
 )
 
 # 4. Routing Stage: 2_placed.odb -> 3_routed.odb, factory.def, route_drc.rpt
@@ -112,6 +114,7 @@ openroad_stage(
     srcs = [
         ":2_placed.odb",
     ],
+    tags = ["manual"],
 )
 
 # 5. Timing Analysis Stage: 3_routed.odb + tech.lib -> timing.rpt
@@ -123,6 +126,7 @@ openroad_stage(
         ":3_routed.odb",
         ":tech.lib",
     ],
+    tags = ["manual"],
 )
 
 # 6. Blueprint Stage: factory.def + netlist.json -> factory.blueprint
@@ -133,6 +137,7 @@ factorilog_blueprint(
     label_text = "red_science_60spm_v2",
     netlist_json = ":netlist.json",
     pins_json = "pins.json",
+    tags = ["manual"],
 )
 
 # -----------------------------------------------------------------------------

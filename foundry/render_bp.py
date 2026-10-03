@@ -165,6 +165,10 @@ def render_blueprint(bp_input: str | Path, out_path: str | Path) -> Path:
         xdg_run = Path(f"/run/user/{uid}")
         if xdg_run.is_dir():
             env["XDG_RUNTIME_DIR"] = str(xdg_run)
+        else:
+            runtime_dir = Path(f"/tmp/runtime-{uid}")
+            runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            env["XDG_RUNTIME_DIR"] = str(runtime_dir)
 
     if "DBUS_SESSION_BUS_ADDRESS" not in env:
         bus_sock = Path(f"/run/user/{uid}/bus")
@@ -177,11 +181,14 @@ def render_blueprint(bp_input: str | Path, out_path: str | Path) -> Path:
             env["WAYLAND_DISPLAY"] = "wayland-0"
 
     if "DISPLAY" not in env:
-        for disp in [":1", ":0"]:
+        for disp in [":99", ":1", ":0"]:
             sock = Path(f"/tmp/.X11-unix/X{disp[1:]}")
             if sock.is_socket():
                 env["DISPLAY"] = disp
                 break
+
+    if "LIBGL_ALWAYS_SOFTWARE" not in env:
+        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
     env["NODE_PATH"] = str(fbe_dir / "node_modules")
     cmd = [

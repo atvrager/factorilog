@@ -1,3 +1,7 @@
 [tool.ty.src]
 # The research scripts are prior art. ty checks maintained code only.
 exclude = ["reference"]
+
+[tool.ty.analysis]
+allowed-unresolved-imports = ["numpy", "numpy.**", "scipy", "scipy.**"]
+replace-imports-with-any = ["pyslang", "pyslang.**"]

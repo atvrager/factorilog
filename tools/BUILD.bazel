@@ -58,6 +58,7 @@ sh_test(
     ],
     data = [
         "@ty//:bin",
+        "//:pyproject.toml",
         "//foundry:py_srcs",
         "//tools:py_srcs",
     ],

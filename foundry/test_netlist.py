@@ -15,7 +15,7 @@ import solve
 
 # pyslang moved its API between major versions. Support both layouts.
 try:
-    import pyslang  # ty: ignore[unresolved-import]
+    import pyslang
 
     _SYNTAX = getattr(pyslang, "syntax", pyslang)
     _AST = getattr(pyslang, "ast", pyslang)

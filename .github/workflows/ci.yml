@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-prep:
+    name: Test and Prepare Cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python Dependencies
+        run: |
+          pip install -r tools/requirements_lock.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache Bazel and FBE
+        id: cache-bazel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazelisk
+            ~/.cache/bazel-disk-cache
+            ~/.cache/bazel-repo-cache
+            ~/.cache/factorilog
+          key: bazel-fbe-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            bazel-fbe-${{ runner.os }}-${{ github.ref_name }}-
+            bazel-fbe-${{ runner.os }}-
+
+      - name: Run Bazel Tests
+        run: |
+          bazel test //... \
+            --disk_cache=~/.cache/bazel-disk-cache \
+            --repository_cache=~/.cache/bazel-repo-cache
+
+      - name: Pre-build Common Tools and Netlists
+        run: |
+          bazel build \
+            //foundry:netbuild \
+            //foundry:render_bp \
+            //foundry:def2bp \
+            //flow:automation_science_synth \
+            //flow:logistic_science_synth \
+            //flow:military_science_synth \
+            //flow:chemical_science_synth \
+            --disk_cache=~/.cache/bazel-disk-cache \
+            --repository_cache=~/.cache/bazel-repo-cache
+
+      - name: Pre-build Factorio Blueprint Editor
+        run: |
+          python3 -c "import sys; sys.path.insert(0, 'foundry'); import render_bp; render_bp.ensure_fbe()"
+
+  build-science:
+    name: Build Science (${{ matrix.pack }})
+    needs: test-and-prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pack:
+          - automation_science
+          - logistic_science
+          - military_science
+          - chemical_science
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore Bazel and FBE Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/bazelisk
+            ~/.cache/bazel-disk-cache
+            ~/.cache/bazel-repo-cache
+            ~/.cache/factorilog
+          key: bazel-fbe-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            bazel-fbe-${{ runner.os }}-${{ github.ref_name }}-
+            bazel-fbe-${{ runner.os }}-
+
+      - name: Ensure Container Runtime
+        run: |
+          sudo apt-get update && sudo apt-get install -y uidmap
+          if ! grep -q "^runner:" /etc/subuid 2>/dev/null; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subuid
+          fi
+          if ! grep -q "^runner:" /etc/subgid 2>/dev/null; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subgid
+          fi
+          podman system migrate 2>/dev/null || true
+          podman pull docker.io/openroad/orfs:latest
+
+      - name: Setup Firefox Browser
+        id: setup-firefox
+        uses: browser-actions/setup-firefox@v1
+
+      - name: Configure Display and Firefox Environment
+        run: |
+          /usr/bin/Xvfb :99 -screen 0 1280x1024x24 > /dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+          echo "FIREFOX_BIN=${{ steps.setup-firefox.outputs.firefox-path }}" >> "$GITHUB_ENV"
+
+      - name: Build Science Target
+        run: |
+          bazel build //flow:${{ matrix.pack }} \
+            --disk_cache=~/.cache/bazel-disk-cache \
+            --repository_cache=~/.cache/bazel-repo-cache
+
+      - name: Upload Science Target Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pack }}-artifacts
+          path: |
+            bazel-bin/flow/${{ matrix.pack }}.blueprint
+            bazel-bin/flow/${{ matrix.pack }}.png
+            bazel-bin/flow/${{ matrix.pack }}_timing.json
+          if-no-files-found: error
+
+  summary:
+    name: Science Build Summary
+    needs: build-science
+    if: always() && needs.build-science.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Science Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-artifacts"
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate Summary Report
+        run: |
+          python3 -c "
+          import json, os
+          from pathlib import Path
+
+          packs = [
+              'automation_science',
+              'logistic_science',
+              'military_science',
+              'chemical_science',
+          ]
+          table = [
+              '### Science Pack Factory Build Summary',
+              '',
+              '| Science Pack | Status | Synth | PnR | Blueprint | Render | Total Time |',
+              '| :--- | :--- | :--- | :--- | :--- | :--- | :--- |',
+          ]
+          for p in packs:
+              timing_file = Path('artifacts') / f'{p}_timing.json'
+              if timing_file.is_file():
+                  data = json.loads(timing_file.read_text(encoding='utf-8'))
+                  stages = data.get('stages', {})
+                  synth = f\"{stages.get('synth', 0.0):.2f}s\"
+                  pnr = f\"{stages.get('pnr', 0.0):.2f}s\"
+                  bp = f\"{stages.get('bp', 0.0):.2f}s\"
+                  render = f\"{stages.get('render', 0.0):.2f}s\"
+                  total = f\"{data.get('total_seconds', 0.0):.2f}s\"
+                  table.append(
+                      f'| **{p}** | PASSED | {synth} | {pnr} | {bp} | {render} | **{total}** |'
+                  )
+              else:
+                  table.append(f'| **{p}** | FAILED / SKIPPED | - | - | - | - | - |')
+
+          report = '\n'.join(table)
+          print(report)
+
+          step_summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if step_summary:
+              with open(step_summary, 'a', encoding='utf-8') as f:
+                  f.write(report + '\n')
+          "
+
+      - name: Bundle All Science Factory Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: science-factories-all
+          path: artifacts/
+          if-no-files-found: ignore

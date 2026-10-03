@@ -46,14 +46,23 @@ const server = http.createServer({ maxHeaderSize: 32 * 1024 * 1024 }, (req, res)
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;
 
+const firefoxPath = process.env.FIREFOX_BIN || (fs.existsSync('/usr/bin/firefox') ? '/usr/bin/firefox' : 'firefox');
 const browser = await puppeteer.launch({
     browser: 'firefox',
-    executablePath: '/usr/bin/firefox',
-    headless: true
+    executablePath: firefoxPath,
+    headless: true,
+    args: ['--no-sandbox'],
+    extraPrefsFirefox: {
+        'webgl.force-enabled': true,
+        'webgl.disabled': false,
+        'layers.acceleration.force-enabled': true
+    }
 });
 
 try {
     const page = await browser.newPage();
+    page.on('console', msg => console.error('PAGE LOG:', msg.text()));
+    page.on('pageerror', err => console.error('PAGE ERROR:', err.toString()));
     await page.goto(`http://127.0.0.1:${port}/?source=${encodeURIComponent(bpStr)}`, { waitUntil: 'load' });
     await page.waitForFunction(() => {
         const el = document.getElementById('loadingScreen');
