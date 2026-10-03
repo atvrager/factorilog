@@ -211,6 +211,116 @@ script.on_init(function()
     for _, s in ipairs(sample_failures) do
         log("SAMPLE_FAILURE: " .. s)
     end
+
+    -- Revive all ghosts into real entities
+    local revived_count = 0
+    for _, g in ipairs(ghosts) do
+        if g.valid then
+            local ok = g.silent_revive()
+            if ok then
+                revived_count = revived_count + 1
+            end
+        end
+    end
+    log("RESULT_REVIVED: " .. tostring(revived_count))
+
+    -- Map all pipes by coordinates
+    local pipes = surface.find_entities_filtered{name = {"pipe", "pipe-to-ground"}}
+    local pipe_map = {}
+    for _, p in ipairs(pipes) do
+        pipe_map[string.format("%.1f,%.1f", p.position.x, p.position.y)] = p
+    end
+
+    local function inject_pipe(x, y, fluid_name)
+        local key = string.format("%.1f,%.1f", x, y)
+        local p = pipe_map[key]
+        if p and p.valid then
+            local ins = p.insert_fluid{name = fluid_name, amount = 1000}
+            return ins, p
+        end
+        return 0, nil
+    end
+
+    -- Inject fluids from machine ports
+    local machines = surface.find_entities_filtered{type = {"assembling-machine", "furnace"}}
+    local port_injects = {}
+    for _, m in ipairs(machines) do
+        local r = m.get_recipe()
+        local cx, cy = m.position.x, m.position.y
+        if m.name == "oil-refinery" and r and r.name == "advanced-oil-processing" then
+            table.insert(port_injects, {cx - 3, cy - 1, "water", "oil-refinery water in"})
+            table.insert(port_injects, {cx - 3, cy + 1, "crude-oil", "oil-refinery crude in"})
+            table.insert(port_injects, {cx + 3, cy - 2, "heavy-oil", "oil-refinery heavy out"})
+            table.insert(port_injects, {cx + 3, cy, "light-oil", "oil-refinery light out"})
+            table.insert(port_injects, {cx + 3, cy + 2, "petroleum-gas", "oil-refinery petgas out"})
+        elseif m.name == "chemical-plant" and r then
+            if r.name == "basic-oil-processing" then
+                table.insert(port_injects, {cx - 2, cy - 1, "crude-oil", "chem crude in"})
+            elseif r.name == "heavy-oil-cracking" then
+                table.insert(port_injects, {cx - 2, cy - 1, "heavy-oil", "chem heavy in"})
+                table.insert(port_injects, {cx - 2, cy + 1, "water", "chem water in"})
+                table.insert(port_injects, {cx + 2, cy - 1, "light-oil", "chem light out"})
+            elseif r.name == "light-oil-cracking" then
+                table.insert(port_injects, {cx - 2, cy - 1, "light-oil", "chem light in"})
+                table.insert(port_injects, {cx - 2, cy + 1, "water", "chem water in"})
+                table.insert(port_injects, {cx + 2, cy - 1, "petroleum-gas", "chem petgas out"})
+            elseif r.name == "sulfur" then
+                table.insert(port_injects, {cx - 2, cy - 1, "petroleum-gas", "chem petgas in"})
+                table.insert(port_injects, {cx - 2, cy + 1, "water", "chem water in"})
+            elseif r.name == "sulfuric-acid" then
+                table.insert(port_injects, {cx - 2, cy - 1, "water", "chem water in"})
+                table.insert(port_injects, {cx + 2, cy - 1, "sulfuric-acid", "chem acid out"})
+            elseif r.name == "plastic-bar" then
+                table.insert(port_injects, {cx - 2, cy - 1, "petroleum-gas", "chem petgas in"})
+            end
+        end
+    end
+
+    local failed_injects = 0
+    local fluid_samples = {}
+    for _, inj in ipairs(port_injects) do
+        local ins, p = inject_pipe(inj[1], inj[2], inj[3])
+        if ins == 0 and p then
+            failed_injects = failed_injects + 1
+            local existing = serpent.line(p.get_fluid_contents())
+            if #fluid_samples < 15 then
+                table.insert(fluid_samples, string.format("Fluid conflict: wanted %s at (%.1f, %.1f) [%s], but pipe has %s",
+                    inj[3], inj[1], inj[2], inj[4], existing))
+            end
+        end
+    end
+    log("RESULT_FLUID_INJECT_CONFLICTS: " .. tostring(failed_injects))
+
+    -- Check for adjacent surface pipes with differing fluids
+    local surface_clashes = 0
+    for _, p in ipairs(pipes) do
+        if p.valid and p.name == "pipe" then
+            local contents = p.get_fluid_contents()
+            local f1 = nil
+            for fname, _ in pairs(contents) do f1 = fname break end
+            if f1 then
+                for _, off in ipairs({{1,0}, {-1,0}, {0,1}, {0,-1}}) do
+                    local nkey = string.format("%.1f,%.1f", p.position.x + off[1], p.position.y + off[2])
+                    local n = pipe_map[nkey]
+                    if n and n.valid and n.name == "pipe" then
+                        for f2, _ in pairs(n.get_fluid_contents()) do
+                            if f2 ~= f1 then
+                                surface_clashes = surface_clashes + 1
+                                if #fluid_samples < 15 then
+                                    table.insert(fluid_samples, string.format("Adjacent pipe clash: (%.1f, %.1f) [%s] <-> (%.1f, %.1f) [%s]",
+                                        p.position.x, p.position.y, f1, n.position.x, n.position.y, f2))
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    log("RESULT_SURFACE_PIPE_CLASHES: " .. tostring(surface_clashes))
+    for _, s in ipairs(fluid_samples) do
+        log("FLUID_CLASH: " .. s)
+    end
 end)
 """
     )
@@ -236,6 +346,7 @@ end)
         "reasons": {},
         "bounds": {},
         "samples": [],
+        "fluid_clashes": [],
     }
     if log_path.is_file():
         for line in log_path.read_text().splitlines():
@@ -246,6 +357,7 @@ end)
                 "REASON_",
                 "BOUNDS_",
                 "SAMPLE_FAILURE:",
+                "FLUID_CLASH:",
             ):
                 if prefix in line:
                     idx = line.find(prefix)
@@ -253,6 +365,9 @@ end)
                     if prefix == "SAMPLE_FAILURE:":
                         sample_text = payload.replace("SAMPLE_FAILURE:", "").strip()
                         results["samples"].append(sample_text)
+                    elif prefix == "FLUID_CLASH:":
+                        clash_text = payload.replace("FLUID_CLASH:", "").strip()
+                        results["fluid_clashes"].append(clash_text)
                     elif ":" in payload:
                         key, val = payload.split(":", 1)
                         key = key.strip()
@@ -347,6 +462,21 @@ def main() -> int:
         print("\nSample failures:")
         for s in samples:
             print(f"  - {s}")
+
+    fluid_conflicts = results.get("RESULT_FLUID_INJECT_CONFLICTS", 0)
+    surface_clashes = results.get("RESULT_SURFACE_PIPE_CLASHES", 0)
+    print("\nFluid network validation:")
+    print(f"  Injection conflicts    : {fluid_conflicts}")
+    print(f"  Surface pipe clashes   : {surface_clashes}")
+
+    fluid_clashes = details.get("fluid_clashes", [])
+    if fluid_clashes:
+        print("\nFluid clashes:")
+        for c in fluid_clashes:
+            print(f"  - {c}")
+
+    if results.get("RESULT_UNPLACED_TOTAL", 0) > 0 or fluid_conflicts > 0 or surface_clashes > 0:
+        return 1
 
     return 0
 

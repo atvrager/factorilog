@@ -99,7 +99,7 @@ def parse_def(text: str) -> dict[str, Any]:
                 line = line.strip()
                 # Check for layer cut pattern: ( x y ) cut_name
                 m_via = re.search(
-                    r"(?:ROUTED|NEW)\s+(\S+)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+([A-Za-z0-9_]+)",
+                    r"(?:ROUTED|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+([A-Za-z0-9_]+)",
                     line,
                 )
                 if m_via and not m_via.group(4).isdigit() and m_via.group(4) != "*":
@@ -115,7 +115,7 @@ def parse_def(text: str) -> dict[str, Any]:
 
                 # Check for wire segment: ( x1 y1 [ext] ) ( x2 y2 [ext] )
                 m_wire = re.search(
-                    r"(?:ROUTED|NEW)\s+(\S+)\s+\(\s*(-?\d+)\s+(-?\d+)(?:\s+-?\d+)?\s*\)\s+\(\s*(\*|-?\d+)\s+(\*|-?\d+)",
+                    r"(?:ROUTED|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)(?:\s+-?\d+)?\s*\)\s+\(\s*(\*|-?\d+)\s+(\*|-?\d+)",
                     line,
                 )
                 if m_wire:
@@ -145,7 +145,7 @@ def parse_def(text: str) -> dict[str, Any]:
             nets.append(
                 {
                     "name": net_name,
-                    "wires": wires,
+                    "wires": merge_collinear_wires(wires, vias),
                     "vias": vias,
                     "connections": conns,
                 }
@@ -157,6 +157,68 @@ def parse_def(text: str) -> dict[str, Any]:
         "pins": pins,
         "nets": nets,
     }
+
+
+def merge_collinear_wires(
+    wires: list[dict[str, Any]], vias: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Merge contiguous collinear wire segments on the same layer."""
+    via_pts = {(v["x"], v["y"]) for v in (vias or [])}
+    changed = True
+    while changed:
+        changed = False
+        pt_counts: dict[tuple[int, int], int] = collections.defaultdict(int)
+        for w in wires:
+            pt_counts[(w["x1"], w["y1"])] += 1
+            pt_counts[(w["x2"], w["y2"])] += 1
+
+        merged_wires: list[dict[str, Any]] = []
+        skip: set[int] = set()
+        for i, w1 in enumerate(wires):
+            if i in skip:
+                continue
+            merged = False
+            for j, w2 in enumerate(wires):
+                if j <= i or j in skip:
+                    continue
+                if w1.get("layer") != w2.get("layer"):
+                    continue
+                is_w1_h = w1["y1"] == w1["y2"]
+                is_w2_h = w2["y1"] == w2["y2"]
+                if is_w1_h != is_w2_h:
+                    continue
+                p1_1 = (w1["x1"], w1["y1"])
+                p1_2 = (w1["x2"], w1["y2"])
+                p2_1 = (w2["x1"], w2["y1"])
+                p2_2 = (w2["x2"], w2["y2"])
+
+                if p1_2 == p2_1 and pt_counts[p1_2] == 2 and p1_2 not in via_pts:
+                    new_w = dict(w1)
+                    new_w["x2"], new_w["y2"] = w2["x2"], w2["y2"]
+                    merged = True
+                elif p1_1 == p2_2 and pt_counts[p1_1] == 2 and p1_1 not in via_pts:
+                    new_w = dict(w2)
+                    new_w["x2"], new_w["y2"] = w1["x2"], w1["y2"]
+                    merged = True
+                elif p1_2 == p2_2 and pt_counts[p1_2] == 2 and p1_2 not in via_pts:
+                    new_w = dict(w1)
+                    new_w["x2"], new_w["y2"] = w2["x1"], w2["y1"]
+                    merged = True
+                elif p1_1 == p2_1 and pt_counts[p1_1] == 2 and p1_1 not in via_pts:
+                    new_w = dict(w1)
+                    new_w["x1"], new_w["y1"] = w2["x2"], w2["y2"]
+                    merged = True
+
+                if merged:
+                    merged_wires.append(new_w)
+                    skip.add(i)
+                    skip.add(j)
+                    changed = True
+                    break
+            if not merged:
+                merged_wires.append(w1)
+        wires = merged_wires
+    return wires
 
 
 def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
@@ -672,13 +734,26 @@ def build_entities(
             h = float(cell.get("height", 3))
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            in_slots, out_slots = get_macro_port_slots(cell)
-            for port in inputs:
-                cy = in_slots.get(port, 0) + 0.5
+            machine = cell.get("machine", "")
+            in_slots, out_slots = (
+                get_macro_port_slots(cell)
+                if machine in ("chemical-plant", "oil-refinery")
+                else ({}, {})
+            )
+            for idx, port in enumerate(inputs):
+                cy = (
+                    in_slots[port] + 0.5
+                    if port in in_slots
+                    else ((h - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= h else idx + 0.5)
+                )
                 pin_tiles.add((round(gx + 0.5, 2), round(gy + cy, 2)))
                 pin_tiles.add((round(gx - 0.5, 2), round(gy + cy, 2)))
-            for port in outputs:
-                cy = out_slots.get(port, 0) + 0.5
+            for idx, port in enumerate(outputs):
+                cy = (
+                    out_slots[port] + 0.5
+                    if port in out_slots
+                    else ((h - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= h else idx + 0.5)
+                )
                 pin_tiles.add((round(gx + w - 0.5, 2), round(gy + cy, 2)))
                 pin_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
 
@@ -795,7 +870,9 @@ def build_entities(
             if layer in ("M5", "M6"):
                 continue
 
-            if layer in ("M3", "M4"):
+            is_fluid = is_fluid_wire(net, layer)
+            net_has_ug = any(w.get("layer") in ("M3", "M4") for w in net.get("wires", []))
+            if layer in ("M3", "M4") or (is_fluid and layer in ("M1", "M2") and not net_has_ug):
                 if from_p[0] == to_p[0]:
                     dx, dy = (0, 1) if d == DIRECTION_SOUTH else (0, -1)
                     while (t1_x, t1_y) in occupied_positions:
@@ -983,22 +1060,24 @@ def build_entities(
                             tile_to_nets[(end_x, cy)].add(nname)
                         ug_end = cand_end
 
-                while (ug_start, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
-                    net_surface_tiles[nname][(ug_start, cy)] = d
-                    tile_to_nets[(ug_start, cy)].add(nname)
-                    ug_start = round(ug_start + step, 2)
+                if not is_fluid:
+                    while (ug_start, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(ug_start, cy)] = d
+                        tile_to_nets[(ug_start, cy)].add(nname)
+                        ug_start = round(ug_start + step, 2)
 
-                while (ug_end, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
-                    net_surface_tiles[nname][(ug_end, cy)] = d
-                    tile_to_nets[(ug_end, cy)].add(nname)
-                    ug_end = round(ug_end - step, 2)
+                    while (ug_end, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(ug_end, cy)] = d
+                        tile_to_nets[(ug_end, cy)].add(nname)
+                        ug_end = round(ug_end - step, 2)
 
                 if start_is_turn and ug_start == start_x:
                     ug_end = ug_start
                 if end_is_turn and ug_end == end_x:
                     ug_end = ug_start
 
-                if (ug_end - ug_start) * step < 2:
+                min_span = 1 if is_fluid else 2
+                if (ug_end - ug_start) * step < min_span:
                     cur = ug_start
                     while (ug_end - cur) * step >= 0:
                         net_surface_tiles[nname][(cur, cy)] = d
@@ -1078,22 +1157,24 @@ def build_entities(
                             tile_to_nets[(cx, end_y)].add(nname)
                         ug_end = cand_end
 
-                while (cx, ug_start) in pin_tiles and (ug_end - ug_start) * step >= 0:
-                    net_surface_tiles[nname][(cx, ug_start)] = d
-                    tile_to_nets[(cx, ug_start)].add(nname)
-                    ug_start = round(ug_start + step, 2)
+                if not is_fluid:
+                    while (cx, ug_start) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(cx, ug_start)] = d
+                        tile_to_nets[(cx, ug_start)].add(nname)
+                        ug_start = round(ug_start + step, 2)
 
-                while (cx, ug_end) in pin_tiles and (ug_end - ug_start) * step >= 0:
-                    net_surface_tiles[nname][(cx, ug_end)] = d
-                    tile_to_nets[(cx, ug_end)].add(nname)
-                    ug_end = round(ug_end - step, 2)
+                    while (cx, ug_end) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(cx, ug_end)] = d
+                        tile_to_nets[(cx, ug_end)].add(nname)
+                        ug_end = round(ug_end - step, 2)
 
                 if start_is_turn and ug_start == start_y:
                     ug_end = ug_start
                 if end_is_turn and ug_end == end_y:
                     ug_end = ug_start
 
-                if (ug_end - ug_start) * step < 2:
+                min_span = 1 if is_fluid else 2
+                if (ug_end - ug_start) * step < min_span:
                     cur = ug_start
                     while (ug_end - cur) * step >= 0:
                         net_surface_tiles[nname][(cx, cur)] = d
@@ -1164,9 +1245,28 @@ def build_entities(
 
     while True:
         conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
+        adjacent_fluid_conflicts = set()
+        for pos, nets in tile_to_nets.items():
+            if len(nets) != 1:
+                continue
+            n1 = next(iter(nets))
+            if not is_fluid_wire(net_map.get(n1, {}), "M1"):
+                continue
+            cx, cy = pos
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                npos = (round(cx + dx, 2), round(cy + dy, 2))
+                adj_nets = tile_to_nets.get(npos, set())
+                if len(adj_nets) >= 1 and any(
+                    n2 != n1 and is_fluid_wire(net_map.get(n2, {}), "M1") for n2 in adj_nets
+                ):
+                    adjacent_fluid_conflicts.add(pos)
+        for pos in sorted(adjacent_fluid_conflicts):
+            if pos not in conflicts:
+                conflicts.append(pos)
+
         resolved_any = False
         for pos in conflicts:
-            if len(tile_to_nets[pos]) <= 1:
+            if len(tile_to_nets[pos]) <= 1 and pos not in adjacent_fluid_conflicts:
                 continue
             cx, cy = pos
             net_list = list(tile_to_nets[pos])
@@ -1240,7 +1340,10 @@ def build_entities(
                             ):
                                 valid_span = False
                                 break
-                            if len(tile_to_nets.get(it, set())) > 1:
+                            if (
+                                len(tile_to_nets.get(it, set())) > 1
+                                or it in adjacent_fluid_conflicts
+                            ):
                                 conflicts_cleared += 1
                         if not valid_span:
                             continue
@@ -1353,14 +1456,25 @@ def build_entities(
         else:
             w = float(cell.get("width", 3))
             h = float(cell.get("height", 3))
-            inputs = cell.get("inputs", [])
-            outputs = cell.get("outputs", [])
-            in_slots, out_slots = get_macro_port_slots(cell)
-            for port in inputs:
-                cy = in_slots.get(port, 0) + 0.5
+            machine = cell.get("machine", "")
+            in_slots, out_slots = (
+                get_macro_port_slots(cell)
+                if machine in ("chemical-plant", "oil-refinery")
+                else ({}, {})
+            )
+            for idx, port in enumerate(inputs):
+                cy = (
+                    in_slots[port] + 0.5
+                    if port in in_slots
+                    else ((h - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= h else idx + 0.5)
+                )
                 pin_directions[(round(gx - 0.5, 2), round(gy + cy, 2))] = DIRECTION_EAST
-            for port in outputs:
-                cy = out_slots.get(port, 0) + 0.5
+            for idx, port in enumerate(outputs):
+                cy = (
+                    out_slots[port] + 0.5
+                    if port in out_slots
+                    else ((h - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= h else idx + 0.5)
+                )
                 forbidden_west_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
 
             machine = cell.get("machine", "")

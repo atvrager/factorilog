@@ -68,6 +68,20 @@ puts "factorilog: [llength [$block getRows]] rows"
 # layer. M1 and M2 carry surface tracks, M3 and M4 carry underground tunnels.
 make_tracks
 
+# Non-default spacing rule for fluid nets to prevent adjacent surface pipe clashes:
+create_ndr -name fluid_ndr -spacing 1.25
+set fluid_count 0
+foreach net [$block getNets] {
+    set nname [$net getName]
+    if {[string match "*oil*" $nname] || [string match "*water*" $nname] || [string match "*petroleum*" $nname] || [string match "*acid*" $nname] || [string match "*lubricant*" $nname] || [string match "*steam*" $nname]} {
+        assign_ndr -ndr fluid_ndr -net $nname
+        incr fluid_count
+    }
+}
+if {$fluid_count > 0} {
+    puts "factorilog: assigned non-default spacing rule (1.25) to $fluid_count fluid nets"
+}
+
 # --- place ----------------------------------------------------------
 # The placer target is its own uniform density floor: the tightest
 # packing the pad allows. The space left over from BLOCK_FILL stays
@@ -130,7 +144,7 @@ foreach inst [$block getInsts] {
 if {$has_circuit} {
     set_routing_layers -signal M1-M6
 } else {
-    set_routing_layers -signal M1-M4
+    set_routing_layers -signal M1-M2
 }
 ::drt::detailed_route_set_unidirectional_layer M1
 ::drt::detailed_route_set_unidirectional_layer M2

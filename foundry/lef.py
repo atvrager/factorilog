@@ -140,13 +140,14 @@ def _input_pin_rect(
     h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
     v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
     if total <= height:
-        in_slots, _ = get_macro_port_slots(cell)
-        if port and port in in_slots and in_slots[port] < height:
-            cy = in_slots[port] + 0.5
-        else:
-            offset = (height - total) // 2
-            tile_y = offset + idx
-            cy = tile_y + 0.5
+        offset = (height - total) // 2
+        tile_y = offset + idx
+        cy = tile_y + 0.5
+        machine = cell.get("machine", "")
+        if port and machine in ("chemical-plant", "oil-refinery"):
+            in_slots, _ = get_macro_port_slots(cell)
+            if port in in_slots and in_slots[port] < height:
+                cy = in_slots[port] + 0.5
         return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     if idx < height:
         cy = idx + 0.5
@@ -167,13 +168,14 @@ def _output_pin_rect(
     w = float(width)
     h = float(height)
     if total <= height:
-        _, out_slots = get_macro_port_slots(cell)
-        if port and port in out_slots and out_slots[port] < height:
-            cy = out_slots[port] + 0.5
-        else:
-            offset = (height - total) // 2
-            tile_y = offset + idx
-            cy = tile_y + 0.5
+        offset = (height - total) // 2
+        tile_y = offset + idx
+        cy = tile_y + 0.5
+        machine = cell.get("machine", "")
+        if port and machine in ("chemical-plant", "oil-refinery"):
+            _, out_slots = get_macro_port_slots(cell)
+            if port in out_slots and out_slots[port] < height:
+                cy = out_slots[port] + 0.5
         return h_layer, w - 0.5, cy - 0.25, w, cy + 0.25
     if idx < height:
         cy = idx + 0.5
