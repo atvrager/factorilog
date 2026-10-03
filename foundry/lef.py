@@ -39,18 +39,104 @@ class LefError(Exception):
     """One structural violation in the emitted LEF."""
 
 
+FLUID_MATERIALS: frozenset[str] = frozenset(
+    {
+        "crude-oil",
+        "water",
+        "petroleum-gas",
+        "heavy-oil",
+        "light-oil",
+        "sulfuric-acid",
+        "lubricant",
+        "steam",
+    }
+)
+
+
+def get_macro_port_slots(
+    cell: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Determine vertical tile slot (0-indexed) for each input and output port."""
+    machine = cell.get("machine", "")
+    inputs = sorted(cell.get("inputs", []))
+    outputs = sorted(cell.get("outputs", []))
+    height = int(cell.get("height", 3))
+
+    in_slots: dict[str, int] = {}
+    out_slots: dict[str, int] = {}
+
+    if machine == "chemical-plant":
+        # Chemical plant rotated CCW (dir=12):
+        # Fluid connection slots: tile 0 (cy=0.5) and tile 2 (cy=2.5).
+        # Item inserter slot: tile 1 (cy=1.5).
+        fluid_slots = [0, 2]
+        item_slots = [1, 0, 2]
+        f_idx = 0
+        i_idx = 0
+        for p in inputs:
+            if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
+                in_slots[p] = fluid_slots[f_idx]
+                f_idx += 1
+            elif i_idx < len(item_slots):
+                in_slots[p] = item_slots[i_idx]
+                i_idx += 1
+            else:
+                in_slots[p] = 0
+
+        f_idx = 0
+        i_idx = 0
+        for p in outputs:
+            if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
+                out_slots[p] = fluid_slots[f_idx]
+                f_idx += 1
+            elif i_idx < len(item_slots):
+                out_slots[p] = item_slots[i_idx]
+                i_idx += 1
+            else:
+                out_slots[p] = 0
+
+    elif machine == "oil-refinery":
+        # Oil refinery rotated CW (dir=4):
+        # Fluid inputs on West: tile 1 (cy=1.5) and tile 3 (cy=3.5).
+        # Fluid outputs on East: tile 2 (cy=2.5, center), tile 0 (cy=0.5), tile 4 (cy=4.5).
+        in_available = [1, 3]
+        out_available = [2, 0, 4]
+        for idx, p in enumerate(inputs):
+            in_slots[p] = in_available[idx] if idx < len(in_available) else idx
+        for idx, p in enumerate(outputs):
+            out_slots[p] = out_available[idx] if idx < len(out_available) else idx
+
+    else:
+        total_in = len(inputs)
+        offset_in = (height - total_in) // 2 if total_in <= height else 0
+        for idx, p in enumerate(inputs):
+            in_slots[p] = offset_in + idx
+
+        total_out = len(outputs)
+        offset_out = (height - total_out) // 2 if total_out <= height else 0
+        for idx, p in enumerate(outputs):
+            out_slots[p] = offset_out + idx
+
+    return in_slots, out_slots
+
+
 def _input_pin_rect(
-    cell: dict[str, Any], idx: int, total: int
+    cell: dict[str, Any], idx: int, total: int, port: str = ""
 ) -> tuple[str, float, float, float, float]:
     """Calculate input pin layer and bounds on the macro grid."""
     width = cell["width"]
     height = cell["height"]
     h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
     v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
+    machine = cell.get("machine", "")
     if total <= height:
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
+        if port and machine in ("chemical-plant", "oil-refinery"):
+            in_slots, _ = get_macro_port_slots(cell)
+            if port in in_slots and in_slots[port] < height:
+                cy = in_slots[port] + 0.5
         return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     if idx < height:
         cy = idx + 0.5
@@ -61,7 +147,7 @@ def _input_pin_rect(
 
 
 def _output_pin_rect(
-    cell: dict[str, Any], idx: int, total: int
+    cell: dict[str, Any], idx: int, total: int, port: str = ""
 ) -> tuple[str, float, float, float, float]:
     """Calculate output pin layer and bounds on the macro grid."""
     width = cell["width"]
@@ -70,10 +156,15 @@ def _output_pin_rect(
     v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
     w = float(width)
     h = float(height)
+    machine = cell.get("machine", "")
     if total <= height:
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
+        if port and machine in ("chemical-plant", "oil-refinery"):
+            _, out_slots = get_macro_port_slots(cell)
+            if port in out_slots and out_slots[port] < height:
+                cy = out_slots[port] + 0.5
         return h_layer, w - 0.5, cy - 0.25, w, cy + 0.25
     if idx < height:
         cy = idx + 0.5
@@ -131,7 +222,7 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
     ]
     sorted_inputs = sorted(cell["inputs"])
     for idx, port in enumerate(sorted_inputs):
-        layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs))
+        layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs), port)
         lines.extend(
             [
                 f"  PIN {port.replace('-', '_')}",
@@ -145,7 +236,7 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         )
     sorted_outputs = sorted(cell["outputs"])
     for idx, port in enumerate(sorted_outputs):
-        layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
+        layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs), port)
         lines.extend(
             [
                 f"  PIN {port.replace('-', '_')}",
@@ -176,8 +267,8 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         margin = 0.50
         m_obs_m1 = [(0.0, 0.0, w, h)]
         m_obs_m2 = [(0.0, 0.0, w, h)]
-        for idx, _port in enumerate(sorted_inputs):
-            layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs))
+        for idx, port in enumerate(sorted_inputs):
+            layer, x1, y1, x2, y2 = _input_pin_rect(cell, idx, len(sorted_inputs), port)
             exp = (
                 max(0.0, x1 - margin),
                 max(0.0, y1 - margin),
@@ -195,8 +286,8 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
                     next_obs.extend(_subtract_rect(r, exp))
                 m_obs_m2 = next_obs
 
-        for idx, _port in enumerate(sorted_outputs):
-            layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs))
+        for idx, port in enumerate(sorted_outputs):
+            layer, x1, y1, x2, y2 = _output_pin_rect(cell, idx, len(sorted_outputs), port)
             exp = (
                 max(0.0, x1 - margin),
                 max(0.0, y1 - margin),

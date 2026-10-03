@@ -18,6 +18,11 @@ from typing import Any
 
 import blueprint
 
+try:
+    from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
+except ImportError:
+    from lef import FLUID_MATERIALS, get_macro_port_slots
+
 # Factorio 2.0 direction values: North=0, East=4, South=8, West=12.
 DIRECTION_NORTH = 0
 DIRECTION_EAST = 4
@@ -335,10 +340,11 @@ def build_entities(
         grid_entities[pos_key] = entity
         return entity
 
-    fluids = set(netlist_data.get("fluids", []))
+    has_fluid_metadata = "fluids" in netlist_data
+    fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
 
     def is_fluid_wire(net: dict[str, Any], layer: str) -> bool:
-        if fluids:
+        if has_fluid_metadata:
             net_name = net.get("name", "")
             base = net_name.split("__")[0].replace("_", "-")
             return base in fluids
@@ -457,24 +463,35 @@ def build_entities(
             in_offset = 1.0 if inputs else 0.0
 
             # 1. Place the machine centered within its building slot
+            direction = DIRECTION_NORTH
+            if machine == "chemical-plant":
+                direction = DIRECTION_WEST
+            elif machine == "oil-refinery":
+                direction = DIRECTION_EAST
             ent = add_entity(
                 machine,
                 gx + in_offset + m_w / 2.0,
                 gy + m_h / 2.0,
-                direction=DIRECTION_NORTH,
+                direction=direction,
                 extra=extra,
             )
             inst_to_entity[cname] = ent
 
+            in_slots, out_slots = get_macro_port_slots(cell)
+
             # 2. Place input fast-inserters (pickup from West belt, drop into East machine)
-            for idx, _port in enumerate(sorted(inputs)):
-                cy = (ch - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= ch else idx + 0.5
+            for port in sorted(inputs):
+                if port in fluids:
+                    continue
+                cy = in_slots.get(port, 0) + 0.5
                 add_entity("fast-inserter", gx + 0.5, gy + cy, direction=DIRECTION_WEST)
                 occupied_positions.add((round(gx + 0.5, 2), round(gy + cy, 2)))
 
             # 3. Place output fast-inserters (pickup from West machine, drop onto East belt)
-            for idx, _port in enumerate(sorted(outputs)):
-                cy = (ch - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= ch else idx + 0.5
+            for port in sorted(outputs):
+                if port in fluids:
+                    continue
+                cy = out_slots.get(port, 0) + 0.5
                 add_entity("fast-inserter", gx + cw - 0.5, gy + cy, direction=DIRECTION_WEST)
                 occupied_positions.add((round(gx + cw - 0.5, 2), round(gy + cy, 2)))
 
@@ -554,7 +571,12 @@ def build_entities(
         height = float(c.get("height", 3))
         outputs = [o.replace("-", "_") for o in c.get("outputs", [])]
         if pin in outputs:
+            _, out_slots = get_macro_port_slots(c)
+            orig_outputs = c.get("outputs", [])
             idx = outputs.index(pin)
+            orig_name = orig_outputs[idx] if idx < len(orig_outputs) else ""
+            if orig_name in out_slots:
+                return (width - 0.25, out_slots[orig_name] + 0.5)
             total = len(outputs)
             if total <= height:
                 offset = (height - total) // 2
@@ -605,12 +627,13 @@ def build_entities(
             h = float(cell.get("height", 3))
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            for idx in range(len(inputs)):
-                cy = (h - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= h else idx + 0.5
-                pin_tiles.add((round(gx - 0.5, 2), round(gy + cy, 2)))
-            for idx in range(len(outputs)):
-                cy = (h - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= h else idx + 0.5
-                pin_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+            in_slots, out_slots = get_macro_port_slots(cell)
+            for port in inputs:
+                cy = in_slots.get(port, 0) + 0.5
+                pin_tiles.add((round(gx + 0.5, 2), round(gy + cy, 2)))
+            for port in outputs:
+                cy = out_slots.get(port, 0) + 0.5
+                pin_tiles.add((round(gx + w - 0.5, 2), round(gy + cy, 2)))
 
     net_dists: dict[str, dict[tuple[float, float], float]] = {}
     for net in def_data.get("nets", []):
@@ -1314,7 +1337,17 @@ def build_entities(
         e
         for e in entities
         if any(
-            k in e.get("name", "") for k in ("assembling-machine", "furnace", "inserter", "pump")
+            k in e.get("name", "")
+            for k in (
+                "assembling-machine",
+                "electric-furnace",
+                "chemical-plant",
+                "oil-refinery",
+                "centrifuge",
+                "rocket-silo",
+                "inserter",
+                "pump",
+            )
         )
     ]
     if powered:
