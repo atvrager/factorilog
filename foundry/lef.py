@@ -97,14 +97,14 @@ def get_macro_port_slots(
 
     elif machine == "oil-refinery":
         # Oil refinery rotated CW (dir=4):
-        # Fluid inputs on West: tile 1 (cy=1.5) and tile 3 (cy=3.5).
-        # Fluid outputs on East: tile 2 (cy=2.5, center), tile 0 (cy=0.5), tile 4 (cy=4.5).
-        in_available = [1, 3]
-        out_available = [2, 0, 4]
+        # Fluid inputs on West: tile 1 (cy=1.5, crude oil) and tile 3 (cy=3.5, water).
+        # Fluid outputs on East: tile 0 (cy=0.5, heavy oil), tile 2 (cy=2.5, light oil), tile 4 (cy=4.5, petroleum gas).
+        refinery_in_map = {"crude-oil": 1, "water": 3}
+        refinery_out_map = {"heavy-oil": 0, "light-oil": 2, "petroleum-gas": 4}
         for idx, p in enumerate(inputs):
-            in_slots[p] = in_available[idx] if idx < len(in_available) else idx
+            in_slots[p] = refinery_in_map.get(p, [1, 3][min(idx, 1)])
         for idx, p in enumerate(outputs):
-            out_slots[p] = out_available[idx] if idx < len(out_available) else idx
+            out_slots[p] = refinery_out_map.get(p, [4, 2, 0][min(idx, 2)])
 
     else:
         total_in = len(inputs)

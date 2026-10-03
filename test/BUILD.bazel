@@ -76,6 +76,30 @@ py_test(
 )
 
 py_test(
+    name = "machine_chains_test",
+    size = "large",
+    srcs = ["test_machine_chains.py"],
+    data = [
+        "//flow:flow_scripts",
+        "//foundry:py_srcs",
+        "//test:fixture",
+    ],
+    local = True,
+    main = "test_machine_chains.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        ":machine_cells_test",
+        ":routing_primitives_test",
+        "//flow:check_blueprint_lib",
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
     name = "circuit_telemetry_test",
     size = "medium",
     srcs = ["test_circuit_telemetry.py"],

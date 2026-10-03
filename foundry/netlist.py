@@ -138,7 +138,7 @@ def build(
     data: solve.Data,
     demand: dict[str, float],
     allowed: set[str],
-    machine_override: str | None = None,
+    machine_override: str | dict[str, str] | None = None,
 ) -> Netlist:
     """Solve the plan, then lower it to instances and nets."""
     tech = pdk.Pdk(data)
@@ -149,7 +149,9 @@ def build(
     nl = Netlist("factory")
     for recipe, rate in sorted(rates.items()):
         recipe_proto = data.recipes[recipe]
-        if machine_override:
+        if isinstance(machine_override, dict):
+            machine = machine_override.get(recipe, data.machine_for(recipe_proto)[0])
+        elif machine_override:
             machine = machine_override
         else:
             machine, _speed = data.machine_for(recipe_proto)

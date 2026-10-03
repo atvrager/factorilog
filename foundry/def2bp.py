@@ -1137,6 +1137,18 @@ def build_entities(
                     or used_underground_endpoints.get(prev_pos) == opp_d
                 ):
                     continue
+
+                if not is_fluid:
+                    side_feed = False
+                    for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
+                        if b_dir == d:
+                            continue
+                        n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
+                        if net_surface_tiles[candidate].get(n_pos) == b_dir:
+                            side_feed = True
+                            break
+                    if side_feed:
+                        continue
                 for fspan in range(1, max_allowed_span):
                     if bspan + fspan > max_allowed_span:
                         break

@@ -129,7 +129,7 @@ foreach inst [$block getInsts] {
 if {$has_circuit} {
     set_routing_layers -signal M1-M6
 } else {
-    set_routing_layers -signal M1-M2
+    set_routing_layers -signal M1-M4
 }
 ::drt::detailed_route_set_unidirectional_layer M1
 ::drt::detailed_route_set_unidirectional_layer M2
