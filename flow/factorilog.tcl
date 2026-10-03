@@ -97,7 +97,8 @@ global_placement -density $density \
     -pad_right $CELL_PAD_SITES
 
 set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-set_placement_padding -masters {belt_merge2 belt_split2} -left 5 -right 5
+set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
+place_pins -hor_layers M1 -ver_layers M2
 detailed_placement
 
 if {[catch {check_placement} problem]} {
@@ -121,7 +122,7 @@ puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid
 set has_circuit 0
 foreach inst [$block getInsts] {
     set master_name [[$inst getMaster] getName]
-    if {[string match "*combinator*" $master_name] || [string match "*display*" $master_name]} {
+    if {[string match "*combinator*" $master_name] || [string match "*display*" $master_name] || [string match "*switch*" $master_name]} {
         set has_circuit 1
         break
     }
@@ -129,10 +130,12 @@ foreach inst [$block getInsts] {
 if {$has_circuit} {
     set_routing_layers -signal M1-M6
 } else {
-    set_routing_layers -signal M1-M4
+    set_routing_layers -signal M1-M2
 }
 ::drt::detailed_route_set_unidirectional_layer M1
 ::drt::detailed_route_set_unidirectional_layer M2
+::drt::detailed_route_set_unidirectional_layer M3
+::drt::detailed_route_set_unidirectional_layer M4
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

@@ -67,11 +67,17 @@ def build_all(
     telemetry_records = netlist.insert_telemetry(
         nl, tap_scope, enable_display, enable_circuit, plans
     )
-    text = netlist.emit_verilog(nl, plans, split_plans)
+    balancer_plans = netlist.balancer_plans_of(nl)
+    text = netlist.emit_verilog(nl, plans, split_plans, balancer_plans)
     (out / "netlist.v").write_text(text)
     (out / "cells.v").write_text(netlist.emit_cells_v(nl))
 
-    cells = [*nl.cells.values(), netlist.merge_cell(), netlist.split_cell()]
+    cells = [
+        *nl.cells.values(),
+        netlist.merge_cell(),
+        netlist.split_cell(),
+        netlist.balancer_cell(),
+    ]
     lef_text = lef.write_lef(tech, cells, str(out / "tech.lef"))
     lib_text = liberty.write_liberty(cells, str(out / "tech.lib"))
     problems = lef.check_lef(cells, lef_text)
@@ -91,6 +97,7 @@ def build_all(
             **dict(nl.cells),
             netlist.MERGE_CELL: netlist.merge_cell(),
             netlist.SPLIT_CELL: netlist.split_cell(),
+            netlist.BALANCER_CELL: netlist.balancer_cell(),
         },
         "telemetry": telemetry_records,
         "instances": [

@@ -369,7 +369,11 @@ def build_entities(
         cell_id = inst.get("cell", "")
         cell = cell_map.get(cell_id, {})
 
-        if macro in ("belt_merge2", "belt_split2") or cell_id in ("belt_merge2", "belt_split2"):
+        if macro in ("belt_merge2", "belt_split2", "belt_balancer2") or cell_id in (
+            "belt_merge2",
+            "belt_split2",
+            "belt_balancer2",
+        ):
             # Splitter: 1 tile wide, 2 tiles high when facing East
             orient = comp.get("orient", "N")
             if orient in ("W", "E"):
@@ -593,6 +597,14 @@ def build_entities(
                 "y2": (0.75, 1.5),
             }
             return split_pins.get(pin, (0.5, 0.5))
+        if cell_id == "belt_balancer2":
+            balancer_pins = {
+                "a1": (0.25, 0.5),
+                "a2": (0.25, 1.5),
+                "y1": (0.75, 0.5),
+                "y2": (0.75, 1.5),
+            }
+            return balancer_pins.get(pin, (0.5, 0.5))
         if cell_id == "pump":
             pump_pins = {
                 "a": (0.5, 0.25),
@@ -647,7 +659,7 @@ def build_entities(
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
         cell = cell_map.get(cell_id, {})
-        if cell_id in ("belt_merge2", "belt_split2"):
+        if cell_id in ("belt_merge2", "belt_split2", "belt_balancer2"):
             pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
             pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
             pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
@@ -664,9 +676,11 @@ def build_entities(
             for port in inputs:
                 cy = in_slots.get(port, 0) + 0.5
                 pin_tiles.add((round(gx + 0.5, 2), round(gy + cy, 2)))
+                pin_tiles.add((round(gx - 0.5, 2), round(gy + cy, 2)))
             for port in outputs:
                 cy = out_slots.get(port, 0) + 0.5
                 pin_tiles.add((round(gx + w - 0.5, 2), round(gy + cy, 2)))
+                pin_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
 
     net_dists: dict[str, dict[tuple[float, float], float]] = {}
     for net in def_data.get("nets", []):
@@ -691,7 +705,7 @@ def build_entities(
                 cell_id = inst_map.get(inst, {}).get("cell", c.get("macro", ""))
                 if cell_id in ("belt_merge2", "pump"):
                     outputs = ["y"]
-                elif cell_id == "belt_split2":
+                elif cell_id in ("belt_split2", "belt_balancer2"):
                     outputs = ["y1", "y2"]
                 else:
                     outputs = [
@@ -857,7 +871,7 @@ def build_entities(
                 cell_id = inst_map.get(inst, {}).get("cell", c.get("macro", ""))
                 gx = c["x"] * scale
                 gy = c["y"] * scale
-                if cell_id == "belt_split2":
+                if cell_id in ("belt_split2", "belt_balancer2"):
                     if pin == "y1":
                         drivers.append((round(gx + 1.5, 2), round(gy + 0.5, 2)))
                     elif pin == "y2":
@@ -979,7 +993,12 @@ def build_entities(
                     tile_to_nets[(ug_end, cy)].add(nname)
                     ug_end = round(ug_end - step, 2)
 
-                if (ug_end - ug_start) * step < 1:
+                if start_is_turn and ug_start == start_x:
+                    ug_end = ug_start
+                if end_is_turn and ug_end == end_x:
+                    ug_end = ug_start
+
+                if (ug_end - ug_start) * step < 2:
                     cur = ug_start
                     while (ug_end - cur) * step >= 0:
                         net_surface_tiles[nname][(cur, cy)] = d
@@ -1069,7 +1088,12 @@ def build_entities(
                     tile_to_nets[(cx, ug_end)].add(nname)
                     ug_end = round(ug_end - step, 2)
 
-                if (ug_end - ug_start) * step < 1:
+                if start_is_turn and ug_start == start_y:
+                    ug_end = ug_start
+                if end_is_turn and ug_end == end_y:
+                    ug_end = ug_start
+
+                if (ug_end - ug_start) * step < 2:
                     cur = ug_start
                     while (ug_end - cur) * step >= 0:
                         net_surface_tiles[nname][(cx, cur)] = d
@@ -1138,105 +1162,111 @@ def build_entities(
         pos_u = (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2))
         used_underground_endpoints[pos_u] = ue.get("direction", 0)
 
-    conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
-    for pos in conflicts:
-        if len(tile_to_nets[pos]) <= 1:
-            continue
-        cx, cy = pos
-        net_list = list(tile_to_nets[pos])
-        best_candidate = None
-        best_jump = None
-        best_score = -999999
-
-        for candidate in net_list:
-            d = net_surface_tiles[candidate].get(pos)
-            if d not in DIR_STEPS:
+    while True:
+        conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
+        resolved_any = False
+        for pos in conflicts:
+            if len(tile_to_nets[pos]) <= 1:
                 continue
-            dx, dy = DIR_STEPS[d]
-            opp_d = OPPOSITE_DIR.get(d)
-            is_fluid = is_fluid_wire(net_map.get(candidate, {}), "M1")
-            max_allowed_span = 10 if is_fluid else 5
+            cx, cy = pos
+            net_list = list(tile_to_nets[pos])
+            best_candidate = None
+            best_jump = None
+            best_score = -999999
 
-            for bspan in range(1, max_allowed_span):
-                in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
-                prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
-                if (
-                    in_pos not in net_surface_tiles[candidate]
-                    or net_surface_tiles[candidate][in_pos] != d
-                    or len(tile_to_nets[in_pos]) > 1
-                    or in_pos in used_underground_endpoints
-                    or in_pos in pin_tiles
-                    or in_pos in occupied_positions
-                    or used_underground_endpoints.get(prev_pos) == opp_d
-                ):
+            for candidate in net_list:
+                d = net_surface_tiles[candidate].get(pos)
+                if d not in DIR_STEPS:
                     continue
+                dx, dy = DIR_STEPS[d]
+                opp_d = OPPOSITE_DIR.get(d)
+                is_fluid = is_fluid_wire(net_map.get(candidate, {}), "M1")
+                max_allowed_span = 10 if is_fluid else 5
 
-                if not is_fluid:
-                    side_feed = False
-                    for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
-                        if b_dir == d:
-                            continue
-                        n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
-                        if net_surface_tiles[candidate].get(n_pos) == b_dir:
-                            side_feed = True
-                            break
-                    if side_feed:
-                        continue
-                for fspan in range(1, max_allowed_span):
-                    if bspan + fspan > max_allowed_span:
-                        break
-                    out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
-                    next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                for bspan in range(1, max_allowed_span):
+                    in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
+                    prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
                     if (
-                        out_pos not in net_surface_tiles[candidate]
-                        or net_surface_tiles[candidate][out_pos] != d
-                        or len(tile_to_nets[out_pos]) > 1
-                        or out_pos in used_underground_endpoints
-                        or out_pos in pin_tiles
-                        or out_pos in occupied_positions
-                        or used_underground_endpoints.get(next_pos) == opp_d
+                        in_pos not in net_surface_tiles[candidate]
+                        or net_surface_tiles[candidate][in_pos] != d
+                        or len(tile_to_nets[in_pos]) > 1
+                        or in_pos in used_underground_endpoints
+                        or in_pos in pin_tiles
+                        or in_pos in occupied_positions
+                        or used_underground_endpoints.get(prev_pos) == opp_d
                     ):
                         continue
 
-                    # Verify straight run
-                    valid_span = True
-                    conflicts_cleared = 0
-                    for s in range(-bspan + 1, fspan):
-                        it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                        if (
-                            (
-                                it in net_surface_tiles[candidate]
-                                and net_surface_tiles[candidate][it] != d
-                            )
-                            or it in occupied_positions
-                            or it in used_underground_endpoints
-                        ):
-                            valid_span = False
+                    if not is_fluid:
+                        side_feed = False
+                        for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
+                            if b_dir == d:
+                                continue
+                            n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
+                            if net_surface_tiles[candidate].get(n_pos) == b_dir:
+                                side_feed = True
+                                break
+                        if side_feed:
+                            continue
+                    for fspan in range(1, max_allowed_span):
+                        if bspan + fspan > max_allowed_span:
                             break
-                        if len(tile_to_nets.get(it, set())) > 1:
-                            conflicts_cleared += 1
-                    if not valid_span:
-                        continue
+                        out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
+                        next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                        if (
+                            out_pos not in net_surface_tiles[candidate]
+                            or net_surface_tiles[candidate][out_pos] != d
+                            or len(tile_to_nets[out_pos]) > 1
+                            or out_pos in used_underground_endpoints
+                            or out_pos in pin_tiles
+                            or out_pos in occupied_positions
+                            or used_underground_endpoints.get(next_pos) == opp_d
+                        ):
+                            continue
 
-                    penalty = 100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
-                    score = conflicts_cleared * 10 - penalty - (bspan + fspan)
-                    if score > best_score:
-                        best_score = score
-                        best_jump = (in_pos, out_pos, bspan, fspan, d, is_fluid)
-                        best_candidate = candidate
+                        # Verify straight run
+                        valid_span = True
+                        conflicts_cleared = 0
+                        for s in range(-bspan + 1, fspan):
+                            it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                            if (
+                                (
+                                    it in net_surface_tiles[candidate]
+                                    and net_surface_tiles[candidate][it] != d
+                                )
+                                or it in occupied_positions
+                                or it in used_underground_endpoints
+                                or it in pin_tiles
+                            ):
+                                valid_span = False
+                                break
+                            if len(tile_to_nets.get(it, set())) > 1:
+                                conflicts_cleared += 1
+                        if not valid_span:
+                            continue
 
-        if best_jump and best_candidate:
-            in_pos, out_pos, bspan, fspan, d, is_fluid = best_jump
-            dx, dy = DIR_STEPS[d]
-            used_underground_endpoints[in_pos] = d
-            used_underground_endpoints[out_pos] = d
-            jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
-            for s in range(-bspan + 1, fspan):
-                it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                if it in net_surface_tiles[best_candidate]:
-                    del net_surface_tiles[best_candidate][it]
-                if best_candidate in tile_to_nets[it]:
-                    tile_to_nets[it].remove(best_candidate)
+                        penalty = 100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
+                        score = conflicts_cleared * 10 - penalty - (bspan + fspan)
+                        if score > best_score:
+                            best_score = score
+                            best_jump = (in_pos, out_pos, bspan, fspan, d, is_fluid)
+                            best_candidate = candidate
+
+            if best_jump and best_candidate:
+                in_pos, out_pos, bspan, fspan, d, is_fluid = best_jump
+                dx, dy = DIR_STEPS[d]
+                used_underground_endpoints[in_pos] = d
+                used_underground_endpoints[out_pos] = d
+                jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+                for s in range(-bspan + 1, fspan):
+                    it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                    if it in net_surface_tiles[best_candidate]:
+                        del net_surface_tiles[best_candidate][it]
+                    if best_candidate in tile_to_nets[it]:
+                        tile_to_nets[it].remove(best_candidate)
+                resolved_any = True
+        if not resolved_any:
+            break
 
     # Add underground jumpers to underground_entities
     for _candidate, in_pos, out_pos, d, is_fluid in jumpers:
@@ -1312,7 +1342,7 @@ def build_entities(
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
         cell = cell_map.get(cell_id, {})
-        if cell_id in ("belt_merge2", "belt_split2"):
+        if cell_id in ("belt_merge2", "belt_split2", "belt_balancer2"):
             pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
             pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
             forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
@@ -1598,7 +1628,7 @@ def build_entities(
     unpaired_hoods = check_underground_pairing(entities)
     if unpaired_hoods:
         raise RuntimeError(
-            f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected"
+            f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected: {unpaired_hoods}"
         )
 
     # 8. Wire circuit telemetry connections
@@ -1728,13 +1758,16 @@ def extract_pins(
     known_materials = list(netlist_data.get("inputs", [])) + list(netlist_data.get("outputs", []))
 
     for pin in def_data.get("pins", []):
-        net_name = pin.get("net", pin["name"]).replace("_", "-")
+        raw_net = pin.get("net", pin["name"])
         direction = pin.get("direction", "INPUT").upper()
 
-        mat = net_name
+        mat = raw_net.replace("_", "-")
+        base_net = re.sub(r"(__|--)bus\d+$", "", raw_net)
+        base_mat = base_net.replace("_", "-")
         for known in known_materials:
-            if known == mat or known.replace("-", "_") == pin.get("net", ""):
-                mat = known
+            known_base = re.sub(r"(__|--)bus\d+$", "", known).replace("_", "-")
+            if known == base_mat or known.replace("-", "_") == base_net or known_base == base_mat:
+                mat = known_base
                 break
 
         x = math.floor(pin["x"] * scale) + 0.5

@@ -19,7 +19,7 @@ global_placement -density $density \
 
 place_pins -hor_layers M1 -ver_layers M2
 set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-set_placement_padding -masters {belt_merge2 belt_split2} -left 5 -right 5
+set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
 detailed_placement
 
 if {[catch {check_placement} problem]} {

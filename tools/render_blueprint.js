@@ -21,7 +21,7 @@ if (fs.existsSync(bpInput)) {
     bpStr = fs.readFileSync(bpInput, 'utf8').trim();
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer({ maxHeaderSize: 32 * 1024 * 1024 }, (req, res) => {
     const parsedUrl = new URL(req.url, 'http://127.0.0.1');
     let filePath = path.join(distDir, parsedUrl.pathname === '/' ? 'index.html' : parsedUrl.pathname);
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
@@ -58,7 +58,7 @@ try {
     await page.waitForFunction(() => {
         const el = document.getElementById('loadingScreen');
         return el && !el.classList.contains('active') && window.editor;
-    }, { timeout: 15000 });
+    }, { timeout: 60000 });
 
     await new Promise(r => setTimeout(r, 1000));
 
