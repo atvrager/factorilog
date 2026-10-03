@@ -1355,11 +1355,12 @@ def build_entities(
             h = float(cell.get("height", 3))
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            for idx in range(len(inputs)):
-                cy = (h - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= h else idx + 0.5
+            in_slots, out_slots = get_macro_port_slots(cell)
+            for port in inputs:
+                cy = in_slots.get(port, 0) + 0.5
                 pin_directions[(round(gx - 0.5, 2), round(gy + cy, 2))] = DIRECTION_EAST
-            for idx in range(len(outputs)):
-                cy = (h - len(outputs)) // 2 + idx + 0.5 if len(outputs) <= h else idx + 0.5
+            for port in outputs:
+                cy = out_slots.get(port, 0) + 0.5
                 forbidden_west_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
 
             machine = cell.get("machine", "")
@@ -1385,14 +1386,6 @@ def build_entities(
                     )
                 else:
                     pin_directions[mid_turn_pos] = DIRECTION_EAST
-
-                colliding_pos = (round(gx - 1.5, 2), round(gy + 3.5, 2))
-                if colliding_pos in grid_entities and "transport-belt" in grid_entities[
-                    colliding_pos
-                ].get("name", ""):
-                    ent_to_remove = grid_entities.pop(colliding_pos)
-                    if ent_to_remove in entities:
-                        entities.remove(ent_to_remove)
 
     for pos, req_dir in pin_directions.items():
         if pos in grid_entities and "transport-belt" in grid_entities[pos].get("name", ""):

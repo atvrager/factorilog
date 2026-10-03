@@ -258,7 +258,7 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
     wire, except the last, which drives the material wire itself. Returns
     entries of (merge name, a wire, b wire, y wire), empty for one driver.
     """
-    if len(net.drivers) <= 1:
+    if net.material in FLUID_MATERIALS or len(net.drivers) <= 1:
         return []
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
@@ -280,6 +280,7 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
 def _balance_inputs(
     nl: Netlist,
     material: str,
+    raw_material: str,
     bus_wires: list[str],
     bal_entries: list[tuple[str, str, str, str, str]],
     bal_count: list[int],
@@ -294,7 +295,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, bus_wires[0], bus_wires[1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
         return [y1, y2]
 
     current = bus_wires
@@ -306,7 +307,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, current[i], current[i + 1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
         s1.extend([y1, y2])
     s2: list[str] = [""] * n
     for i in range(half):
@@ -315,7 +316,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, s1[i], s1[i + half], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
         s2[i] = y1
         s2[i + half] = y2
     return s2
@@ -332,7 +333,7 @@ def split_net(
     Each split output gets a fresh wire driving downstream sinks or subsequent splitters.
     Returns entries of (split name, a wire, y1 wire, y2 wire), empty for <=1 sink.
     """
-    if len(net.sinks) <= 1:
+    if net.material in FLUID_MATERIALS or len(net.sinks) <= 1:
         return []
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
@@ -366,7 +367,9 @@ def split_net(
 
     if net.bus_inputs and len(net.bus_inputs) > 1 and bal_entries is not None:
         bus_wires = [sanitize(b) for b in net.bus_inputs]
-        balanced_outputs = _balance_inputs(nl, material, bus_wires, bal_entries, bal_count)
+        balanced_outputs = _balance_inputs(
+            nl, material, net.material, bus_wires, bal_entries, bal_count
+        )
         k = len(balanced_outputs)
         chunk_size = len(targets) / k
         for i, out_wire in enumerate(balanced_outputs):
@@ -465,12 +468,15 @@ def emit_verilog(
             out.append(f"  {MERGE_CELL} {inst.name} (.a({a_wire}), .b({b_wire}), .y({y_wire}));")
             continue
         if inst.cell_key == BALANCER_CELL:
-            b_plan = balancer_plans[inst.recipe]
-            b_entry = next(e for e in b_plan if e[0] == inst.name)
-            _name, a1_wire, a2_wire, y1_wire, y2_wire = b_entry
-            out.append(
-                f"  {BALANCER_CELL} {inst.name} (.a1({a1_wire}), .a2({a2_wire}), .y1({y1_wire}), .y2({y2_wire}));"
+            b_plan = balancer_plans.get(inst.recipe) or balancer_plans.get(
+                sanitize(inst.recipe), []
             )
+            b_entry = next((e for e in b_plan if e[0] == inst.name), None)
+            if b_entry:
+                _name, a1_wire, a2_wire, y1_wire, y2_wire = b_entry
+                out.append(
+                    f"  {BALANCER_CELL} {inst.name} (.a1({a1_wire}), .a2({a2_wire}), .y1({y1_wire}), .y2({y2_wire}));"
+                )
             continue
         if inst.cell_key == SPLIT_CELL:
             plan = split_plans[inst.recipe]
@@ -665,6 +671,8 @@ def merge_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
     """Merge insertion for every multi-driver net, before emission."""
     plans: dict[str, list[tuple[str, str, str, str]]] = {}
     for net in nl.nets.values():
+        if net.material in FLUID_MATERIALS:
+            continue
         entries = merge_net(nl, net)
         if entries:
             plans[net.material] = entries
@@ -676,6 +684,8 @@ def split_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
     plans: dict[str, list[tuple[str, str, str, str]]] = {}
     nl.balancer_plans = {}
     for net in list(nl.nets.values()):
+        if net.material in FLUID_MATERIALS:
+            continue
         bal_entries: list[tuple[str, str, str, str, str]] = []
         entries = split_net(nl, net, bal_entries)
         if entries:

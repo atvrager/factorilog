@@ -68,38 +68,49 @@ def get_macro_port_slots(
     if machine == "chemical-plant":
         # Chemical plant rotated CCW (dir=12):
         # Fluid connection slots: tile 0 (cy=0.5) and tile 2 (cy=2.5).
-        # Item inserter slot: tile 1 (cy=1.5).
+        # Item inserter slots: use tiles not occupied by fluids.
         fluid_slots = [0, 2]
-        item_slots = [1, 0, 2]
         f_idx = 0
-        i_idx = 0
+        used_in = set()
         for p in inputs:
             if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
-                in_slots[p] = fluid_slots[f_idx]
+                slot = fluid_slots[f_idx]
+                in_slots[p] = slot
+                used_in.add(slot)
                 f_idx += 1
-            elif i_idx < len(item_slots):
-                in_slots[p] = item_slots[i_idx]
-                i_idx += 1
-            else:
-                in_slots[p] = 0
+        available_in = [s for s in [1, 2, 0] if s not in used_in]
+        i_idx = 0
+        for p in inputs:
+            if p not in FLUID_MATERIALS:
+                if i_idx < len(available_in):
+                    in_slots[p] = available_in[i_idx]
+                    i_idx += 1
+                else:
+                    in_slots[p] = 0
 
         f_idx = 0
-        i_idx = 0
+        used_out = set()
         for p in outputs:
             if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
-                out_slots[p] = fluid_slots[f_idx]
+                slot = fluid_slots[f_idx]
+                out_slots[p] = slot
+                used_out.add(slot)
                 f_idx += 1
-            elif i_idx < len(item_slots):
-                out_slots[p] = item_slots[i_idx]
-                i_idx += 1
-            else:
-                out_slots[p] = 0
+        available_out = [s for s in [1, 2, 0] if s not in used_out]
+        i_idx = 0
+        for p in outputs:
+            if p not in FLUID_MATERIALS:
+                if i_idx < len(available_out):
+                    out_slots[p] = available_out[i_idx]
+                    i_idx += 1
+                else:
+                    out_slots[p] = 0
 
     elif machine == "oil-refinery":
         # Oil refinery rotated CW (dir=4):
-        # Fluid inputs on West: tile 1 (cy=1.5, crude oil) and tile 3 (cy=3.5, water).
+        # Fluid inputs on West: tile 1 (cy=1.5, water) and tile 3 (cy=3.5, crude oil).
         # Fluid outputs on East: tile 0 (cy=0.5, heavy oil), tile 2 (cy=2.5, light oil), tile 4 (cy=4.5, petroleum gas).
-        refinery_in_map = {"crude-oil": 1, "water": 3}
+        refinery_in_map = {"water": 1, "crude-oil": 3}
         refinery_out_map = {"heavy-oil": 0, "light-oil": 2, "petroleum-gas": 4}
         for idx, p in enumerate(inputs):
             in_slots[p] = refinery_in_map.get(p, [1, 3][min(idx, 1)])
@@ -128,15 +139,14 @@ def _input_pin_rect(
     height = cell["height"]
     h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
     v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
-    machine = cell.get("machine", "")
     if total <= height:
-        offset = (height - total) // 2
-        tile_y = offset + idx
-        cy = tile_y + 0.5
-        if port and machine in ("chemical-plant", "oil-refinery"):
-            in_slots, _ = get_macro_port_slots(cell)
-            if port in in_slots and in_slots[port] < height:
-                cy = in_slots[port] + 0.5
+        in_slots, _ = get_macro_port_slots(cell)
+        if port and port in in_slots and in_slots[port] < height:
+            cy = in_slots[port] + 0.5
+        else:
+            offset = (height - total) // 2
+            tile_y = offset + idx
+            cy = tile_y + 0.5
         return h_layer, 0.0, cy - 0.25, 0.5, cy + 0.25
     if idx < height:
         cy = idx + 0.5
@@ -156,15 +166,14 @@ def _output_pin_rect(
     v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
     w = float(width)
     h = float(height)
-    machine = cell.get("machine", "")
     if total <= height:
-        offset = (height - total) // 2
-        tile_y = offset + idx
-        cy = tile_y + 0.5
-        if port and machine in ("chemical-plant", "oil-refinery"):
-            _, out_slots = get_macro_port_slots(cell)
-            if port in out_slots and out_slots[port] < height:
-                cy = out_slots[port] + 0.5
+        _, out_slots = get_macro_port_slots(cell)
+        if port and port in out_slots and out_slots[port] < height:
+            cy = out_slots[port] + 0.5
+        else:
+            offset = (height - total) // 2
+            tile_y = offset + idx
+            cy = tile_y + 0.5
         return h_layer, w - 0.5, cy - 0.25, w, cy + 0.25
     if idx < height:
         cy = idx + 0.5
