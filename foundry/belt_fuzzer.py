@@ -298,7 +298,12 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "primitive": "underground_pair",
             "compatible": True,
             "lane_mapping": {"1": 1, "2": 2},
-            "max_span_tiles": {"underground-belt": 5, "fast-underground-belt": 7},
+            "max_span_tiles": {
+                "underground-belt": 5,
+                "fast-underground-belt": 7,
+                "express-underground-belt": 9,
+                "turbo-underground-belt": 11,
+            },
             "drc_code": "DRC-02",
             "summary": "Underground inputs must pair with collinear outputs within tier span limits.",
         },
@@ -343,6 +348,14 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "max_underground_span_tiles": 9,
             "latency_ticks_per_tile": 11,
         },
+        "turbo": {
+            "belt": "turbo-transport-belt",
+            "underground": "turbo-underground-belt",
+            "splitter": "turbo-splitter",
+            "speed_items_per_sec": 60.0,
+            "max_underground_span_tiles": 11,
+            "latency_ticks_per_tile": 8,
+        },
     }
 
     layer_stack_mapping = {
@@ -364,6 +377,46 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "M4": {
             "preferred_direction": "vertical",
             "entity": "underground-belt",
+            "level": "subsurface",
+        },
+        "M5": {
+            "preferred_direction": "horizontal",
+            "entity": "circuit-red",
+            "level": "circuit",
+        },
+        "M6": {
+            "preferred_direction": "vertical",
+            "entity": "circuit-green",
+            "level": "circuit",
+        },
+        "M7": {
+            "preferred_direction": "horizontal",
+            "entity": "fast-underground-belt",
+            "level": "subsurface",
+        },
+        "M8": {
+            "preferred_direction": "vertical",
+            "entity": "fast-underground-belt",
+            "level": "subsurface",
+        },
+        "M9": {
+            "preferred_direction": "horizontal",
+            "entity": "express-underground-belt",
+            "level": "subsurface",
+        },
+        "M10": {
+            "preferred_direction": "vertical",
+            "entity": "express-underground-belt",
+            "level": "subsurface",
+        },
+        "M11": {
+            "preferred_direction": "horizontal",
+            "entity": "turbo-underground-belt",
+            "level": "subsurface",
+        },
+        "M12": {
+            "preferred_direction": "vertical",
+            "entity": "turbo-underground-belt",
             "level": "subsurface",
         },
         "VIA1": {

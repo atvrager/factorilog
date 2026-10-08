@@ -19,6 +19,7 @@ from foundry.belt_library import (
     get_turn_pattern,
     get_underground_pair_pattern,
 )
+from foundry import lef, pdk, solve
 from foundry.def2bp import def_to_blueprint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -236,6 +237,65 @@ END DESIGN
         self.assertEqual(data.get("metadata", {}).get("version"), "1.2.0")
         self.assertIn("derived_rules", data)
         self.assertGreater(len(data["derived_rules"]), 4)
+
+    def test_dynamic_underground_tier_discovery(self) -> None:
+        """Verify that Pdk discovers all underground belt tiers and generates LEF layers."""
+        fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
+        data = solve.Data(str(fixture_path))
+        p = pdk.Pdk(data)
+        spans = p.underground_tier_spans()
+        self.assertIn("underground-belt", spans)
+        self.assertIn("turbo-underground-belt", spans)
+        self.assertEqual(spans["underground-belt"], 5)
+        self.assertEqual(spans["turbo-underground-belt"], 11)
+
+        stack = p.layer_stack()
+        self.assertIn("M3", stack)
+        self.assertIn("M7", stack)
+        self.assertIn("M11", stack)
+        self.assertEqual(stack["M11"]["entity"], "turbo-underground-belt")
+
+        lef_lines = lef.tech_lines(p.tech_json())
+        lef_text = "\n".join(lef_lines)
+        self.assertIn("LAYER M7", lef_text)
+        self.assertIn("LAYER M11", lef_text)
+        self.assertIn("VIA TURBO_TRANSPORT_BELT_VIA", lef_text)
+
+    def test_dynamic_drc_turbo_underground_span(self) -> None:
+        """Verify that Rule DRC-02 accepts a 10-tile span for turbo belt and flags yellow belt."""
+        turbo_entities = [
+            {
+                "name": "turbo-underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "name": "turbo-underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 10, "y": 0},
+            },
+        ]
+        checker = BeltDrcChecker()
+        self.assertEqual(len(checker.check_entities(turbo_entities)), 0)
+
+        yellow_entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 10, "y": 0},
+            },
+        ]
+        violations = checker.check_entities(yellow_entities)
+        self.assertTrue(any(v.code == "DRC-02" for v in violations))
 
 
 if __name__ == "__main__":

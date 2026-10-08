@@ -151,7 +151,10 @@ py_test(
     name = "belt_rules_test",
     size = "small",
     srcs = ["test_belt_rules.py"],
-    data = ["data/belt_rules.json"],
+    data = [
+        "data/belt_rules.json",
+        "data/dump-fixture.json",
+    ],
     main = "test_belt_rules.py",
     deps = [
         "//foundry:pdk_lib",

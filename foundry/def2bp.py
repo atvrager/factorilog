@@ -49,6 +49,15 @@ WIRE_CONNECTOR_POLE_COPPER = 5
 WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER = 5
 WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER = 6
 
+DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
+    "underground-belt": 5,
+    "fast-underground-belt": 7,
+    "express-underground-belt": 9,
+    "turbo-underground-belt": 11,
+}
+
+ALL_UG_LAYERS: frozenset[str] = frozenset({"M3", "M4", "M7", "M8", "M9", "M10", "M11", "M12"})
+
 
 def parse_def(text: str) -> dict[str, Any]:
     """Parse DEF text into components, nets, pins, and design units."""
@@ -612,11 +621,16 @@ def build_entities(
                         (round(gx + in_offset + tx + 0.5, 2), round(gy + ty + 0.5, 2))
                     )
 
+    tier_spans = dict(DEFAULT_UNDERGROUND_SPANS)
+    if netlist_data and "underground_spans" in netlist_data:
+        tier_spans.update(netlist_data["underground_spans"])
+
     def choose_belt_tier(span_tiles: int) -> str:
-        """Select underground belt tier based on required span."""
-        if span_tiles > 5:
-            return "fast-underground-belt"
-        return "underground-belt"
+        """Select smallest underground belt tier that accommodates span_tiles."""
+        for name, max_span in sorted(tier_spans.items(), key=lambda kv: kv[1]):
+            if span_tiles <= max_span:
+                return name
+        return max(tier_spans.items(), key=lambda kv: kv[1])[0]
 
     def segment_run(
         start: float,
@@ -884,8 +898,8 @@ def build_entities(
                 continue
 
             is_fluid = is_fluid_wire(net, layer)
-            net_has_ug = any(w.get("layer") in ("M3", "M4") for w in net.get("wires", []))
-            if layer in ("M3", "M4") or (is_fluid and layer in ("M1", "M2") and not net_has_ug):
+            net_has_ug = any(w.get("layer") in ALL_UG_LAYERS for w in net.get("wires", []))
+            if layer in ALL_UG_LAYERS or (is_fluid and layer in ("M1", "M2") and not net_has_ug):
                 if from_p[0] == to_p[0]:
                     dx, dy = (0, 1) if d == DIRECTION_SOUTH else (0, -1)
                     while (t1_x, t1_y) in occupied_positions:
@@ -1097,7 +1111,7 @@ def build_entities(
                         tile_to_nets[(cur, cy)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else 5
+                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(h_start, cy)].add(nname)
@@ -1194,7 +1208,7 @@ def build_entities(
                         tile_to_nets[(cx, cur)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else 5
+                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(cx, h_start)].add(nname)

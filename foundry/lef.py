@@ -436,6 +436,46 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  SPACING 0.25 ;",
         "END M6",
     ]
+
+    for idx, tier in enumerate(tiers[1:], start=1):
+        h_layer = f"M{2 * idx + 5}"
+        v_layer = f"M{2 * idx + 6}"
+        vl_cut = f"VL{2 * idx + 4}"
+        vl_turn = f"VL{2 * idx + 5}"
+        bname = tier["belt"]
+        lines.extend(
+            [
+                f"# {bname} underground horizontal tunnel layer.",
+                f"LAYER {h_layer}",
+                "  TYPE ROUTING ;",
+                "  DIRECTION HORIZONTAL ;",
+                "  PITCH 1.0 ;",
+                "  OFFSET 0.5 ;",
+                "  WIDTH 0.5 ;",
+                "  SPACING 0.25 ;",
+                f"END {h_layer}",
+                f"# {bname} underground turn cut layer.",
+                f"LAYER {vl_turn}",
+                "  TYPE CUT ;",
+                "  SPACING 0.25 ;",
+                f"END {vl_turn}",
+                f"# {bname} underground vertical tunnel layer.",
+                f"LAYER {v_layer}",
+                "  TYPE ROUTING ;",
+                "  DIRECTION VERTICAL ;",
+                "  PITCH 1.0 ;",
+                "  OFFSET 0.5 ;",
+                "  WIDTH 0.5 ;",
+                "  SPACING 0.25 ;",
+                f"END {v_layer}",
+                f"# {bname} surface-to-underground transition cut layer.",
+                f"LAYER {vl_cut}",
+                "  TYPE CUT ;",
+                "  SPACING 0.25 ;",
+                f"END {vl_cut}",
+            ]
+        )
+
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
     lines.extend(
         [
@@ -450,19 +490,21 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "END SURFACE_TURN_VIA",
         ]
     )
-    # 2. Underground belt entrance/exit connection (M2 -> VL2 -> M3)
-    for tier in tiers:
+    # 2. Underground belt entrance/exit connection
+    for idx, tier in enumerate(tiers):
         name = tier["belt"].replace("-", "_").upper()
-        default_tag = "  DEFAULT" if tier["belt"] == "transport-belt" else ""
+        default_tag = "  DEFAULT" if idx == 0 else ""
+        h_layer = "M3" if idx == 0 else f"M{2 * idx + 5}"
+        vl_layer = "VL2" if idx == 0 else f"VL{2 * idx + 4}"
         lines.extend(
             [
                 f"VIA {name}_VIA",
                 default_tag,
                 "  LAYER M2 ;",
                 "    RECT -0.75 -0.25 0.75 0.25 ;",
-                "  LAYER VL2 ;",
+                f"  LAYER {vl_layer} ;",
                 "    RECT -0.125 -0.125 0.125 0.125 ;",
-                "  LAYER M3 ;",
+                f"  LAYER {h_layer} ;",
                 "    RECT -0.25 -0.25 0.25 0.25 ;",
                 f'  PROPERTY TIER_BELT "{tier["belt"]}" ;',
                 f"  PROPERTY SPAN {tier['span']} ;",

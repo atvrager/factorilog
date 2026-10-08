@@ -16,7 +16,10 @@ Everything else -- placement, routing, optimization -- belongs to OpenROAD.
 import math
 from typing import Any
 
-import solve
+try:
+    from foundry import solve
+except ImportError:
+    import solve
 
 # Items per second of one belt lane, from the prototype `speed` field:
 # speed * 60 ticks/s * 8 items per tile. Verified against the measurements
@@ -256,6 +259,85 @@ class Pdk:
             "outputs": outputs,
         }
 
+    def underground_tier_spans(self) -> dict[str, int]:
+        """Map each underground belt entity to its maximum span in tiles."""
+        return {
+            tier["underground"]: int(tier["span"])
+            for tier in self.belt_tiers()
+            if tier.get("underground")
+        }
+
+    def layer_stack(self) -> dict[str, Any]:
+        """Calculate the dynamic routing layer stack for all detected belt tiers."""
+        tiers = self.belt_tiers()
+        layers: dict[str, dict[str, Any]] = {
+            LAYER_SURFACE: {
+                "direction": "HORIZONTAL",
+                "level": "surface",
+                "entity": "transport-belt",
+            },
+            LAYER_SURFACE_V: {
+                "direction": "VERTICAL",
+                "level": "surface",
+                "entity": "transport-belt",
+            },
+        }
+        base_tier = (
+            tiers[0]
+            if tiers
+            else {
+                "belt": "transport-belt",
+                "underground": "underground-belt",
+                "span": 5,
+            }
+        )
+        layers[LAYER_TUNNEL] = {
+            "direction": "HORIZONTAL",
+            "level": "underground",
+            "entity": base_tier["underground"],
+            "span": base_tier["span"],
+            "tier_belt": base_tier["belt"],
+        }
+        layers[LAYER_TUNNEL_V] = {
+            "direction": "VERTICAL",
+            "level": "underground",
+            "entity": base_tier["underground"],
+            "span": base_tier["span"],
+            "tier_belt": base_tier["belt"],
+        }
+        layers[LAYER_CIRCUIT_RED] = {
+            "direction": "HORIZONTAL",
+            "level": "circuit",
+            "wire": "red",
+        }
+        layers[LAYER_CIRCUIT_GREEN] = {
+            "direction": "VERTICAL",
+            "level": "circuit",
+            "wire": "green",
+        }
+
+        for idx, tier in enumerate(tiers[1:], start=1):
+            h_layer = f"M{2 * idx + 5}"
+            v_layer = f"M{2 * idx + 6}"
+            ug_name = tier.get("underground", "")
+            span = int(tier.get("span", 5))
+            belt_name = tier.get("belt", "")
+            layers[h_layer] = {
+                "direction": "HORIZONTAL",
+                "level": "underground",
+                "entity": ug_name,
+                "span": span,
+                "tier_belt": belt_name,
+            }
+            layers[v_layer] = {
+                "direction": "VERTICAL",
+                "level": "underground",
+                "entity": ug_name,
+                "span": span,
+                "tier_belt": belt_name,
+            }
+        return layers
+
     def tech_json(self) -> dict[str, Any]:
         """The tech layer as a JSON tree. The flow scripts read this."""
         return {
@@ -271,6 +353,8 @@ class Pdk:
                 LAYER_CIRCUIT_RED: {"via": "circuit-drop"},
                 LAYER_CIRCUIT_GREEN: {"via": "circuit-turn"},
             },
+            "layer_stack": self.layer_stack(),
+            "underground_spans": self.underground_tier_spans(),
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
             "inserters": {name: inserter_spec(proto) for name, proto in self.inserters.items()},
             "poles": {
