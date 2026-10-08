@@ -34,8 +34,8 @@ class TestBp2Save(unittest.TestCase):
         self.assertIn("local BP = [==[0eNpjYGBg4GBgYGBmYDAEQgYnxgc]==]", lua_code)
         self.assertIn("iron-ore", lua_code)
         self.assertIn("script.on_init", lua_code)
-        self.assertIn("bulk-inserter", lua_code)
-        self.assertIn("small-electric-pole", lua_code)
+        self.assertIn("loader", lua_code)
+        self.assertIn("infinity-chest", lua_code)
 
 
 if __name__ == "__main__":
