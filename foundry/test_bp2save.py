@@ -33,9 +33,9 @@ class TestBp2Save(unittest.TestCase):
         lua_code = bp2save.generate_control_lua(bp_string, pins_data)
         self.assertIn("local BP = [==[0eNpjYGBg4GBgYGBmYDAEQgYnxgc]==]", lua_code)
         self.assertIn("iron-ore", lua_code)
-        self.assertIn("automation-science-pack", lua_code)
         self.assertIn("script.on_init", lua_code)
-        self.assertIn("script.on_event(defines.events.on_tick", lua_code)
+        self.assertIn("bulk-inserter", lua_code)
+        self.assertIn("small-electric-pole", lua_code)
 
 
 if __name__ == "__main__":

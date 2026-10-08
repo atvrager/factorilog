@@ -165,15 +165,12 @@ script.on_init(function()
     end
 
     -- Setup input pins
-    storage.inputs = {{}}
     for _, pin in ipairs(PINS.inputs or {{}}) do
         local px = pin.x + shift_x
         local py = pin.y + shift_y
         local ents = surface.find_entities_filtered{{position = {{px, py}}}}
         local ent = ents[1]
         if ent and ent.valid then
-            table.insert(storage.inputs, {{name = pin.name, entity = ent, type = pin.type}})
-
             if pin.type == "pipe" then
                 -- Place infinity pipe next to input pipe
                 local p = surface.create_entity{{
@@ -185,19 +182,52 @@ script.on_init(function()
                     p.set_infinity_pipe_filter({{name = pin.name, percentage = 1.0, mode = "at-least"}})
                 end
             else
-                -- Belt input: place visual infinity chest and fast inserter
+                -- Upstream vector from belt direction
+                local dir = ent.direction
+                local dx, dy = 0, 0
+                local ins_dir = defines.direction.north
+                if dir == defines.direction.south then
+                    dx, dy = 0, -1
+                    ins_dir = defines.direction.north
+                elseif dir == defines.direction.north then
+                    dx, dy = 0, 1
+                    ins_dir = defines.direction.south
+                elseif dir == defines.direction.east then
+                    dx, dy = -1, 0
+                    ins_dir = defines.direction.west
+                elseif dir == defines.direction.west then
+                    dx, dy = 1, 0
+                    ins_dir = defines.direction.east
+                end
+
+                -- Infinity chest supplying resources
                 local chest = surface.create_entity{{
                     name = "infinity-chest",
-                    position = {{px, py - 2}},
+                    position = {{px + 2*dx, py + 2*dy}},
                     force = game.forces.player
                 }}
                 if chest then
                     chest.set_infinity_container_filter(1, {{name = pin.name, count = 100, index = 1}})
                 end
+
+                -- Bulk inserter picking up from chest and dropping onto belt
                 surface.create_entity{{
-                    name = "fast-inserter",
-                    position = {{px, py - 1}},
-                    direction = defines.direction.south,
+                    name = "bulk-inserter",
+                    position = {{px + dx, py + dy}},
+                    direction = ins_dir,
+                    force = game.forces.player
+                }}
+
+                -- Power pole and energy interface at input port
+                local pdx, pdy = -dy, dx
+                surface.create_entity{{
+                    name = "small-electric-pole",
+                    position = {{px + dx + pdx, py + dy + pdy}},
+                    force = game.forces.player
+                }}
+                surface.create_entity{{
+                    name = "electric-energy-interface",
+                    position = {{px + dx + 2*pdx, py + dy + 2*pdy}},
                     force = game.forces.player
                 }}
             end
@@ -205,15 +235,12 @@ script.on_init(function()
     end
 
     -- Setup output pins
-    storage.outputs = {{}}
     for _, pin in ipairs(PINS.outputs or {{}}) do
         local px = pin.x + shift_x
         local py = pin.y + shift_y
         local ents = surface.find_entities_filtered{{position = {{px, py}}}}
         local ent = ents[1]
         if ent and ent.valid then
-            table.insert(storage.outputs, {{name = pin.name, entity = ent, type = pin.type}})
-
             if pin.type == "pipe" then
                 -- Place void infinity pipe
                 local p = surface.create_entity{{
@@ -225,19 +252,52 @@ script.on_init(function()
                     p.set_infinity_pipe_filter({{name = pin.name, percentage = 0.0, mode = "at-most"}})
                 end
             else
-                -- Belt output: place visual infinity chest and fast inserter
+                -- Downstream vector from belt direction
+                local dir = ent.direction
+                local dx, dy = 0, 0
+                local ins_dir = defines.direction.west
+                if dir == defines.direction.east then
+                    dx, dy = 1, 0
+                    ins_dir = defines.direction.west
+                elseif dir == defines.direction.west then
+                    dx, dy = -1, 0
+                    ins_dir = defines.direction.east
+                elseif dir == defines.direction.south then
+                    dx, dy = 0, 1
+                    ins_dir = defines.direction.north
+                elseif dir == defines.direction.north then
+                    dx, dy = 0, -1
+                    ins_dir = defines.direction.south
+                end
+
+                -- Infinity chest voiding items
                 local chest = surface.create_entity{{
                     name = "infinity-chest",
-                    position = {{px + 2, py}},
+                    position = {{px + 2*dx, py + 2*dy}},
                     force = game.forces.player
                 }}
                 if chest then
                     chest.remove_unfiltered_items = true
                 end
+
+                -- Bulk inserter picking up from belt and dropping into chest
                 surface.create_entity{{
-                    name = "fast-inserter",
-                    position = {{px + 1, py}},
-                    direction = defines.direction.east,
+                    name = "bulk-inserter",
+                    position = {{px + dx, py + dy}},
+                    direction = ins_dir,
+                    force = game.forces.player
+                }}
+
+                -- Power pole and energy interface at output port
+                local pdx, pdy = -dy, dx
+                surface.create_entity{{
+                    name = "small-electric-pole",
+                    position = {{px + dx + pdx, py + dy + pdy}},
+                    force = game.forces.player
+                }}
+                surface.create_entity{{
+                    name = "electric-energy-interface",
+                    position = {{px + dx + 2*pdx, py + dy + 2*pdy}},
                     force = game.forces.player
                 }}
             end
@@ -251,40 +311,6 @@ end)
 
 script.on_event(defines.events.on_player_created, function(event)
     setup_player(game.get_player(event.player_index))
-end)
-
-script.on_event(defines.events.on_tick, function(event)
-    -- Continuous high-throughput feeding at input pins
-    for _, item in ipairs(storage.inputs or {{}}) do
-        local ent = item.entity
-        if ent and ent.valid then
-            if item.type == "pipe" then
-                ent.insert_fluid({{name = item.name, amount = 100}})
-            elseif ent.type == "transport-belt" or ent.type == "underground-belt" then
-                for line_idx = 1, 2 do
-                    local line = ent.get_transport_line(line_idx)
-                    if line.can_insert_at_back() then
-                        line.insert_at_back({{name = item.name, count = 1}})
-                    end
-                end
-            end
-        end
-    end
-
-    -- Continuous draining at output pins
-    for _, item in ipairs(storage.outputs or {{}}) do
-        local ent = item.entity
-        if ent and ent.valid then
-            if item.type == "pipe" then
-                ent.clear_fluid_inside()
-            elseif ent.type == "transport-belt" or ent.type == "underground-belt" then
-                for line_idx = 1, 2 do
-                    local line = ent.get_transport_line(line_idx)
-                    line.clear()
-                end
-            end
-        end
-    end
 end)
 """
 
