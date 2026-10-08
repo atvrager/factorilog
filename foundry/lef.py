@@ -494,8 +494,8 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
     for idx, tier in enumerate(tiers):
         name = tier["belt"].replace("-", "_").upper()
         default_tag = "  DEFAULT" if idx == 0 else ""
-        h_layer = "M3" if idx == 0 else f"M{2 * idx + 5}"
-        vl_layer = "VL2" if idx == 0 else f"VL{2 * idx + 4}"
+        h_layer = "M3"
+        vl_layer = "VL2"
         lines.extend(
             [
                 f"VIA {name}_VIA",
@@ -600,9 +600,9 @@ def merge_lines() -> list[str]:
         "    LAYER M1 ;",
         "      RECT 0.500 1.000 1.000 2.000 ;",
         "    LAYER M2 ;",
-        "      RECT 0.500 1.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER VL1 ;",
-        "      RECT 0.500 1.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M4 ;",
@@ -655,9 +655,9 @@ def split_lines() -> list[str]:
         "    LAYER M1 ;",
         "      RECT 0.000 1.000 0.500 2.000 ;",
         "    LAYER M2 ;",
-        "      RECT 0.000 1.000 0.500 2.000 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER VL1 ;",
-        "      RECT 0.000 1.000 0.500 2.000 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M4 ;",
@@ -746,6 +746,10 @@ def balancer_lines() -> list[str]:
         "    END",
         "  END y2",
         "  OBS",
+        "    LAYER M2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL1 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "    LAYER M4 ;",

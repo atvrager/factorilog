@@ -22,9 +22,9 @@ END COMPONENTS
 
 NETS 2 ;
 - net_wire ( u_assembler_1 electronic_circuit ) ( u_merge_1 a ) + USE SIGNAL
-  + ROUTED M1 ( 13000 21500 ) ( 30000 * )
-  NEW M2 ( 30000 21500 ) ( * 40500 )
-  NEW M2 ( 30000 21500 ) TRANSPORT_BELT_VIA
+  + ROUTED M2 ( 13000 21500 ) ( * 40500 )
+  NEW M1 ( 13000 40500 ) ( 30000 * )
+  NEW M2 ( 13000 21500 ) TRANSPORT_BELT_VIA
   NEW M3 ( 35000 40500 ) ( 40000 * ) ;
 - crude_oil__1 ( u_assembler_1 crude_oil ) + USE SIGNAL
   + ROUTED M1 ( 13000 22500 ) ( 20000 * )

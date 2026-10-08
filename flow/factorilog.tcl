@@ -137,6 +137,17 @@ foreach inst [$block getInsts] {
 }
 puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
 
+# Prevent reverse routing into input b of merge splitters from the east
+foreach inst [$block getInsts] {
+    set master_name [[$inst getMaster] getName]
+    if {[string match "*merge2" $master_name]} {
+        lassign [$inst getLocation] ix_dbu iy_dbu
+        set ix [expr {$ix_dbu / double($dbu)}]
+        set iy [expr {$iy_dbu / double($dbu)}]
+        create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
+    }
+}
+
 # --- route ----------------------------------------------------------
 # The router connects blocks across four layers:
 # M1 and M2 for surface tracks, M3 and M4 for underground tunnels.

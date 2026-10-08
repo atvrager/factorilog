@@ -392,6 +392,110 @@ def check_underground_pairing(
     return unpaired
 
 
+def prune_dead_end_belts(
+    entities: list[dict[str, Any]],
+    def_data: dict[str, Any],
+    netlist_data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Prune pointless dead-end stub belts that have no downstream sink."""
+    scale = 1.0 / float(def_data.get("units", 1000))
+
+    output_pins: set[tuple[float, float]] = set()
+    for pin in def_data.get("pins", []):
+        if pin.get("direction") == "OUTPUT":
+            px = math.floor(pin["x"] * scale) + 0.5
+            py = math.floor(pin["y"] * scale) + 0.5
+            output_pins.add((round(px, 1), round(py, 1)))
+
+    splitter_entry_targets: set[tuple[float, float, int]] = set()
+    for e in entities:
+        if e.get("name") == "splitter":
+            sx, sy = e["position"]["x"], e["position"]["y"]
+            d = e.get("direction", DIRECTION_NORTH)
+            if d == DIRECTION_EAST:
+                splitter_entry_targets.add((round(sx, 1), round(sy - 0.5, 1), DIRECTION_EAST))
+                splitter_entry_targets.add((round(sx, 1), round(sy + 0.5, 1), DIRECTION_EAST))
+            elif d == DIRECTION_WEST:
+                splitter_entry_targets.add((round(sx, 1), round(sy - 0.5, 1), DIRECTION_WEST))
+                splitter_entry_targets.add((round(sx, 1), round(sy + 0.5, 1), DIRECTION_WEST))
+            elif d == DIRECTION_NORTH:
+                splitter_entry_targets.add((round(sx - 0.5, 1), round(sy, 1), DIRECTION_NORTH))
+                splitter_entry_targets.add((round(sx + 0.5, 1), round(sy, 1), DIRECTION_NORTH))
+            elif d == DIRECTION_SOUTH:
+                splitter_entry_targets.add((round(sx - 0.5, 1), round(sy, 1), DIRECTION_SOUTH))
+                splitter_entry_targets.add((round(sx + 0.5, 1), round(sy, 1), DIRECTION_SOUTH))
+
+    ug_entry_targets: set[tuple[float, float, int]] = set()
+    for e in entities:
+        if "underground-belt" in e.get("name", "") and e.get("type") == "input":
+            ux, uy = e["position"]["x"], e["position"]["y"]
+            d = e.get("direction", DIRECTION_NORTH)
+            ug_entry_targets.add((round(ux, 1), round(uy, 1), d))
+
+    inserter_pickup_tiles: set[tuple[float, float]] = set()
+    for comp in def_data.get("components", []):
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = {i["name"]: i for i in netlist_data.get("instances", [])}.get(comp["name"], {})
+        cell_id = inst.get("cell", comp["macro"])
+        cell = netlist_data.get("cells", {}).get(cell_id, {})
+        inputs = cell.get("inputs", [])
+        for idx in range(len(inputs)):
+            h = cell.get("height", 3)
+            cy = (h - len(inputs)) // 2 + idx + 0.5 if len(inputs) <= h else idx + 0.5
+            inserter_pickup_tiles.add((round(gx - 0.5, 1), round(gy + cy, 1)))
+
+    if not (output_pins or inserter_pickup_tiles or splitter_entry_targets or ug_entry_targets):
+        return entities
+
+    dirs = {
+        DIRECTION_NORTH: (0, -1),
+        DIRECTION_EAST: (1, 0),
+        DIRECTION_SOUTH: (0, 1),
+        DIRECTION_WEST: (-1, 0),
+    }
+    opp = {
+        DIRECTION_NORTH: DIRECTION_SOUTH,
+        DIRECTION_SOUTH: DIRECTION_NORTH,
+        DIRECTION_EAST: DIRECTION_WEST,
+        DIRECTION_WEST: DIRECTION_EAST,
+    }
+
+    belt_map: dict[tuple[float, float], dict[str, Any]] = {
+        (round(e["position"]["x"], 1), round(e["position"]["y"], 1)): e
+        for e in entities
+        if e.get("name") == "transport-belt"
+    }
+
+    while True:
+        to_remove = set()
+        for pos, ent in belt_map.items():
+            if pos in output_pins or pos in inserter_pickup_tiles:
+                continue
+            d = ent.get("direction", DIRECTION_NORTH)
+            if d not in dirs:
+                continue
+            dx, dy = dirs[d]
+            target = (round(pos[0] + dx, 1), round(pos[1] + dy, 1))
+            if (target[0], target[1], d) in splitter_entry_targets:
+                continue
+            if (target[0], target[1], d) in ug_entry_targets:
+                continue
+            if target in belt_map:
+                td = belt_map[target].get("direction", DIRECTION_NORTH)
+                if td != opp[d]:
+                    continue
+            to_remove.add(pos)
+        if not to_remove:
+            break
+        for pos in to_remove:
+            del belt_map[pos]
+
+    clean_entities = [e for e in entities if e.get("name") != "transport-belt"]
+    clean_entities.extend(belt_map.values())
+    return clean_entities
+
+
 def build_entities(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
@@ -1471,12 +1575,15 @@ def build_entities(
         gy = comp["y"] * scale
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
-        cell = cell_map.get(cell_id, {})
-        if cell_id in ("belt_merge2", "belt_split2", "belt_balancer2"):
+        if cell_id in ("belt_split2", "belt_balancer2"):
             pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
             pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
             forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
             forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_merge2":
+            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
+            pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
         elif cell_id == "pump":
             pin_directions[(round(gx + 0.5, 2), round(gy - 0.5, 2))] = DIRECTION_NORTH
             pin_directions[(round(gx + 0.5, 2), round(gy + 2.5, 2))] = DIRECTION_NORTH
@@ -1764,6 +1871,12 @@ def build_entities(
         raise RuntimeError(
             f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected: {unpaired_hoods}"
         )
+
+    # 7.5. Prune dead-end stub belts
+    entities = prune_dead_end_belts(entities, def_data, netlist_data)
+    grid_entities = {
+        (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities
+    }
 
     # 8. Wire circuit telemetry connections
     def connect_wire(
