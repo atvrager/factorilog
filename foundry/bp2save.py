@@ -249,14 +249,16 @@ script.on_init(function()
                 elseif ent.name:find("fast") then loader_name = "fast-loader"
                 end
 
-                -- Infinity chest voiding items
+                -- Infinity chest collecting output items (retains up to 2000 items, voids excess)
                 local chest = surface.create_entity{{
                     name = "infinity-chest",
                     position = {{px + 3.0*dx, py + 3.0*dy}},
                     force = game.forces.player
                 }}
                 if chest then
+                    chest.set_infinity_container_filter(1, {{name = pin.name, count = 2000, mode = "at-most"}})
                     chest.remove_unfiltered_items = true
+                    chest.insert{{name = pin.name, count = 50}}
                 end
 
                 -- Loader loads both lanes from belt into chest
