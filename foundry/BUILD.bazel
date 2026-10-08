@@ -35,6 +35,7 @@ py_library(
         "belt_fuzzer.py",
         "belt_library.py",
         "blueprint.py",
+        "bp2save.py",
         "def2bp.py",
         "lef.py",
         "liberty.py",
@@ -50,6 +51,13 @@ py_library(
         "@pip//pyslang",
         "@pip//scipy",
     ],
+)
+
+py_binary(
+    name = "bp2save",
+    srcs = ["bp2save.py"],
+    main = "bp2save.py",
+    deps = [":pdk_lib"],
 )
 
 py_binary(
@@ -136,5 +144,13 @@ py_test(
     size = "small",
     srcs = ["test_def2bp.py"],
     main = "test_def2bp.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "bp2save_test",
+    size = "small",
+    srcs = ["test_bp2save.py"],
+    main = "test_bp2save.py",
     deps = [":pdk_lib"],
 )

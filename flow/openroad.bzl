@@ -353,6 +353,68 @@ factorilog_render = rule(
 )
 
 
+def _factorilog_save_impl(ctx):
+    blueprint = ctx.file.blueprint
+    save_zip = ctx.outputs.save_zip
+    time_json = ctx.outputs.time_json
+    pins_json = ctx.file.pins_json
+    netlist_json = ctx.file.netlist_json
+    def_file = ctx.file.def_file
+    script = ctx.executable._bp2save
+
+    inputs = [blueprint]
+    outputs = [save_zip]
+    args = [blueprint.path, "--out", save_zip.path]
+
+    if pins_json:
+        inputs.append(pins_json)
+        args.extend(["--pins", pins_json.path])
+    if netlist_json:
+        inputs.append(netlist_json)
+        args.extend(["--netlist", netlist_json.path])
+    if def_file:
+        inputs.append(def_file)
+        args.extend(["--def", def_file.path])
+    if time_json:
+        outputs.append(time_json)
+        args.extend(["--time-out", time_json.path])
+
+    ctx.actions.run(
+        inputs = inputs,
+        outputs = outputs,
+        executable = script,
+        tools = [script],
+        arguments = args,
+        mnemonic = "FactorilogSave",
+        use_default_shell_env = True,
+        execution_requirements = {
+            "no-sandbox": "1",
+            "local": "1",
+        },
+    )
+
+    return [DefaultInfo(files = depset(outputs))]
+
+factorilog_save = rule(
+    implementation = _factorilog_save_impl,
+    attrs = {
+        "blueprint": attr.label(allow_single_file = [".blueprint", ".txt"], mandatory = True, doc = "Blueprint exchange string file"),
+        "def_file": attr.label(allow_single_file = [".def"], mandatory = False, doc = "DEF file"),
+        "netlist_json": attr.label(allow_single_file = [".json"], mandatory = False, doc = "Netlist JSON file"),
+        "pins_json": attr.label(allow_single_file = [".json"], mandatory = False, doc = "Pins JSON file"),
+        "save_zip": attr.output(mandatory = True, doc = "Output playable Factorio save file (.zip)"),
+        "time_json": attr.output(doc = "Optional output save generation timing JSON file"),
+        "_bp2save": attr.label(
+            default = Label("//foundry:bp2save"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+    doc = "Converts a Factorio blueprint exchange string into a playable Factorio save file.",
+)
+
+
+
 def _factorilog_timing_summary_impl(ctx):
     summary_out = ctx.outputs.summary_json
     factory_name = ctx.attr.factory_name
@@ -439,6 +501,7 @@ def factorilog_science_factory(
     pnr_name = name + "_pnr"
     bp_name = name + "_bp"
     render_name = name + "_render"
+    save_name = name + "_save"
     timing_name = name + "_timing"
 
     factorilog_synth(
@@ -492,6 +555,17 @@ def factorilog_science_factory(
         tags = merged_tags,
     )
 
+    factorilog_save(
+        name = save_name,
+        blueprint = ":" + name + ".blueprint",
+        def_file = ":" + name + ".def",
+        netlist_json = ":" + name + "_netlist.json",
+        pins_json = ":" + name + "_pins.json",
+        save_zip = name + ".zip",
+        time_json = name + "_save_time.json",
+        tags = merged_tags,
+    )
+
     factorilog_timing_summary(
         name = timing_name,
         factory_name = name,
@@ -500,6 +574,7 @@ def factorilog_science_factory(
             ":" + name + "_pnr_time.json",
             ":" + name + "_bp_time.json",
             ":" + name + "_render_time.json",
+            ":" + name + "_save_time.json",
         ],
         summary_json = name + "_timing.json",
         tags = merged_tags,
@@ -510,6 +585,7 @@ def factorilog_science_factory(
         srcs = [
             ":" + name + ".blueprint",
             ":" + name + ".png",
+            ":" + name + ".zip",
             ":" + name + "_timing.json",
         ],
         tags = merged_tags,
