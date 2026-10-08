@@ -250,13 +250,15 @@ END DESIGN
         self.assertEqual(spans["turbo-underground-belt"], 11)
 
         stack = p.layer_stack()
-        self.assertIn("M3", stack)
+        self.assertIn("M5", stack)
+        self.assertEqual(stack["M5"]["entity"], "underground-belt")
         self.assertIn("M7", stack)
         self.assertIn("M11", stack)
         self.assertEqual(stack["M11"]["entity"], "turbo-underground-belt")
 
         lef_lines = lef.tech_lines(p.tech_json())
         lef_text = "\n".join(lef_lines)
+        self.assertIn("LAYER M5", lef_text)
         self.assertIn("LAYER M7", lef_text)
         self.assertIn("LAYER M11", lef_text)
         self.assertIn("VIA TURBO_TRANSPORT_BELT_VIA", lef_text)

@@ -371,23 +371,23 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
         },
         "M3": {
             "preferred_direction": "horizontal",
-            "entity": "underground-belt",
-            "level": "subsurface",
-        },
-        "M4": {
-            "preferred_direction": "vertical",
-            "entity": "underground-belt",
-            "level": "subsurface",
-        },
-        "M5": {
-            "preferred_direction": "horizontal",
             "entity": "circuit-red",
             "level": "circuit",
         },
-        "M6": {
+        "M4": {
             "preferred_direction": "vertical",
             "entity": "circuit-green",
             "level": "circuit",
+        },
+        "M5": {
+            "preferred_direction": "horizontal",
+            "entity": "underground-belt",
+            "level": "subsurface",
+        },
+        "M6": {
+            "preferred_direction": "vertical",
+            "entity": "underground-belt",
+            "level": "subsurface",
         },
         "M7": {
             "preferred_direction": "horizontal",
@@ -424,7 +424,15 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "entity": "transport-belt",
         },
         "VIA2": {
-            "description": "Portal transition to subsurface layers M3 and M4",
+            "description": "Surface to circuit drop between M2 and M3",
+            "entity": "circuit-wire",
+        },
+        "VIA3": {
+            "description": "Circuit turn between M3 and M4",
+            "entity": "circuit-wire",
+        },
+        "VIA4": {
+            "description": "Portal transition to subsurface layers M5 and M6",
             "entity": "underground-belt",
         },
     }
