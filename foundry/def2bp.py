@@ -56,7 +56,7 @@ DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
     "turbo-underground-belt": 11,
 }
 
-ALL_UG_LAYERS: frozenset[str] = frozenset({f"M{i}" for i in range(5, 33)})
+ALL_UG_LAYERS: frozenset[str] = frozenset({"M3", "M4", "M7", "M8", "M9", "M10", "M11", "M12"})
 
 
 def parse_def(text: str) -> dict[str, Any]:
@@ -438,7 +438,7 @@ def build_entities(
             net_name = net.get("name", "")
             base = net_name.split("__")[0].replace("_", "-")
             return base in fluids
-        return layer in ("M5", "M6")
+        return layer in ("M3", "M4")
 
     # 1. Place components
     inst_to_entity: dict[str, dict[str, Any]] = {}
@@ -843,7 +843,7 @@ def build_entities(
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         for w in net.get("wires", []):
-            if w.get("layer") in ("M3", "M4"):
+            if w.get("layer") in ("M5", "M6"):
                 continue
             p1 = (
                 round(math.floor(w["x1"] * scale) + 0.5, 2),
@@ -894,7 +894,7 @@ def build_entities(
             else:
                 d = DIRECTION_EAST if to_p[0] >= from_p[0] else DIRECTION_WEST
 
-            if layer in ("M3", "M4"):
+            if layer in ("M5", "M6"):
                 continue
 
             is_fluid = is_fluid_wire(net, layer)
@@ -1052,7 +1052,7 @@ def build_entities(
     # 3. Process M3 and M4 runs with obstacle-aware segmentation
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
-        is_fluid = is_fluid_wire(net, "M5")
+        is_fluid = is_fluid_wire(net, "M3")
         blocked_tiles = {pos for pos, nets in tile_to_nets.items() if any(n != nname for n in nets)}
 
         # Process horizontal runs (M3)

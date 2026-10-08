@@ -65,11 +65,11 @@ def inserter_spec(proto: dict[str, Any]) -> dict[str, Any]:
 # netlister, the DEF exporter, and the game bridge.
 LAYER_SURFACE = "M1"
 LAYER_SURFACE_V = "M2"
-LAYER_CIRCUIT_RED = "M3"
-LAYER_CIRCUIT_GREEN = "M4"
-LAYER_TUNNEL = "M5"
-LAYER_TUNNEL_V = "M6"
-LAYER_FLUID = "M5"
+LAYER_TUNNEL = "M3"
+LAYER_TUNNEL_V = "M4"
+LAYER_FLUID = "M3"
+LAYER_CIRCUIT_RED = "M5"
+LAYER_CIRCUIT_GREEN = "M6"
 
 DISPLAY_PANEL_CELL = "display_panel"
 ARITHMETIC_COMBINATOR_CELL = "arithmetic_combinator"
@@ -281,19 +281,42 @@ class Pdk:
                 "level": "surface",
                 "entity": "transport-belt",
             },
-            LAYER_CIRCUIT_RED: {
-                "direction": "HORIZONTAL",
-                "level": "circuit",
-                "wire": "red",
-            },
-            LAYER_CIRCUIT_GREEN: {
-                "direction": "VERTICAL",
-                "level": "circuit",
-                "wire": "green",
-            },
+        }
+        base_tier = (
+            tiers[0]
+            if tiers
+            else {
+                "belt": "transport-belt",
+                "underground": "underground-belt",
+                "span": 5,
+            }
+        )
+        layers[LAYER_TUNNEL] = {
+            "direction": "HORIZONTAL",
+            "level": "underground",
+            "entity": base_tier["underground"],
+            "span": base_tier["span"],
+            "tier_belt": base_tier["belt"],
+        }
+        layers[LAYER_TUNNEL_V] = {
+            "direction": "VERTICAL",
+            "level": "underground",
+            "entity": base_tier["underground"],
+            "span": base_tier["span"],
+            "tier_belt": base_tier["belt"],
+        }
+        layers[LAYER_CIRCUIT_RED] = {
+            "direction": "HORIZONTAL",
+            "level": "circuit",
+            "wire": "red",
+        }
+        layers[LAYER_CIRCUIT_GREEN] = {
+            "direction": "VERTICAL",
+            "level": "circuit",
+            "wire": "green",
         }
 
-        for idx, tier in enumerate(tiers):
+        for idx, tier in enumerate(tiers[1:], start=1):
             h_layer = f"M{2 * idx + 5}"
             v_layer = f"M{2 * idx + 6}"
             ug_name = tier.get("underground", "")
@@ -321,14 +344,14 @@ class Pdk:
             "layers": {
                 LAYER_SURFACE: {"via": "none"},
                 LAYER_SURFACE_V: {"via": "surface-turn"},
-                LAYER_CIRCUIT_RED: {"via": "circuit-drop"},
-                LAYER_CIRCUIT_GREEN: {"via": "circuit-turn"},
                 LAYER_TUNNEL: {
                     "via": "tunnel-pair",
                     "tiers": self.belt_tiers(),
                     "span": PIPE_TO_GROUND_SPAN,
                 },
                 LAYER_TUNNEL_V: {"via": "tunnel-turn"},
+                LAYER_CIRCUIT_RED: {"via": "circuit-drop"},
+                LAYER_CIRCUIT_GREEN: {"via": "circuit-turn"},
             },
             "layer_stack": self.layer_stack(),
             "underground_spans": self.underground_tier_spans(),

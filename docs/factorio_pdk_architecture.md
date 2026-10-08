@@ -113,13 +113,13 @@ Two different material streams cannot cross on the surface plane without collisi
 ```
        Silicon Stackup                        Factorio Stackup
   +-----------------------+              +-----------------------+
-  | M2 (Vertical Metal)   |              | M13+ (Power / Modded) | (Aerial Overhead, Z = +3)
+  | M2 (Vertical Metal)   |              | M7 (Power Copper Wire)| (Aerial Overhead, Z = +3)
   +-----------------------+              +-----------------------+
-  | Oxide Dielectric      |              | M3/M4 (Circuit Wires) | (Aerial Overhead, Z = +1 / +2)
+  | Oxide Dielectric      |              | M5/M6 (Circuit Wires) | (Aerial Overhead, Z = +1 / +2)
   +-----------------------+              +-----------------------+
-  | M1 (Horizontal Metal) |              | M1/M2 (Surface Belts) | (Ground Surface, Z = 0: All Entities & Hoods)
+  | M1 (Horizontal Metal) |              | M1 (Surface Plane)    | (Ground Surface, Z = 0: All Entities & Hoods)
   +-----------------------+              +-----------------------+
-                                         | M5..M12 (Underground) | (Subsurface Tunnels, Z < 0)
+                                         | M2/M3/M4 (Underground)| (Subsurface Tunnels, Z < 0)
                                          +-----------------------+
 ```
 
@@ -128,31 +128,30 @@ Two different material streams cannot cross on the surface plane without collisi
 ```mermaid
 flowchart TD
     subgraph Aerial["Aerial Overhead Domain (Z > 0)"]
-        M4["Layer M4: Green Circuit Wire (Z = +2, Reach = 9)"]
-        M3["Layer M3: Red Circuit Wire (Z = +1, Reach = 9)"]
+        M7["Layer M7: Copper Power Wire (Z = +3, Reach = 9-32)"]
+        M6["Layer M6: Green Circuit Wire (Z = +2, Reach = 9)"]
+        M5["Layer M5: Red Circuit Wire (Z = +1, Reach = 9)"]
     end
     subgraph Surface["Surface Ground Domain (Z = 0, Strictly Planar)"]
-        M1["Layer M1: Surface Belts Horizontal, Splitters, Inserters, Machines, Pipes, Poles, UG Hoods"]
-        M2["Layer M2: Surface Belts Vertical, Machine Ports"]
+        M1["Layer M1: Surface Belts, Splitters, Inserters, Machines, Pipes, Poles, UG Hoods"]
     end
     subgraph Subsurface["Subsurface Tunnel Domain (Z < 0)"]
-        M5_M6["Layers M5/M6: Subsurface Belts Tier 1 (Yellow, Z = -1, Span = 2-5)"]
-        M7_M8["Layers M7/M8: Subsurface Belts Tier 2 (Red, Z = -2, Span = 2-7)"]
-        M9_M10["Layers M9/M10: Subsurface Belts Tier 3 (Blue, Z = -3, Span = 2-9)"]
-        M11_M12["Layers M11/M12: Subsurface Belts Tier 4 (Turbo, Z = -4, Span = 2-11)"]
-        M_Mod["Layers M_N: Subsurface Belts Tier N (Modded Belts)"]
+        M2["Layer M2: Subsurface Belts Tier 1 (Yellow, Z = -1, Span = 2-5)"]
+        M3["Layer M3: Subsurface Belts Tier 2 (Red, Z = -2, Span = 2-7)"]
+        M4["Layer M4: Subsurface Belts Tier 3 (Blue, Z = -3, Span = 2-9)"]
+        M_Mod["Layer M_N: Subsurface Belts Tier N (Modded / Space Age Turbo)"]
     end
     Aerial -.-> Surface
-    Surface -- "Cut VL4 (Entrance Hood)" --> M5_M6
-    M5_M6 -- "Cut VL4 (Exit Hood)" --> Surface
+    Surface -- "Cut VL12 (Entrance Hood)" --> M2
+    M2 -- "Cut VL12 (Exit Hood)" --> Surface
 ```
 
 #### 1. Aerial Domain ($Z > 0$)
-- **Entities**: Red circuit wires (`M3`, $Z=+1$), green circuit wires (`M4`, $Z=+2$), and copper electric wires ($Z=+3$).
+- **Entities**: Red circuit wires ($Z=+1$), green circuit wires ($Z=+2$), and copper electric wires ($Z=+3$).
 - **Rules**: Wires fly overhead. They never collide with surface entities or each other. Maximum span is 9 tiles for circuit wires and medium poles, and up to 32 tiles for big poles.
 
 #### 2. Surface Ground Domain ($Z = 0$)
-- **Entities**: Transport belts (`M1`/`M2`), splitters, inserters, machine cores, fluid pipes, electric poles, and underground hoods.
+- **Entities**: Transport belts, splitters, inserters, machine cores, fluid pipes, electric poles, and underground hoods.
 - **Rules**: Strictly planar. Exactly one entity can occupy one ground tile. Two surface entities cannot overlap.
 
 #### 3. Subsurface Domain ($Z < 0$)
@@ -160,11 +159,11 @@ flowchart TD
 - **Dynamic Tier Generation**:
   - The PDK extracts underground belt tiers directly from Factorio prototype tables (`Data.prototypes["underground-belt"]`).
   - Speed determines tier order:
-    - Tier 1: Yellow Underground (`underground-belt`, `M5`/`M6`, $Z = -1$, span 2–5).
-    - Tier 2: Red Underground (`fast-underground-belt`, `M7`/`M8`, $Z = -2$, span 2–7).
-    - Tier 3: Blue Underground (`express-underground-belt`, `M9`/`M10`, $Z = -3$, span 2–9).
-    - Tier 4: Turbo Underground (`turbo-underground-belt`, `M11`/`M12`, $Z = -4$, span 2–11).
-    - Modded Tiers: Space Age and modded belts map automatically to layers $M_{13} \dots M_N$.
+    - Tier 1: Yellow Underground (`underground-belt`, $Z = -1$, span 2–5).
+    - Tier 2: Red Underground (`fast-underground-belt`, $Z = -2$, span 2–7).
+    - Tier 3: Blue Underground (`express-underground-belt`, $Z = -3$, span 2–9).
+    - Tier 4: Turbo Underground (`turbo-underground-belt`, $Z = -4$, span 2–11).
+    - Modded Tiers: Space Age and modded belts map automatically to layers $M_5 \dots M_N$.
 - **Rules**:
   - Underground belts are straight 1D segments. They cannot turn underground.
   - Orthogonal underground runs (East-West and North-South) do not collide.
@@ -175,35 +174,31 @@ flowchart TD
 
 | Layer Name | Type | Direction | Factorio Physical Entity | Physical Constraints |
 |:---|:---|:---|:---|:---|
-| **M1** | Routing | Horizontal | **Surface Belts Horizontal** | Ground tile ($Z=0$). 1 entity per tile. Belts, pipes, hoods. |
-| **VL1** | Cut (`via`) | Contact | **Surface Turn** | Corner turn between M1 and M2. |
-| **M2** | Routing | Vertical | **Surface Belts Vertical** | Ground tile ($Z=0$). Machine ports, vertical belts. |
-| **VL2** | Cut (`via`) | Contact | **Circuit Drop** | Connection between surface entity and M3 circuit red wire. |
-| **M3** | Routing | Horizontal | **Red Circuit Wire** | Aerial ($Z=+1$). Reach $\le 9$ tiles. Signal bus. |
-| **VL3** | Cut (`via`) | Contact | **Circuit Turn** | Connection between M3 and M4 circuit wires. |
-| **M4** | Routing | Vertical | **Green Circuit Wire** | Aerial ($Z=+2$). Reach $\le 9$ tiles. Signal bus. |
-| **VL4** | Cut (`via`) | Contact | **Underground Belt Hood** | Transition between surface (M2) and underground (M5). |
-| **M5** | Routing | Horizontal | **Yellow Underground Tunnel / Pipe** | Subsurface ($Z=-1$). Min span 2 tiles, max span 5 tiles (pipe: 11). |
-| **VL5** | Cut (`via`) | Contact | **Underground Turn** | Subsurface layer connection. |
-| **M6** | Routing | Vertical | **Yellow Underground Tunnel** | Subsurface ($Z=-1$). Min span 2 tiles, max span 5 tiles. |
-| **M7 / M8** | Routing | 1D Orthogonal | **Red Underground Tunnel** | Subsurface ($Z=-2$). Min span 2 tiles, max span 7 tiles. |
-| **M9 / M10** | Routing | 1D Orthogonal | **Blue Underground Tunnel** | Subsurface ($Z=-3$). Min span 2 tiles, max span 9 tiles. |
-| **M11 / M12** | Routing | 1D Orthogonal | **Turbo Underground Tunnel** | Subsurface ($Z=-4$). Min span 2 tiles, max span 11 tiles. |
+| **M1** | Routing | Planar / Non-directional | **Surface Plane** | Ground tile ($Z=0$). 1 entity per tile. Belts, pipes, hoods. |
+| **VL12** | Cut (`via`) | Contact | **Yellow Underground Hood** | Transition between surface and $Z=-1$. Occupies surface tile. |
+| **M2** | Routing | 1D Orthogonal | **Yellow Underground Tunnel** | Subsurface ($Z=-1$). Min span 2 tiles, max span 5 tiles. |
+| **VL13** | Cut (`via`) | Contact | **Red Underground Hood** | Transition between surface and $Z=-2$. Occupies surface tile. |
+| **M3** | Routing | 1D Orthogonal | **Red Underground Tunnel** | Subsurface ($Z=-2$). Min span 2 tiles, max span 7 tiles. |
+| **VL14** | Cut (`via`) | Contact | **Pipe-to-Ground Hood** | Transition between surface pipe and underground pipe. |
+| **M4** | Routing | 1D Orthogonal | **Underground Fluid Pipe** | Subsurface fluid run. Min span 2 tiles, max span 11 tiles. |
+| **M5** | Routing | Non-directional | **Red Circuit Wire** | Aerial ($Z=+1$). Reach $\le 9$ tiles. Signal bus. |
+| **M6** | Routing | Non-directional | **Green Circuit Wire** | Aerial ($Z=+2$). Reach $\le 9$ tiles. Signal bus. |
+| **M7** | Routing | Mesh / Spanning Tree | **Copper Power Wire** | Aerial ($Z=+3$). Reach $\le 9$ (pole) / 18 (substation) / 32 (big pole). |
 
 ### 3.4 Contact Layer (`via`) Rules and Exclusion Constraints
 1. **No Layer Changes Between Subsurface Layers**:
    - Belts cannot change layers while underground.
+   - No cut connects M2 and M3 directly.
    - An underground run must return to M1 (surface) before changing layer or direction.
 2. **Minimum Span Rule**:
    - The minimum underground belt span is **2 tiles total including both hoods**.
    - An entrance hood at coordinate $X$ and an exit hood at coordinate $X+1$ are adjacent and physically valid.
    - An underground belt cannot occupy 1 tile.
 3. **Maximum Span Rules**:
-   - Yellow belt (M5/M6): Maximum span is 5 empty intermediate tiles (6 tiles hood-to-hood).
-   - Red belt (M7/M8): Maximum span is 7 empty intermediate tiles (8 tiles hood-to-hood).
-   - Blue belt (M9/M10): Maximum span is 9 empty intermediate tiles (10 tiles hood-to-hood).
-   - Turbo belt (M11/M12): Maximum span is 11 empty intermediate tiles (12 tiles hood-to-hood).
-   - Underground pipe (M5): Maximum span is 10 empty intermediate tiles (11 tiles hood-to-hood).
+   - Yellow belt (M2): Maximum span is 5 empty intermediate tiles (6 tiles hood-to-hood).
+   - Red belt (M3): Maximum span is 7 empty intermediate tiles (8 tiles hood-to-hood).
+   - Blue belt: Maximum span is 9 empty intermediate tiles (10 tiles hood-to-hood).
+   - Underground pipe (M4): Maximum span is 10 empty intermediate tiles (11 tiles hood-to-hood).
 
 ---
 
@@ -408,7 +403,7 @@ The Circuit Network provides aerial control signals ($Z = +1$ and $Z = +2$) to m
 
 ### 9.1 Network Architecture
 - **Dual Isolated Channels**:
-  - Red wire (`M3`) and Green wire (`M4`) are independent aerial signal buses.
+  - Red wire (`M5`) and Green wire (`M6`) are independent aerial signal buses.
   - Wires attach directly to machines, inserters, belts, combinators, chests, and power poles without taking ground tile space.
   - Multiple connections on the same wire color form a summing junction (signals with the same name add together).
 - **Physical Wire Reach**:

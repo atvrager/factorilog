@@ -34,8 +34,8 @@ class TestCircuitTelemetry(unittest.TestCase):
 
     def test_pdk_and_lef_circuit_layers(self) -> None:
         """Verify circuit layers and combinator macros in LEF and Liberty."""
-        self.assertEqual(pdk.LAYER_CIRCUIT_RED, "M3")
-        self.assertEqual(pdk.LAYER_CIRCUIT_GREEN, "M4")
+        self.assertEqual(pdk.LAYER_CIRCUIT_RED, "M5")
+        self.assertEqual(pdk.LAYER_CIRCUIT_GREEN, "M6")
 
         comb_cells = [
             pdk.display_panel_cell(),
@@ -50,8 +50,8 @@ class TestCircuitTelemetry(unittest.TestCase):
             lib_text = liberty.write_liberty(comb_cells, str(lib_path))
 
             # Verify layers and vias exist in LEF
-            self.assertIn("LAYER M3", lef_text)
-            self.assertIn("LAYER M4", lef_text)
+            self.assertIn("LAYER M5", lef_text)
+            self.assertIn("LAYER M6", lef_text)
             self.assertIn("VIA CIRCUIT_DROP_VIA", lef_text)
             self.assertIn("VIA CIRCUIT_TURN_VIA", lef_text)
 

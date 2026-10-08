@@ -71,7 +71,7 @@ initialize_floorplan -die_area "0 0 $die_side $die_side" \
 puts "factorilog: [llength [$block getRows]] rows"
 
 # Routing tracks come from the LEF pitches: one track per tile on each
-# layer. M1 and M2 carry surface tracks, M3 and M4 carry circuit wires, M5 and M6 carry underground tunnels.
+# layer. M1 and M2 carry surface tracks, M3 and M4 carry underground tunnels.
 make_tracks
 
 # Non-default spacing rule for fluid nets to prevent adjacent surface pipe clashes:
@@ -138,8 +138,8 @@ foreach inst [$block getInsts] {
 puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
 
 # --- route ----------------------------------------------------------
-# The router connects blocks across six layers:
-# M1 and M2 for surface tracks, M3 and M4 for circuit wires, M5 and M6 for underground tunnels.
+# The router connects blocks across four layers:
+# M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
 # FastRoute runs global routing. TritonRoute runs detailed routing.
 set has_circuit 0
 foreach inst [$block getInsts] {
@@ -158,8 +158,6 @@ if {$has_circuit} {
 ::drt::detailed_route_set_unidirectional_layer M2
 ::drt::detailed_route_set_unidirectional_layer M3
 ::drt::detailed_route_set_unidirectional_layer M4
-::drt::detailed_route_set_unidirectional_layer M5
-::drt::detailed_route_set_unidirectional_layer M6
 global_route -verbose
 detailed_route -output_drc route_drc.rpt -verbose 1
 

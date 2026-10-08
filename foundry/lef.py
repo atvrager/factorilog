@@ -272,9 +272,9 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("    LAYER VL1 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
-        lines.append("    LAYER VL4 ;")
+        lines.append("    LAYER VL2 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
-        lines.append("    LAYER VL5 ;")
+        lines.append("    LAYER VL3 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("  END")
     elif w > 1.0 or h > 1.0:
@@ -329,9 +329,9 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
         lines.append("    LAYER VL1 ;")
         for rx1, ry1, rx2, ry2 in m_obs_m1:
             lines.append(f"      RECT {rx1:.3f} {ry1:.3f} {rx2:.3f} {ry2:.3f} ;")
-        lines.append("    LAYER M5 ;")
+        lines.append("    LAYER M3 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
-        lines.append("    LAYER M6 ;")
+        lines.append("    LAYER M4 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
         lines.append("    LAYER VL2 ;")
         lines.append(f"      RECT 0.000 0.000 {w:.3f} {h:.3f} ;")
@@ -348,9 +348,8 @@ def macro_lines(cell: dict[str, Any]) -> list[str]:
 
 def tech_lines(tech: dict[str, Any]) -> list[str]:
     """The technology section: units, layers, vias, site."""
-    tunnel_layer = tech["layers"].get("M5", tech["layers"].get("M3", {}))
-    tiers = tunnel_layer.get("tiers", [])
-    span = tunnel_layer.get("span", pdk.PIPE_TO_GROUND_SPAN)
+    tiers = tech["layers"]["M3"]["tiers"]
+    span = tech["layers"]["M3"]["span"]
     lines = [
         "VERSION 5.8 ;",
         "UNITS",
@@ -380,12 +379,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.25 ;",
         "END M2",
-        # VL2: surface-to-circuit transition cut layer.
+        # VL2: surface-to-underground transition cut layer (tunnel mouth).
         "LAYER VL2",
         "  TYPE CUT ;",
         "  SPACING 0.25 ;",
         "END VL2",
-        # M3: circuit red wire horizontal.
+        # M3: underground horizontal tunnel layer.
         "LAYER M3",
         "  TYPE ROUTING ;",
         "  DIRECTION HORIZONTAL ;",
@@ -394,12 +393,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.25 ;",
         "END M3",
-        # VL3: circuit wire turn cut layer.
+        # VL3: underground turn cut layer.
         "LAYER VL3",
         "  TYPE CUT ;",
         "  SPACING 0.25 ;",
         "END VL3",
-        # M4: circuit green wire vertical.
+        # M4: underground vertical tunnel layer.
         "LAYER M4",
         "  TYPE ROUTING ;",
         "  DIRECTION VERTICAL ;",
@@ -408,16 +407,40 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.25 ;",
         "END M4",
-        # VL4: surface-to-underground transition cut layer (tunnel mouth).
+        # VL4: underground-to-circuit cut layer.
         "LAYER VL4",
         "  TYPE CUT ;",
         "  SPACING 0.25 ;",
         "END VL4",
+        # M5: circuit red wire horizontal.
+        "LAYER M5",
+        "  TYPE ROUTING ;",
+        "  DIRECTION HORIZONTAL ;",
+        "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
+        "  WIDTH 0.5 ;",
+        "  SPACING 0.25 ;",
+        "END M5",
+        # VL5: circuit wire turn cut layer.
+        "LAYER VL5",
+        "  TYPE CUT ;",
+        "  SPACING 0.25 ;",
+        "END VL5",
+        # M6: circuit green wire vertical.
+        "LAYER M6",
+        "  TYPE ROUTING ;",
+        "  DIRECTION VERTICAL ;",
+        "  PITCH 1.0 ;",
+        "  OFFSET 0.5 ;",
+        "  WIDTH 0.5 ;",
+        "  SPACING 0.25 ;",
+        "END M6",
     ]
 
-    for idx, tier in enumerate(tiers):
+    for idx, tier in enumerate(tiers[1:], start=1):
         h_layer = f"M{2 * idx + 5}"
         v_layer = f"M{2 * idx + 6}"
+        vl_cut = f"VL{2 * idx + 4}"
         vl_turn = f"VL{2 * idx + 5}"
         bname = tier["belt"]
         lines.extend(
@@ -445,19 +468,13 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
                 "  WIDTH 0.5 ;",
                 "  SPACING 0.25 ;",
                 f"END {v_layer}",
+                f"# {bname} surface-to-underground transition cut layer.",
+                f"LAYER {vl_cut}",
+                "  TYPE CUT ;",
+                "  SPACING 0.25 ;",
+                f"END {vl_cut}",
             ]
         )
-        if idx + 1 < len(tiers):
-            next_vl_cut = f"VL{2 * (idx + 1) + 4}"
-            lines.extend(
-                [
-                    f"# {tiers[idx + 1]['belt']} surface-to-underground transition cut layer.",
-                    f"LAYER {next_vl_cut}",
-                    "  TYPE CUT ;",
-                    "  SPACING 0.25 ;",
-                    f"END {next_vl_cut}",
-                ]
-            )
 
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
     lines.extend(
@@ -473,43 +490,12 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "END SURFACE_TURN_VIA",
         ]
     )
-
-    # 2. Circuit drop connection (M2 -> VL2 -> M3)
-    lines.extend(
-        [
-            "VIA CIRCUIT_DROP_VIA",
-            "  DEFAULT",
-            "  LAYER M2 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL2 ;",
-            "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M3 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "END CIRCUIT_DROP_VIA",
-        ]
-    )
-
-    # 3. Circuit turn connection (M3 -> VL3 -> M4)
-    lines.extend(
-        [
-            "VIA CIRCUIT_TURN_VIA",
-            "  DEFAULT",
-            "  LAYER M3 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL3 ;",
-            "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M4 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "END CIRCUIT_TURN_VIA",
-        ]
-    )
-
-    # 4. Underground belt entrance/exit connection
+    # 2. Underground belt entrance/exit connection
     for idx, tier in enumerate(tiers):
         name = tier["belt"].replace("-", "_").upper()
         default_tag = "  DEFAULT" if idx == 0 else ""
-        h_layer = f"M{2 * idx + 5}"
-        vl_layer = f"VL{2 * idx + 4}"
+        h_layer = "M3" if idx == 0 else f"M{2 * idx + 5}"
+        vl_layer = "VL2" if idx == 0 else f"VL{2 * idx + 4}"
         lines.extend(
             [
                 f"VIA {name}_VIA",
@@ -525,19 +511,47 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
                 f"END {name}_VIA",
             ]
         )
-
-    # 5. Underground pipe-to-ground entrance/exit connection
+    # 3. Underground pipe-to-ground entrance/exit connection
     lines.extend(
         [
             "VIA PIPE_TO_GROUND_VIA",
             "  LAYER M2 ;",
             "    RECT -0.75 -0.25 0.75 0.25 ;",
+            "  LAYER VL2 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M3 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            f"  PROPERTY SPAN {span} ;",
+            "END PIPE_TO_GROUND_VIA",
+        ]
+    )
+
+    # 5. Circuit drop connection (M4 -> VL4 -> M5)
+    lines.extend(
+        [
+            "VIA CIRCUIT_DROP_VIA",
+            "  DEFAULT",
+            "  LAYER M4 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
             "  LAYER VL4 ;",
             "    RECT -0.125 -0.125 0.125 0.125 ;",
             "  LAYER M5 ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
-            f"  PROPERTY SPAN {span} ;",
-            "END PIPE_TO_GROUND_VIA",
+            "END CIRCUIT_DROP_VIA",
+        ]
+    )
+    # 6. Circuit turn connection (M5 -> VL5 -> M6)
+    lines.extend(
+        [
+            "VIA CIRCUIT_TURN_VIA",
+            "  DEFAULT",
+            "  LAYER M5 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL5 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M6 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END CIRCUIT_TURN_VIA",
             "SITE tile",
             f"  SIZE {TILE_MICRONS:.3f} BY {TILE_MICRONS:.3f} ;",
             "  CLASS CORE ;",
@@ -589,11 +603,13 @@ def merge_lines() -> list[str]:
         "      RECT 0.500 1.000 1.000 2.000 ;",
         "    LAYER VL1 ;",
         "      RECT 0.500 1.000 1.000 2.000 ;",
-        "    LAYER M5 ;",
+        "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER M6 ;",
+        "    LAYER M4 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER VL4 ;",
+        "    LAYER VL2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "  END",
         f"END {name}",
@@ -642,11 +658,13 @@ def split_lines() -> list[str]:
         "      RECT 0.000 1.000 0.500 2.000 ;",
         "    LAYER VL1 ;",
         "      RECT 0.000 1.000 0.500 2.000 ;",
-        "    LAYER M5 ;",
+        "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER M6 ;",
+        "    LAYER M4 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER VL4 ;",
+        "    LAYER VL2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "  END",
         f"END {name}",
@@ -728,11 +746,13 @@ def balancer_lines() -> list[str]:
         "    END",
         "  END y2",
         "  OBS",
-        "    LAYER M5 ;",
+        "    LAYER M3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER M6 ;",
+        "    LAYER M4 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
-        "    LAYER VL4 ;",
+        "    LAYER VL2 ;",
+        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "    LAYER VL3 ;",
         "      RECT 0.000 0.000 1.000 2.000 ;",
         "  END",
         f"END {name}",
