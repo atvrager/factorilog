@@ -1,0 +1,220 @@
+{
+  "metadata": {
+    "version": "1.2.0",
+    "game_version": "2.1.21",
+    "simulator": "Factorio 2.1 Headless Linux",
+    "simulation_source": "foundry/belt_fuzzer.py"
+  },
+  "belt_tiers": {
+    "yellow": {
+      "belt": "transport-belt",
+      "underground": "underground-belt",
+      "splitter": "splitter",
+      "speed_items_per_sec": 15.0,
+      "max_underground_span_tiles": 5,
+      "latency_ticks_per_tile": 32
+    },
+    "red": {
+      "belt": "fast-transport-belt",
+      "underground": "fast-underground-belt",
+      "splitter": "fast-splitter",
+      "speed_items_per_sec": 30.0,
+      "max_underground_span_tiles": 7,
+      "latency_ticks_per_tile": 16
+    },
+    "blue": {
+      "belt": "express-transport-belt",
+      "underground": "express-underground-belt",
+      "splitter": "express-splitter",
+      "speed_items_per_sec": 45.0,
+      "max_underground_span_tiles": 9,
+      "latency_ticks_per_tile": 11
+    }
+  },
+  "layer_stack_mapping": {
+    "M1": {
+      "preferred_direction": "horizontal",
+      "entity": "transport-belt",
+      "level": "surface"
+    },
+    "M2": {
+      "preferred_direction": "vertical",
+      "entity": "transport-belt",
+      "level": "surface"
+    },
+    "M3": {
+      "preferred_direction": "horizontal",
+      "entity": "underground-belt",
+      "level": "subsurface"
+    },
+    "M4": {
+      "preferred_direction": "vertical",
+      "entity": "underground-belt",
+      "level": "subsurface"
+    },
+    "VIA1": {
+      "description": "Corner turn between surface layers M1 and M2",
+      "entity": "transport-belt"
+    },
+    "VIA2": {
+      "description": "Portal transition to subsurface layers M3 and M4",
+      "entity": "underground-belt"
+    }
+  },
+  "empirical_experiments": [
+    {
+      "experiment_id": "EXP-01-STRAIGHT",
+      "name": "collinear_belt_transfer",
+      "physical_outcome": "PASS_CLEAN_TRANSFER",
+      "engine_measurements": {
+        "lane_1_delivered": 1,
+        "lane_2_delivered": 1,
+        "engine_belt_shape": "straight",
+        "connected_inputs": 1,
+        "connected_outputs": 1
+      },
+      "interpretation": "Belts with matching directions transfer items 1:1 across both lanes."
+    },
+    {
+      "experiment_id": "EXP-02-TURN",
+      "name": "orthogonal_corner_turn",
+      "physical_outcome": "PASS_CLEAN_TRANSFER",
+      "engine_measurements": {
+        "lane_1_delivered": 1,
+        "lane_2_delivered": 1,
+        "engine_belt_shape": "right",
+        "connected_inputs": 1,
+        "connected_outputs": 1
+      },
+      "interpretation": "Perpendicular belts curve 90 degrees when no upstream tail exists."
+    },
+    {
+      "experiment_id": "EXP-03-SIDELOAD",
+      "name": "perpendicular_sideload_injection",
+      "physical_outcome": "PASS_SINGLE_LANE_DEPOSIT",
+      "engine_measurements": {
+        "near_lane_delivered": 4,
+        "far_lane_delivered": 0,
+        "engine_belt_shape": "straight",
+        "connected_inputs": 2
+      },
+      "interpretation": "Perpendicular belts into a belt with an existing tail drop all items onto the near lane only."
+    },
+    {
+      "experiment_id": "EXP-04-HEAD_TO_HEAD",
+      "name": "opposing_belt_deadlock",
+      "physical_outcome": "CONFIRMED_DEADLOCK",
+      "engine_measurements": {
+        "source_1_blocked": 1,
+        "source_2_blocked": 1,
+        "connected_inputs": 0,
+        "connected_outputs": 0
+      },
+      "interpretation": "Belts facing opposite directions on adjacent tiles fail to connect and stall."
+    },
+    {
+      "experiment_id": "EXP-05-UNDERGROUND",
+      "name": "subsurface_tunnel_transfer",
+      "physical_outcome": "PASS_CLEAN_TRANSFER",
+      "engine_measurements": {
+        "lane_1_delivered": 1,
+        "lane_2_delivered": 1,
+        "engine_underground_paired": true
+      },
+      "interpretation": "Underground entrance pairs with collinear exit and transfers both lanes."
+    },
+    {
+      "experiment_id": "EXP-06-HOOD_SIDE_FEED",
+      "name": "underground_hood_side_clearance",
+      "physical_outcome": "CONFIRMED_BLOCKED",
+      "engine_measurements": {
+        "hood_accepted_items": 0,
+        "feed_belt_blocked": 1
+      },
+      "interpretation": "Perpendicular feeds into underground hood sides are physically blocked."
+    },
+    {
+      "experiment_id": "EXP-07-SPLITTER_FLANK",
+      "name": "splitter_flank_feed_clearance",
+      "physical_outcome": "CONFIRMED_BLOCKED",
+      "engine_measurements": {
+        "flank_belt_blocked": 1
+      },
+      "interpretation": "Perpendicular feeds into splitter side flanks cannot enter and remain blocked."
+    }
+  ],
+  "derived_rules": [
+    {
+      "rule_id": "RULE-01-STRAIGHT",
+      "primitive": "straight",
+      "compatible": true,
+      "lane_mapping": {
+        "1": 1,
+        "2": 2
+      },
+      "speed_tiles_per_sec": 15.0,
+      "drc_code": null,
+      "summary": "Collinear belts transfer items across both lanes with zero latency penalty."
+    },
+    {
+      "rule_id": "RULE-02-TURN",
+      "primitive": "turn",
+      "compatible": true,
+      "lane_mapping": {
+        "1": 1,
+        "2": 2
+      },
+      "requires_no_upstream_tail": true,
+      "drc_code": null,
+      "summary": "Perpendicular belts curve into 90-degree corners when no upstream tail feeds the tile."
+    },
+    {
+      "rule_id": "RULE-03-SIDELOAD",
+      "primitive": "sideload",
+      "compatible": true,
+      "lane_mapping": {
+        "1": 1,
+        "2": 1
+      },
+      "requires_upstream_tail": true,
+      "drc_code": null,
+      "summary": "Perpendicular feeds onto a belt with an existing tail drop items onto the near lane only."
+    },
+    {
+      "rule_id": "RULE-04-HEAD_TO_HEAD",
+      "primitive": "opposing_pair",
+      "compatible": false,
+      "drc_code": "DRC-01",
+      "summary": "Belts facing opposite directions on adjacent tiles deadlock and are forbidden."
+    },
+    {
+      "rule_id": "RULE-05-UNDERGROUND_PAIR",
+      "primitive": "underground_pair",
+      "compatible": true,
+      "lane_mapping": {
+        "1": 1,
+        "2": 2
+      },
+      "max_span_tiles": {
+        "underground-belt": 5,
+        "fast-underground-belt": 7
+      },
+      "drc_code": "DRC-02",
+      "summary": "Underground inputs must pair with collinear outputs within tier span limits."
+    },
+    {
+      "rule_id": "RULE-06-HOOD_SIDE_FEED",
+      "primitive": "hood_side_feed",
+      "compatible": false,
+      "drc_code": "DRC-03",
+      "summary": "Perpendicular belts feeding into the side of underground hoods stall and fail DRC."
+    },
+    {
+      "rule_id": "RULE-07-SPLITTER_FLANK",
+      "primitive": "splitter_flank_feed",
+      "compatible": false,
+      "drc_code": "DRC-04",
+      "summary": "Perpendicular belts feeding into splitter flanks stall and fail DRC."
+    }
+  ]
+}

@@ -11,8 +11,29 @@ filegroup(
 )
 
 py_library(
+    name = "belt_library_lib",
+    srcs = ["belt_library.py"],
+)
+
+py_library(
+    name = "belt_drc_lib",
+    srcs = ["belt_drc.py"],
+    deps = [":belt_library_lib"],
+)
+
+py_binary(
+    name = "belt_fuzzer",
+    srcs = ["belt_fuzzer.py"],
+    main = "belt_fuzzer.py",
+    deps = [":pdk_lib"],
+)
+
+py_library(
     name = "pdk_lib",
     srcs = [
+        "belt_drc.py",
+        "belt_fuzzer.py",
+        "belt_library.py",
         "blueprint.py",
         "def2bp.py",
         "lef.py",

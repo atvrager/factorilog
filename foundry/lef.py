@@ -18,8 +18,11 @@ macro, ports on the site grid, every recipe port present.
 from pathlib import Path
 from typing import Any
 
-import netlist
-import pdk
+try:
+    from foundry import netlist, pdk
+except ImportError:
+    import netlist
+    import pdk
 
 # Tile edge of a pin, by the side of the factory flow the material
 # enters or leaves. The game bridge reads the same table when it turns
@@ -478,21 +481,6 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
             "    RECT -0.25 -0.25 0.25 0.25 ;",
             f"  PROPERTY SPAN {span} ;",
             "END PIPE_TO_GROUND_VIA",
-        ]
-    )
-
-    # 4. Underground turn connection (M3 -> VL3 -> M4)
-    lines.extend(
-        [
-            "VIA UNDERGROUND_TURN_VIA",
-            "  DEFAULT",
-            "  LAYER M3 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL3 ;",
-            "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M4 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "END UNDERGROUND_TURN_VIA",
         ]
     )
 

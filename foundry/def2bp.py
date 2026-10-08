@@ -17,7 +17,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import blueprint
+try:
+    from foundry import blueprint
+except ImportError:
+    import blueprint
+
+try:
+    from foundry.belt_drc import BeltDrcChecker
+except ImportError:
+    from belt_drc import BeltDrcChecker
 
 try:
     from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
@@ -376,7 +384,9 @@ def check_underground_pairing(
 
 
 def build_entities(
-    def_data: dict[str, Any], netlist_data: dict[str, Any]
+    def_data: dict[str, Any],
+    netlist_data: dict[str, Any],
+    strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Translate parsed DEF and netlist into Factorio blueprint entities."""
     scale = 1.0 / float(def_data.get("units", 1000))
@@ -602,8 +612,10 @@ def build_entities(
                         (round(gx + in_offset + tx + 0.5, 2), round(gy + ty + 0.5, 2))
                     )
 
-    def choose_belt_tier(_span_tiles: int) -> str:
-        """Select underground belt tier. Use tier 1 yellow belt."""
+    def choose_belt_tier(span_tiles: int) -> str:
+        """Select underground belt tier based on required span."""
+        if span_tiles > 5:
+            return "fast-underground-belt"
         return "underground-belt"
 
     def segment_run(
@@ -705,7 +717,7 @@ def build_entities(
         if p.get("direction") == "INPUT":
             input_pins[p["net"]] = (p["x"] * scale, p["y"] * scale)
 
-    # Collect all pin interface tiles that must never be converted or deleted by jumpers/undergrounds
+    # Collect all pin interface tiles that jumpers or undergrounds must never convert or delete
     pin_tiles: set[tuple[float, float]] = set()
     for p in def_data.get("pins", []):
         pin_tiles.add(
@@ -1842,6 +1854,16 @@ def build_entities(
                 ]
             )
 
+    drc = BeltDrcChecker()
+    violations = drc.check_entities(entities)
+    if violations:
+        for v in violations:
+            sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")
+        if strict_drc:
+            fatal = [v for v in violations if v.severity == "ERROR"]
+            if fatal:
+                raise ValueError(f"Physical DRC failed with {len(fatal)} violation(s)")
+
     return entities, wires
 
 
@@ -1902,10 +1924,15 @@ def extract_pins(
     }
 
 
-def def_to_blueprint(def_text: str, netlist_data: dict[str, Any], label: str = "factory") -> str:
+def def_to_blueprint(
+    def_text: str,
+    netlist_data: dict[str, Any],
+    label: str = "factory",
+    strict_drc: bool = True,
+) -> str:
     """Convert DEF text and netlist metadata into a blueprint exchange string."""
     def_data = parse_def(def_text)
-    entities, wires = build_entities(def_data, netlist_data)
+    entities, wires = build_entities(def_data, netlist_data, strict_drc=strict_drc)
     return blueprint.encode(entities, label, wires=wires)
 
 
@@ -1946,6 +1973,11 @@ def main() -> int:
         default=None,
         help="Path to write execution time JSON",
     )
+    parser.add_argument(
+        "--no-strict-drc",
+        action="store_true",
+        help="Do not abort on physical DRC violations",
+    )
 
     args = parser.parse_args()
 
@@ -1954,7 +1986,7 @@ def main() -> int:
     netlist_data = json.loads(args.netlist_file.read_text())
 
     def_data = parse_def(def_text)
-    entities, wires = build_entities(def_data, netlist_data)
+    entities, wires = build_entities(def_data, netlist_data, strict_drc=not args.no_strict_drc)
 
     if args.json:
         document: dict[str, Any] = {

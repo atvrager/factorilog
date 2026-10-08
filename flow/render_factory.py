@@ -96,10 +96,12 @@ def render_blueprint(
         for ue_out in outputs_ug:
             ox, oy = ue_out["position"]["x"], ue_out["position"]["y"]
             if ue_out.get("direction", 0) == d:
-                if (d == 4 and abs(iy - oy) < 0.1 and ox > ix and ox - ix <= 10) or \
-                   (d == 12 and abs(iy - oy) < 0.1 and ox < ix and ix - ox <= 10) or \
-                   (d == 8 and abs(ix - ox) < 0.1 and oy > iy and oy - iy <= 10) or \
-                   (d == 0 and abs(ix - ox) < 0.1 and oy < iy and iy - oy <= 10):
+                if (
+                    (d == 4 and abs(iy - oy) < 0.1 and ox > ix and ox - ix <= 10)
+                    or (d == 12 and abs(iy - oy) < 0.1 and ox < ix and ix - ox <= 10)
+                    or (d == 8 and abs(ix - ox) < 0.1 and oy > iy and oy - iy <= 10)
+                    or (d == 0 and abs(ix - ox) < 0.1 and oy < iy and iy - oy <= 10)
+                ):
                     p1 = (int((ix - min_x) * tile_size), int((iy - min_y) * tile_size))
                     p2 = (int((ox - min_x) * tile_size), int((oy - min_y) * tile_size))
                     draw.line([p1, p2], fill=(243, 156, 18, 120), width=4)
@@ -115,9 +117,9 @@ def render_blueprint(
             col = d // 4
             utype = e.get("type", "input")
             row = 1 if utype == "input" else 0
-            hood = ug_src.crop(
-                (col * 192, row * 192, (col + 1) * 192, (row + 1) * 192)
-            ).resize((96, 96), Image.Resampling.LANCZOS)
+            hood = ug_src.crop((col * 192, row * 192, (col + 1) * 192, (row + 1) * 192)).resize(
+                (96, 96), Image.Resampling.LANCZOS
+            )
             canvas.alpha_composite(hood, (cx - 48, cy - 48))
 
     # Layer 5: Machines
