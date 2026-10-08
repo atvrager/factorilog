@@ -61,7 +61,14 @@ const browser = await puppeteer.launch({
 
 try {
     const page = await browser.newPage();
-    page.on('console', msg => console.error('PAGE LOG:', msg.text()));
+    page.on('console', async msg => {
+        try {
+            const args = await Promise.all(msg.args().map(a => a.jsonValue().catch(() => a.toString())));
+            console.error('PAGE LOG:', msg.type(), JSON.stringify(args));
+        } catch {
+            console.error('PAGE LOG:', msg.text());
+        }
+    });
     page.on('pageerror', err => console.error('PAGE ERROR:', err.toString()));
     await page.goto(`http://127.0.0.1:${port}/?source=${encodeURIComponent(bpStr)}`, { waitUntil: 'load' });
     await page.waitForFunction(() => {

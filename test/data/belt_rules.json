@@ -29,14 +29,6 @@
       "speed_items_per_sec": 45.0,
       "max_underground_span_tiles": 9,
       "latency_ticks_per_tile": 11
-    },
-    "turbo": {
-      "belt": "turbo-transport-belt",
-      "underground": "turbo-underground-belt",
-      "splitter": "turbo-splitter",
-      "speed_items_per_sec": 60.0,
-      "max_underground_span_tiles": 11,
-      "latency_ticks_per_tile": 8
     }
   },
   "layer_stack_mapping": {
@@ -88,16 +80,6 @@
     "M10": {
       "preferred_direction": "vertical",
       "entity": "express-underground-belt",
-      "level": "subsurface"
-    },
-    "M11": {
-      "preferred_direction": "horizontal",
-      "entity": "turbo-underground-belt",
-      "level": "subsurface"
-    },
-    "M12": {
-      "preferred_direction": "vertical",
-      "entity": "turbo-underground-belt",
       "level": "subsurface"
     },
     "VIA1": {
@@ -246,8 +228,7 @@
       "max_span_tiles": {
         "underground-belt": 5,
         "fast-underground-belt": 7,
-        "express-underground-belt": 9,
-        "turbo-underground-belt": 11
+        "express-underground-belt": 9
       },
       "drc_code": "DRC-02",
       "summary": "Underground inputs must pair with collinear outputs within tier span limits."
@@ -265,6 +246,13 @@
       "compatible": false,
       "drc_code": "DRC-04",
       "summary": "Perpendicular belts feeding into splitter flanks stall and fail DRC."
+    },
+    {
+      "rule_id": "RULE-08-MACHINE_INPUT_FEED",
+      "primitive": "machine_input_feed",
+      "compatible": true,
+      "drc_code": "DRC-05",
+      "summary": "Every machine input inserter must have a connected transport entity at its pickup location."
     }
   ]
 }

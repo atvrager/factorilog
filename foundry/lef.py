@@ -526,6 +526,21 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         ]
     )
 
+    # 4. Underground turn connection (M3 -> VL3 -> M4)
+    lines.extend(
+        [
+            "VIA TUNNEL_TURN_VIA",
+            "  DEFAULT",
+            "  LAYER M3 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "  LAYER VL3 ;",
+            "    RECT -0.125 -0.125 0.125 0.125 ;",
+            "  LAYER M4 ;",
+            "    RECT -0.25 -0.25 0.25 0.25 ;",
+            "END TUNNEL_TURN_VIA",
+        ]
+    )
+
     # 5. Circuit drop connection (M4 -> VL4 -> M5)
     lines.extend(
         [

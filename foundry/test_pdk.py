@@ -61,10 +61,10 @@ class PdkSmokeTest(unittest.TestCase):
 
     def test_belt_tiers(self) -> None:
         tiers = self.pdk.belt_tiers()
-        self.assertEqual(len(tiers), 4)
+        self.assertEqual(len(tiers), 3)
         self.assertEqual(tiers[0]["span"], 5)
-        self.assertEqual(tiers[-1]["span"], 11)
-        self.assertAlmostEqual(tiers[-1]["items_per_lane"], 30.0)
+        self.assertEqual(tiers[-1]["span"], 9)
+        self.assertAlmostEqual(tiers[-1]["items_per_lane"], 22.5)
 
     def test_tech_json(self) -> None:
         tech = self.pdk.tech_json()

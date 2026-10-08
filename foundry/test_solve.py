@@ -26,7 +26,7 @@ class SolveTest(unittest.TestCase):
         cls.allowed = cls.data.allowed_recipes(["nauvis"])
 
     def test_fixture_loads(self) -> None:
-        self.assertGreater(len(self.data.recipes), 500)
+        self.assertGreater(len(self.data.recipes), 200)
         self.assertIn("electronic-circuit", self.data.recipes)
 
     def test_machine_pick(self) -> None:
@@ -38,12 +38,12 @@ class SolveTest(unittest.TestCase):
     def test_belt_capacity(self) -> None:
         belts = self.data.prototypes["transport-belt"]
         self.assertEqual(float(belts["transport-belt"]["speed"]) * 60 * 8, 15.0)
-        self.assertEqual(float(belts["turbo-transport-belt"]["speed"]) * 60 * 8, 60.0)
+        self.assertEqual(float(belts["express-transport-belt"]["speed"]) * 60 * 8, 45.0)
 
     def test_underground_span(self) -> None:
         belts = self.data.prototypes["underground-belt"]
         self.assertEqual(int(belts["underground-belt"]["max_distance"]), 5)
-        self.assertEqual(int(belts["turbo-underground-belt"]["max_distance"]), 11)
+        self.assertEqual(int(belts["express-underground-belt"]["max_distance"]), 9)
 
     def test_iron_gear_rate(self) -> None:
         rates, raw, _surplus = solve.solve_rates(self.data, {"iron-gear-wheel": 60.0}, self.allowed)

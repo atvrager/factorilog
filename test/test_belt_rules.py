@@ -239,46 +239,52 @@ END DESIGN
         self.assertGreater(len(data["derived_rules"]), 4)
 
     def test_dynamic_underground_tier_discovery(self) -> None:
-        """Verify that Pdk discovers all underground belt tiers and generates LEF layers."""
+        """Verify that Pdk discovers base underground belt tiers and generates LEF layers."""
         fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
         data = solve.Data(str(fixture_path))
         p = pdk.Pdk(data)
         spans = p.underground_tier_spans()
         self.assertIn("underground-belt", spans)
-        self.assertIn("turbo-underground-belt", spans)
+        self.assertIn("fast-underground-belt", spans)
+        self.assertIn("express-underground-belt", spans)
+        self.assertNotIn("turbo-underground-belt", spans)
         self.assertEqual(spans["underground-belt"], 5)
-        self.assertEqual(spans["turbo-underground-belt"], 11)
+        self.assertEqual(spans["fast-underground-belt"], 7)
+        self.assertEqual(spans["express-underground-belt"], 9)
 
         stack = p.layer_stack()
         self.assertIn("M3", stack)
         self.assertIn("M7", stack)
-        self.assertIn("M11", stack)
-        self.assertEqual(stack["M11"]["entity"], "turbo-underground-belt")
+        self.assertIn("M9", stack)
+        self.assertNotIn("M11", stack)
+        self.assertEqual(stack["M9"]["entity"], "express-underground-belt")
 
         lef_lines = lef.tech_lines(p.tech_json())
         lef_text = "\n".join(lef_lines)
         self.assertIn("LAYER M7", lef_text)
-        self.assertIn("LAYER M11", lef_text)
-        self.assertIn("VIA TURBO_TRANSPORT_BELT_VIA", lef_text)
+        self.assertIn("LAYER M9", lef_text)
+        self.assertNotIn("LAYER M11", lef_text)
+        self.assertIn("VIA EXPRESS_TRANSPORT_BELT_VIA", lef_text)
+        self.assertNotIn("VIA TURBO_TRANSPORT_BELT_VIA", lef_text)
 
-    def test_dynamic_drc_turbo_underground_span(self) -> None:
-        """Verify that Rule DRC-02 accepts a 10-tile span for turbo belt and flags yellow belt."""
-        turbo_entities = [
+    def test_dynamic_drc_express_underground_span(self) -> None:
+        """Verify that Rule DRC-02 accepts an 8-tile span for express belt and flags yellow belt."""
+        express_entities = [
             {
-                "name": "turbo-underground-belt",
+                "name": "express-underground-belt",
                 "direction": DIRECTION_EAST,
                 "type": "input",
                 "position": {"x": 0, "y": 0},
             },
             {
-                "name": "turbo-underground-belt",
+                "name": "express-underground-belt",
                 "direction": DIRECTION_EAST,
                 "type": "output",
-                "position": {"x": 10, "y": 0},
+                "position": {"x": 8, "y": 0},
             },
         ]
         checker = BeltDrcChecker()
-        self.assertEqual(len(checker.check_entities(turbo_entities)), 0)
+        self.assertEqual(len(checker.check_entities(express_entities)), 0)
 
         yellow_entities = [
             {
@@ -291,11 +297,90 @@ END DESIGN
                 "name": "underground-belt",
                 "direction": DIRECTION_EAST,
                 "type": "output",
-                "position": {"x": 10, "y": 0},
+                "position": {"x": 8, "y": 0},
             },
         ]
         violations = checker.check_entities(yellow_entities)
         self.assertTrue(any(v.code == "DRC-02" for v in violations))
+
+    def test_drc_machine_input_connected(self) -> None:
+        """Rule DRC-05 accepts machine input inserter with supply belt at pickup."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 11.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 11.5, "y": 11.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 10.5, "y": 11.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertEqual(len(violations), 0)
+
+    def test_drc_machine_input_missing_supply(self) -> None:
+        """Rule DRC-05 flags machine input inserter with no supply at pickup."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 11.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 11.5, "y": 11.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-05" for v in violations))
+
+
+    def test_drc_machine_output_connected(self) -> None:
+        """Rule DRC-06 accepts machine output inserter with receiver belt at drop."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 21.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 15.5, "y": 21.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 16.5, "y": 21.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertEqual(len(violations), 0)
+
+    def test_drc_machine_output_missing_receiver(self) -> None:
+        """Rule DRC-06 flags machine output inserter with no receiver at drop."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 21.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 15.5, "y": 21.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-06" for v in violations))
 
 
 if __name__ == "__main__":

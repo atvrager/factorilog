@@ -31,7 +31,14 @@ MAX_UNDERGROUND_SPAN: dict[str, int] = {
     "underground-belt": 5,
     "fast-underground-belt": 7,
     "express-underground-belt": 9,
-    "turbo-underground-belt": 11,
+}
+
+# Inserter pickup and drop offsets by cardinal orientation ((pickup_dx, pickup_dy), (drop_dx, drop_dy)).
+INSERTER_OFFSETS: dict[int, tuple[tuple[int, int], tuple[int, int]]] = {
+    DIRECTION_NORTH: ((0, -1), (0, 1)),
+    DIRECTION_EAST: ((1, 0), (-1, 0)),
+    DIRECTION_SOUTH: ((0, 1), (0, -1)),
+    DIRECTION_WEST: ((-1, 0), (1, 0)),
 }
 
 

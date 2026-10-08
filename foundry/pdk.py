@@ -209,6 +209,8 @@ class Pdk:
         """Belt tiers, slowest first: name, items/s per lane, tunnel span."""
         tiers = []
         for name, proto in sorted(self.belts.items(), key=lambda kv: float(kv[1]["speed"])):
+            if "turbo" in name:
+                continue
             underground = proto.get("related_underground_belt", "")
             span = 0
             if underground in self.undergrounds:

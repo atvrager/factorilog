@@ -44,8 +44,8 @@ class LefTest(unittest.TestCase):
         self.assertIn("END LIBRARY", self.text)
 
     def test_via_spans(self) -> None:
-        self.assertIn("PROPERTY SPAN 11 ;", self.text)
-        self.assertIn("TURBO_TRANSPORT_BELT_VIA", self.text)
+        self.assertIn("PROPERTY SPAN 9 ;", self.text)
+        self.assertIn("EXPRESS_TRANSPORT_BELT_VIA", self.text)
         self.assertIn("PIPE_TO_GROUND_VIA", self.text)
 
     def test_every_fixture_cell_checks(self) -> None:

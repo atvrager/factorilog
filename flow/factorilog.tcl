@@ -146,6 +146,18 @@ foreach inst [$block getInsts] {
         set iy [expr {$iy_dbu / double($dbu)}]
         create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
     }
+    if {[string match "*split2" $master_name] || [string match "*balancer2" $master_name] || [string match "*merge2" $master_name]} {
+        lassign [$inst getLocation] ix_dbu iy_dbu
+        set ix [expr {$ix_dbu / double($dbu)}]
+        set iy [expr {$iy_dbu / double($dbu)}]
+        create_obstruction -layer M2 -region [list [expr {$ix + 1.0}] [expr {$iy}] [expr {$ix + 2.0}] [expr {$iy + 2.0}]]
+    } else {
+        lassign [$inst getLocation] ix_dbu iy_dbu
+        set ix [expr {$ix_dbu / double($dbu)}]
+        set iy [expr {$iy_dbu / double($dbu)}]
+        set m_h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
+        create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] [expr {$iy}] [expr {$ix}] [expr {$iy + $m_h}]]
+    }
 }
 
 # --- route ----------------------------------------------------------
