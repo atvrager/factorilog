@@ -33,6 +33,28 @@ class TestBp2Save(unittest.TestCase):
         self.assertIn("loader", lua_code)
         self.assertIn("infinity-chest", lua_code)
 
+    def test_build_scenario_archive(self) -> None:
+        """Verify scenario archive contains required control.lua and metadata."""
+        import tempfile
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            bp_file = tmp_dir / "test.blueprint"
+            bp_file.write_text("0eNpjYGBg4GBgYGBmYDAEQgYnxgc\n")
+            out_zip = tmp_dir / "test.zip"
+            bp2save.build_scenario_archive(
+                blueprint_file=bp_file,
+                out_save_file=out_zip,
+            )
+            self.assertTrue(out_zip.is_file())
+            with zipfile.ZipFile(out_zip, "r") as zf:
+                names = zf.namelist()
+                self.assertIn("test/control.lua", names)
+                self.assertIn("test/description.json", names)
+                self.assertIn("test/blueprint.txt", names)
+                self.assertIn("test/README.txt", names)
+
 
 if __name__ == "__main__":
     unittest.main()

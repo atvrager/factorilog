@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -283,17 +284,12 @@ end)
 """
 
 
-def build_save(
-    blueprint_file: Path,
+def _load_pins(
     pins_file: Path | None,
-    out_save_file: Path,
-    game_bin: Path,
-    netlist_file: Path | None = None,
-    def_file: Path | None = None,
-) -> None:
-    """Create a standalone Factorio save file from blueprint and pin metadata."""
-    blueprint_string = blueprint_file.read_text().strip()
-
+    netlist_file: Path | None,
+    def_file: Path | None,
+) -> dict[str, Any]:
+    """Load pin positions and orientations from pins JSON or parse from DEF."""
     pins_data: dict[str, Any] = {"inputs": [], "outputs": []}
     if pins_file and pins_file.is_file():
         pins_data = json.loads(pins_file.read_text())
@@ -305,6 +301,56 @@ def build_save(
         def_data = parse_def(def_file.read_text())
         netlist_data = json.loads(netlist_file.read_text())
         pins_data = extract_pins(def_data, netlist_data)
+    return pins_data
+
+
+def build_scenario_archive(
+    blueprint_file: Path,
+    out_save_file: Path,
+    pins_file: Path | None = None,
+    netlist_file: Path | None = None,
+    def_file: Path | None = None,
+) -> None:
+    """Create a scenario archive containing Lua control script and metadata when Factorio binary is absent."""
+    blueprint_string = blueprint_file.read_text().strip()
+    pins_data = _load_pins(pins_file, netlist_file, def_file)
+
+    save_stem = out_save_file.stem
+    scenario_name = re.sub(r"[^a-zA-Z0-9_-]", "_", save_stem)
+    control_code = generate_control_lua(blueprint_string, pins_data)
+    description_json = {
+        "order": "a",
+        "multiplayer-compatible": True,
+        "is-main-game": True,
+    }
+    readme_text = (
+        "Factorio binary not found during build.\n"
+        "This zip archive contains the full scenario definition.\n"
+        "Install Factorio and run:\n"
+        f"  factorio --scenario2map {scenario_name}\n"
+        "to generate a playable save.\n"
+    )
+
+    out_save_file.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out_save_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{scenario_name}/control.lua", control_code)
+        zf.writestr(f"{scenario_name}/description.json", json.dumps(description_json, indent=2))
+        zf.writestr(f"{scenario_name}/blueprint.txt", blueprint_string)
+        zf.writestr(f"{scenario_name}/pins.json", json.dumps(pins_data, indent=2))
+        zf.writestr(f"{scenario_name}/README.txt", readme_text)
+
+
+def build_save(
+    blueprint_file: Path,
+    pins_file: Path | None,
+    out_save_file: Path,
+    game_bin: Path,
+    netlist_file: Path | None = None,
+    def_file: Path | None = None,
+) -> None:
+    """Create a standalone Factorio save file from blueprint and pin metadata."""
+    blueprint_string = blueprint_file.read_text().strip()
+    pins_data = _load_pins(pins_file, netlist_file, def_file)
 
     save_stem = out_save_file.stem
     # Sanitize scenario name for Factorio path rules
@@ -447,8 +493,33 @@ def main() -> int:
     try:
         game_bin = find_factorio_binary(args.game)
     except FileNotFoundError as err:
-        sys.stderr.write(f"Error: {err}\n")
-        return 1
+        sys.stderr.write(
+            f"Warning: {err} Building scenario archive without headless game binary.\n"
+        )
+        build_scenario_archive(
+            blueprint_file=args.blueprint,
+            out_save_file=args.out_file,
+            pins_file=args.pins_file,
+            netlist_file=args.netlist_file,
+            def_file=args.def_file,
+        )
+        t1 = time.perf_counter()
+        elapsed = round(t1 - t0, 3)
+
+        if args.time_file:
+            args.time_file.parent.mkdir(parents=True, exist_ok=True)
+            timing_data = {
+                "stage": "save",
+                "elapsed_seconds": elapsed,
+                "output_size_bytes": args.out_file.stat().st_size if args.out_file.is_file() else 0,
+                "stub": True,
+            }
+            args.time_file.write_text(json.dumps(timing_data, indent=2) + "\n")
+
+        print(
+            f"Generated scenario archive: {args.out_file} ({args.out_file.stat().st_size} bytes in {elapsed}s)"
+        )
+        return 0
 
     build_save(
         blueprint_file=args.blueprint,

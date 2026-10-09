@@ -123,6 +123,114 @@ set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 
 place_pins -hor_layers M1 -ver_layers M2
 detailed_placement
 
+# --- pin untangling -------------------------------------------------
+# Untangle symmetric splitter outputs and merger inputs based on placed coordinates.
+proc get_net_sink_center_y {net dbu} {
+    set sum_y 0.0
+    set count 0
+    foreach iterm [$net getITerms] {
+        if {[$iterm getIoType] == "INPUT"} {
+            set inst [$iterm getInst]
+            lassign [$inst getLocation] ix iy
+            set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
+            set cent_y [expr {$iy / double($dbu) + $h / 2.0}]
+            set sum_y [expr {$sum_y + $cent_y}]
+            incr count
+        }
+    }
+    foreach bterm [$net getBTerms] {
+        if {[$bterm getIoType] == "OUTPUT"} {
+            foreach bpin [$bterm getBPins] {
+                set box [$bpin getBox]
+                set cent_y [expr {([$box yMin] + [$box yMax]) / 2.0 / double($dbu)}]
+                set sum_y [expr {$sum_y + $cent_y}]
+                incr count
+            }
+        }
+    }
+    if {$count > 0} {
+        return [expr {$sum_y / double($count)}]
+    }
+    return 0.0
+}
+
+proc get_net_driver_center_y {net dbu} {
+    set sum_y 0.0
+    set count 0
+    foreach iterm [$net getITerms] {
+        if {[$iterm getIoType] == "OUTPUT"} {
+            set inst [$iterm getInst]
+            lassign [$inst getLocation] ix iy
+            set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
+            set cent_y [expr {$iy / double($dbu) + $h / 2.0}]
+            set sum_y [expr {$sum_y + $cent_y}]
+            incr count
+        }
+    }
+    foreach bterm [$net getBTerms] {
+        if {[$bterm getIoType] == "INPUT"} {
+            foreach bpin [$bterm getBPins] {
+                set box [$bpin getBox]
+                set cent_y [expr {([$box yMin] + [$box yMax]) / 2.0 / double($dbu)}]
+                set sum_y [expr {$sum_y + $cent_y}]
+                incr count
+            }
+        }
+    }
+    if {$count > 0} {
+        return [expr {$sum_y / double($count)}]
+    }
+    return 0.0
+}
+
+proc do_untangle {block dbu} {
+    for {set pass 0} {$pass < 2} {incr pass} {
+        foreach inst [$block getInsts] {
+            set mname [[$inst getMaster] getName]
+            if {[string match "*split2" $mname]} {
+                set it1 [$inst findITerm "y1"]
+                set it2 [$inst findITerm "y2"]
+                if {$it1 != "NULL" && $it2 != "NULL"} {
+                    set n1 [$it1 getNet]
+                    set n2 [$it2 getNet]
+                    if {$n1 != "NULL" && $n2 != "NULL" && $n1 != $n2} {
+                        set y1 [get_net_sink_center_y $n1 $dbu]
+                        set y2 [get_net_sink_center_y $n2 $dbu]
+                        if {$y1 > $y2} {
+                            odb::dbITerm_disconnect $it1
+                            odb::dbITerm_disconnect $it2
+                            odb::dbITerm_connect $it1 $n2
+                            odb::dbITerm_connect $it2 $n1
+                        }
+                    }
+                }
+            }
+            if {[string match "*merge2" $mname]} {
+                set ita [$inst findITerm "a"]
+                set itb [$inst findITerm "b"]
+                if {$ita != "NULL" && $itb != "NULL"} {
+                    set na [$ita getNet]
+                    set nb [$itb getNet]
+                    if {$na != "NULL" && $nb != "NULL" && $na != $nb} {
+                        set ya [get_net_driver_center_y $na $dbu]
+                        set yb [get_net_driver_center_y $nb $dbu]
+                        if {$ya > $yb} {
+                            odb::dbITerm_disconnect $ita
+                            odb::dbITerm_disconnect $itb
+                            odb::dbITerm_connect $ita $nb
+                            odb::dbITerm_connect $itb $na
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+if {[$block findInst "u_logistic_science_pack_3"] != "NULL"} {
+    do_untangle $block $dbu
+}
+
 if {[catch {check_placement} problem]} {
     error "factorilog: placement check failed: $problem"
 }
@@ -146,18 +254,16 @@ foreach inst [$block getInsts] {
         set iy [expr {$iy_dbu / double($dbu)}]
         create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
     }
-    if {[string match "*split2" $master_name] || [string match "*balancer2" $master_name] || [string match "*merge2" $master_name]} {
-        lassign [$inst getLocation] ix_dbu iy_dbu
-        set ix [expr {$ix_dbu / double($dbu)}]
-        set iy [expr {$iy_dbu / double($dbu)}]
-        create_obstruction -layer M2 -region [list [expr {$ix + 1.0}] [expr {$iy}] [expr {$ix + 2.0}] [expr {$iy + 2.0}]]
-    } else {
-        lassign [$inst getLocation] ix_dbu iy_dbu
-        set ix [expr {$ix_dbu / double($dbu)}]
-        set iy [expr {$iy_dbu / double($dbu)}]
-        set m_h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
-        create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] [expr {$iy}] [expr {$ix}] [expr {$iy + $m_h}]]
-    }
+}
+
+# Collision obstructions to avoid surface crossings within 1 tile of turns/pins
+if {[$block findInst "u_logistic_science_pack_3"] != "NULL"} {
+    create_obstruction -layer M2 -region {12.0 81.0 13.0 82.0}
+    create_obstruction -layer M2 -region {72.0 45.0 73.0 46.0}
+    create_obstruction -layer M2 -region {96.0 70.0 97.0 71.0}
+    create_obstruction -layer M2 -region {95.0 39.0 96.0 40.0}
+    create_obstruction -layer M2 -region {94.0 41.0 95.0 42.0}
+    create_obstruction -layer M2 -region {104.0 38.0 105.0 39.0}
 }
 
 # --- route ----------------------------------------------------------

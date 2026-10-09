@@ -581,6 +581,10 @@ def factorilog_science_factory(
         enable_display_readouts = False,
         enable_circuit_readouts = False,
         telemetry_taps = "none",
+        test_expected_item = None,
+        test_min_produced = 20,
+        test_ticks = 7200,
+        test_min_active_ratio = "0.70",
         tags = None):
     """Builds full physical design flow for a science pack factory."""
     merged_tags = list(tags) if tags else []
@@ -683,7 +687,7 @@ def factorilog_science_factory(
 
     test_name = name + "_test"
     demand_tokens = demand.split(" ")
-    primary_item = demand_tokens[0] if demand_tokens else "automation-science-pack"
+    primary_item = test_expected_item if test_expected_item else (demand_tokens[0] if demand_tokens else "automation-science-pack")
     test_tags = list(merged_tags)
     for t in ("local", "no-sandbox"):
         if t not in test_tags:
@@ -693,9 +697,9 @@ def factorilog_science_factory(
         name = test_name,
         save_zip = ":" + name + ".zip",
         expected_item = primary_item,
-        min_produced = 20,
-        ticks = 7200,
-        min_active_ratio = "0.70",
+        min_produced = test_min_produced,
+        ticks = test_ticks,
+        min_active_ratio = test_min_active_ratio,
         def_file = ":" + name + ".def",
         drc_rpt = ":" + name + "_route_drc.rpt",
         sta_rpt = ":" + name + "_sta.rpt",

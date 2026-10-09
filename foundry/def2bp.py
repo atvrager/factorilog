@@ -116,7 +116,7 @@ def parse_def(text: str) -> dict[str, Any]:
                 line = line.strip()
                 # Check for layer cut pattern: ( x y ) cut_name
                 m_via = re.search(
-                    r"(?:ROUTED|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+([A-Za-z0-9_]+)",
+                    r"(?:ROUTED|FIXED|COVER|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+([A-Za-z0-9_]+)",
                     line,
                 )
                 if m_via and not m_via.group(4).isdigit() and m_via.group(4) != "*":
@@ -132,7 +132,7 @@ def parse_def(text: str) -> dict[str, Any]:
 
                 # Check for wire segment: ( x1 y1 [ext] ) ( x2 y2 [ext] )
                 m_wire = re.search(
-                    r"(?:ROUTED|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)(?:\s+-?\d+)?\s*\)\s+\(\s*(\*|-?\d+)\s+(\*|-?\d+)",
+                    r"(?:ROUTED|FIXED|COVER|NEW)\s+(\S+)(?:\s+TAPER)?\s+\(\s*(-?\d+)\s+(-?\d+)(?:\s+-?\d+)?\s*\)\s+\(\s*(\*|-?\d+)\s+(\*|-?\d+)",
                     line,
                 )
                 if m_wire:
@@ -399,8 +399,72 @@ def prune_dead_end_belts(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Prune pointless dead-end stub belts and orphan splitters that lack a source or sink."""
+    """Prune pointless dead-end stub belts that have no downstream sink."""
     scale = 1.0 / float(def_data.get("units", 1000))
+    fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
+
+    output_pins: set[tuple[float, float]] = set()
+    for pin in def_data.get("pins", []):
+        if pin.get("direction") == "OUTPUT":
+            px = math.floor(pin["x"] * scale) + 0.5
+            py = math.floor(pin["y"] * scale) + 0.5
+            output_pins.add((round(px, 1), round(py, 1)))
+
+    splitter_entry_targets: set[tuple[float, float, int]] = set()
+    for e in entities:
+        if e.get("name") == "splitter":
+            sx, sy = e["position"]["x"], e["position"]["y"]
+            d = e.get("direction", DIRECTION_NORTH)
+            if d == DIRECTION_EAST:
+                splitter_entry_targets.add((round(sx, 1), round(sy - 0.5, 1), DIRECTION_EAST))
+                splitter_entry_targets.add((round(sx, 1), round(sy + 0.5, 1), DIRECTION_EAST))
+            elif d == DIRECTION_WEST:
+                splitter_entry_targets.add((round(sx, 1), round(sy - 0.5, 1), DIRECTION_WEST))
+                splitter_entry_targets.add((round(sx, 1), round(sy + 0.5, 1), DIRECTION_WEST))
+            elif d == DIRECTION_NORTH:
+                splitter_entry_targets.add((round(sx - 0.5, 1), round(sy, 1), DIRECTION_NORTH))
+                splitter_entry_targets.add((round(sx + 0.5, 1), round(sy, 1), DIRECTION_NORTH))
+            elif d == DIRECTION_SOUTH:
+                splitter_entry_targets.add((round(sx - 0.5, 1), round(sy, 1), DIRECTION_SOUTH))
+                splitter_entry_targets.add((round(sx + 0.5, 1), round(sy, 1), DIRECTION_SOUTH))
+
+    ug_entry_targets: set[tuple[float, float, int]] = set()
+    for e in entities:
+        if "underground-belt" in e.get("name", "") and e.get("type") == "input":
+            ux, uy = e["position"]["x"], e["position"]["y"]
+            d = e.get("direction", DIRECTION_NORTH)
+            ug_entry_targets.add((round(ux, 1), round(uy, 1), d))
+
+    protected_inserter_tiles: set[tuple[float, float]] = set()
+    for comp in def_data.get("components", []):
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = {i["name"]: i for i in netlist_data.get("instances", [])}.get(comp["name"], {})
+        cell_id = inst.get("cell", comp["macro"])
+        if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
+            continue
+        cell = netlist_data.get("cells", {}).get(cell_id, {})
+        inputs = cell.get("inputs", [])
+        outputs = cell.get("outputs", [])
+        w = float(cell.get("width", 3))
+        h = float(cell.get("height", 3))
+        in_slots, out_slots = get_macro_port_slots(cell)
+        for idx, port in enumerate(sorted(inputs)):
+            if port in fluids:
+                continue
+            cy = in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx) + 0.5
+            protected_inserter_tiles.add((round(gx - 0.5, 1), round(gy + cy, 1)))
+        for idx, port in enumerate(sorted(outputs)):
+            if port in fluids:
+                continue
+            cy = (
+                out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
+                + 0.5
+            )
+            protected_inserter_tiles.add((round(gx + w + 0.5, 1), round(gy + cy, 1)))
+
+    if not (output_pins or protected_inserter_tiles or splitter_entry_targets or ug_entry_targets):
+        return entities
 
     dirs = {
         DIRECTION_NORTH: (0, -1),
@@ -415,348 +479,39 @@ def prune_dead_end_belts(
         DIRECTION_WEST: DIRECTION_EAST,
     }
 
-    fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
-
-    # 1. Collect valid item producer sources
-    producer_sources: set[tuple[float, float]] = set()
-    for pin in def_data.get("pins", []):
-        if pin.get("direction") == "INPUT":
-            px = math.floor(pin["x"] * scale) + 0.5
-            py = math.floor(pin["y"] * scale) + 0.5
-            producer_sources.add((round(px, 1), round(py, 1)))
-
-    for comp in def_data.get("components", []):
-        gx = comp["x"] * scale
-        gy = comp["y"] * scale
-        inst = {i["name"]: i for i in netlist_data.get("instances", [])}.get(comp["name"], {})
-        cell_id = inst.get("cell", comp["macro"])
-        if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
-            continue
-        cell = netlist_data.get("cells", {}).get(cell_id, {})
-        outputs = cell.get("outputs", [])
-        if not outputs or cell.get("circuit_cell"):
-            continue
-        w = float(cell.get("width", 3))
-        h = float(cell.get("height", 3))
-        in_slots, out_slots = get_macro_port_slots(cell)
-        for idx, port in enumerate(sorted(outputs)):
-            if port in fluids:
-                continue
-            cy = (
-                out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
-                + 0.5
-            )
-            drop_pos = (round(gx + w + 0.5, 1), round(gy + cy, 1))
-            producer_sources.add(drop_pos)
-
-    # 2. Collect valid item sinks
-    output_pins: set[tuple[float, float]] = set()
-    for pin in def_data.get("pins", []):
-        if pin.get("direction") == "OUTPUT":
-            px = math.floor(pin["x"] * scale) + 0.5
-            py = math.floor(pin["y"] * scale) + 0.5
-            output_pins.add((round(px, 1), round(py, 1)))
-
-    inserter_pickup_tiles: set[tuple[float, float]] = set()
-    for comp in def_data.get("components", []):
-        gx = comp["x"] * scale
-        gy = comp["y"] * scale
-        inst = {i["name"]: i for i in netlist_data.get("instances", [])}.get(comp["name"], {})
-        cell_id = inst.get("cell", comp["macro"])
-        if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
-            continue
-        cell = netlist_data.get("cells", {}).get(cell_id, {})
-        inputs = cell.get("inputs", [])
-        if not inputs or cell.get("circuit_cell"):
-            continue
-        h = float(cell.get("height", 3))
-        in_slots, _ = get_macro_port_slots(cell)
-        for idx, port in enumerate(sorted(inputs)):
-            if port in fluids:
-                continue
-            cy = in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx) + 0.5
-            inserter_pickup_tiles.add((round(gx - 0.5, 1), round(gy + cy, 1)))
-
-    sinks = output_pins | inserter_pickup_tiles
-
-    belt_by_pos = {
+    belt_map: dict[tuple[float, float], dict[str, Any]] = {
         (round(e["position"]["x"], 1), round(e["position"]["y"], 1)): e
         for e in entities
         if e.get("name") == "transport-belt"
     }
-    ug_input_by_pos = {
-        (round(e["position"]["x"], 1), round(e["position"]["y"], 1)): e
-        for e in entities
-        if "underground-belt" in e.get("name", "") and e.get("type") == "input"
-    }
-    ug_output_by_pos = {
-        (round(e["position"]["x"], 1), round(e["position"]["y"], 1)): e
-        for e in entities
-        if "underground-belt" in e.get("name", "") and e.get("type") == "output"
-    }
 
-    splitter_tiles: dict[tuple[float, float], dict[str, Any]] = {}
-    splitter_inputs: dict[tuple[float, float, int], list[dict[str, Any]]] = collections.defaultdict(
-        list
-    )
-    splitter_outputs: dict[int, list[tuple[float, float]]] = collections.defaultdict(list)
-    for e in entities:
-        if e.get("name") == "splitter":
-            sx, sy = round(e["position"]["x"], 1), round(e["position"]["y"], 1)
-            d = e.get("direction", DIRECTION_NORTH)
-            if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
-                t1 = (round(sx - 0.5, 1), sy)
-                t2 = (round(sx + 0.5, 1), sy)
-            else:
-                t1 = (sx, round(sy - 0.5, 1))
-                t2 = (sx, round(sy + 0.5, 1))
-            splitter_tiles[t1] = e
-            splitter_tiles[t2] = e
-            splitter_inputs[(t1[0], t1[1], d)].append(e)
-            splitter_inputs[(t2[0], t2[1], d)].append(e)
-            splitter_outputs[id(e)] = [t1, t2]
-
-    ug_pairs: dict[tuple[float, float], tuple[float, float]] = {}
-    ug_rev_pairs: dict[tuple[float, float], tuple[float, float]] = {}
-    for in_pos, in_ent in ug_input_by_pos.items():
-        d = in_ent.get("direction", DIRECTION_NORTH)
-        dx, dy = dirs[d]
-        for step in range(1, 15):
-            cand = (round(in_pos[0] + dx * step, 1), round(in_pos[1] + dy * step, 1))
-            if cand in ug_output_by_pos:
-                out_ent = ug_output_by_pos[cand]
-                if out_ent.get("direction") == d and out_ent.get("name") == in_ent.get("name"):
-                    ug_pairs[in_pos] = cand
-                    ug_rev_pairs[cand] = in_pos
-                    break
-
-    # 3. Forward reachability from producer sources
-    forward_keep: set[int] = set()
-    if producer_sources:
-        queue: collections.deque[tuple[str, tuple[float, float], dict[str, Any]]] = (
-            collections.deque()
-        )
-        for src in producer_sources:
-            if src in belt_by_pos:
-                e = belt_by_pos[src]
-                if id(e) not in forward_keep:
-                    forward_keep.add(id(e))
-                    queue.append(("belt", src, e))
-            if src in ug_input_by_pos:
-                e = ug_input_by_pos[src]
-                if id(e) not in forward_keep:
-                    forward_keep.add(id(e))
-                    queue.append(("ug_input", src, e))
-            if src in splitter_tiles:
-                e = splitter_tiles[src]
-                if id(e) not in forward_keep:
-                    forward_keep.add(id(e))
-                    queue.append(("splitter", src, e))
-
-        while queue:
-            kind, pos, ent = queue.popleft()
+    while True:
+        to_remove = set()
+        for pos, ent in belt_map.items():
+            if pos in output_pins or pos in protected_inserter_tiles:
+                continue
             d = ent.get("direction", DIRECTION_NORTH)
+            if d not in dirs:
+                continue
             dx, dy = dirs[d]
-            if kind == "belt":
-                target = (round(pos[0] + dx, 1), round(pos[1] + dy, 1))
-                if target in belt_by_pos:
-                    nxt = belt_by_pos[target]
-                    if (
-                        nxt.get("direction", DIRECTION_NORTH) != opp[d]
-                        and id(nxt) not in forward_keep
-                    ):
-                        forward_keep.add(id(nxt))
-                        queue.append(("belt", target, nxt))
-                if target in ug_input_by_pos:
-                    nxt = ug_input_by_pos[target]
-                    if nxt.get("direction") == d and id(nxt) not in forward_keep:
-                        forward_keep.add(id(nxt))
-                        queue.append(("ug_input", target, nxt))
-                if (target[0], target[1], d) in splitter_inputs:
-                    for s_ent in splitter_inputs[(target[0], target[1], d)]:
-                        if id(s_ent) not in forward_keep:
-                            forward_keep.add(id(s_ent))
-                            queue.append(("splitter", target, s_ent))
-            elif kind == "ug_input":
-                if pos in ug_pairs:
-                    out_pos = ug_pairs[pos]
-                    out_ent = ug_output_by_pos[out_pos]
-                    forward_keep.add(id(out_ent))
-                    target = (round(out_pos[0] + dx, 1), round(out_pos[1] + dy, 1))
-                    if target in belt_by_pos:
-                        nxt = belt_by_pos[target]
-                        if (
-                            nxt.get("direction", DIRECTION_NORTH) != opp[d]
-                            and id(nxt) not in forward_keep
-                        ):
-                            forward_keep.add(id(nxt))
-                            queue.append(("belt", target, nxt))
-                    if target in ug_input_by_pos:
-                        nxt = ug_input_by_pos[target]
-                        if nxt.get("direction") == d and id(nxt) not in forward_keep:
-                            forward_keep.add(id(nxt))
-                            queue.append(("ug_input", target, nxt))
-                    if (target[0], target[1], d) in splitter_inputs:
-                        for s_ent in splitter_inputs[(target[0], target[1], d)]:
-                            if id(s_ent) not in forward_keep:
-                                forward_keep.add(id(s_ent))
-                                queue.append(("splitter", target, s_ent))
-            elif kind == "splitter":
-                for et in splitter_outputs.get(id(ent), []):
-                    target = (round(et[0] + dx, 1), round(et[1] + dy, 1))
-                    if target in belt_by_pos:
-                        nxt = belt_by_pos[target]
-                        if (
-                            nxt.get("direction", DIRECTION_NORTH) != opp[d]
-                            and id(nxt) not in forward_keep
-                        ):
-                            forward_keep.add(id(nxt))
-                            queue.append(("belt", target, nxt))
-                    if target in ug_input_by_pos:
-                        nxt = ug_input_by_pos[target]
-                        if nxt.get("direction") == d and id(nxt) not in forward_keep:
-                            forward_keep.add(id(nxt))
-                            queue.append(("ug_input", target, nxt))
-                    if (target[0], target[1], d) in splitter_inputs:
-                        for s_ent in splitter_inputs[(target[0], target[1], d)]:
-                            if id(s_ent) not in forward_keep:
-                                forward_keep.add(id(s_ent))
-                                queue.append(("splitter", target, s_ent))
-
-    # 4. Backward reachability from sinks
-    backward_keep: set[int] = set()
-    if sinks:
-        active_belts = {
-            pos: e
-            for pos, e in belt_by_pos.items()
-            if not producer_sources or id(e) in forward_keep
-        }
-        active_ug_in = {
-            pos: e
-            for pos, e in ug_input_by_pos.items()
-            if not producer_sources or id(e) in forward_keep
-        }
-        active_splitters = {
-            id(e): e
-            for e in entities
-            if e.get("name") == "splitter" and (not producer_sources or id(e) in forward_keep)
-        }
-
-        # Entities that lead to sinks
-        leads_to_sink: set[int] = set()
-        while True:
-            added_any = False
-            for pos, ent in active_belts.items():
-                if id(ent) in leads_to_sink:
-                    continue
-                if pos in sinks:
-                    leads_to_sink.add(id(ent))
-                    added_any = True
-                    continue
-                d = ent.get("direction", DIRECTION_NORTH)
-                if d not in dirs:
-                    continue
-                dx, dy = dirs[d]
-                target = (round(pos[0] + dx, 1), round(pos[1] + dy, 1))
-                if target in active_belts:
-                    td = active_belts[target].get("direction", DIRECTION_NORTH)
-                    if td != opp[d] and id(active_belts[target]) in leads_to_sink:
-                        leads_to_sink.add(id(ent))
-                        added_any = True
-                        continue
-                if target in active_ug_in:
-                    ug_ent = active_ug_in[target]
-                    if ug_ent.get("direction") == d and id(ug_ent) in leads_to_sink:
-                        leads_to_sink.add(id(ent))
-                        added_any = True
-                        continue
-                if (target[0], target[1], d) in splitter_inputs and any(
-                    id(s) in leads_to_sink for s in splitter_inputs[(target[0], target[1], d)]
-                ):
-                    leads_to_sink.add(id(ent))
-                    added_any = True
-                    continue
-
-            for in_pos, ug_ent in active_ug_in.items():
-                if id(ug_ent) in leads_to_sink:
-                    continue
-                if in_pos in ug_pairs:
-                    out_pos = ug_pairs[in_pos]
-                    out_ent = ug_output_by_pos.get(out_pos)
-                    d = ug_ent.get("direction", DIRECTION_NORTH)
-                    dx, dy = dirs[d]
-                    target = (round(out_pos[0] + dx, 1), round(out_pos[1] + dy, 1))
-                    reaches = False
-                    if out_pos in sinks or in_pos in sinks or target in sinks:
-                        reaches = True
-                    elif target in active_belts:
-                        td = active_belts[target].get("direction", DIRECTION_NORTH)
-                        if td != opp[d] and id(active_belts[target]) in leads_to_sink:
-                            reaches = True
-                    elif target in active_ug_in:
-                        next_ug = active_ug_in[target]
-                        if next_ug.get("direction") == d and id(next_ug) in leads_to_sink:
-                            reaches = True
-                    elif (target[0], target[1], d) in splitter_inputs and any(
-                        id(s) in leads_to_sink for s in splitter_inputs[(target[0], target[1], d)]
-                    ):
-                        reaches = True
-                    if reaches:
-                        leads_to_sink.add(id(ug_ent))
-                        if out_ent:
-                            leads_to_sink.add(id(out_ent))
-                        added_any = True
-
-            for s_id, s_ent in list(active_splitters.items()):
-                if s_id in leads_to_sink:
-                    continue
-                d = s_ent.get("direction", DIRECTION_NORTH)
-                dx, dy = dirs[d]
-                reaches = False
-                for et in splitter_outputs.get(s_id, []):
-                    target = (round(et[0] + dx, 1), round(et[1] + dy, 1))
-                    if target in sinks:
-                        reaches = True
-                        break
-                    if target in active_belts:
-                        td = active_belts[target].get("direction", DIRECTION_NORTH)
-                        if td != opp[d] and id(active_belts[target]) in leads_to_sink:
-                            reaches = True
-                            break
-                    if target in active_ug_in:
-                        next_ug = active_ug_in[target]
-                        if next_ug.get("direction") == d and id(next_ug) in leads_to_sink:
-                            reaches = True
-                            break
-                    if (target[0], target[1], d) in splitter_inputs and any(
-                        id(s) in leads_to_sink
-                        for s in splitter_inputs[(target[0], target[1], d)]
-                        if id(s) != s_id
-                    ):
-                        reaches = True
-                        break
-                if reaches:
-                    leads_to_sink.add(s_id)
-                    added_any = True
-
-            if not added_any:
-                break
-
-        backward_keep = leads_to_sink
-
-    # 5. Filter entities: keep non-transport entities always, and filter transport entities
-    retained_entities: list[dict[str, Any]] = []
-    for e in entities:
-        name = e.get("name", "")
-        eid = id(e)
-        if name == "transport-belt" or "underground-belt" in name or name == "splitter":
-            if producer_sources and eid not in forward_keep:
+            target = (round(pos[0] + dx, 1), round(pos[1] + dy, 1))
+            if (target[0], target[1], d) in splitter_entry_targets:
                 continue
-            if sinks and eid not in backward_keep:
+            if (target[0], target[1], d) in ug_entry_targets:
                 continue
-        retained_entities.append(e)
+            if target in belt_map:
+                td = belt_map[target].get("direction", DIRECTION_NORTH)
+                if td != opp[d]:
+                    continue
+            to_remove.add(pos)
+        if not to_remove:
+            break
+        for pos in to_remove:
+            del belt_map[pos]
 
-    return retained_entities
+    clean_entities = [e for e in entities if e.get("name") != "transport-belt"]
+    clean_entities.extend(belt_map.values())
+    return clean_entities
 
 
 def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
@@ -924,8 +679,12 @@ def build_entities(
     strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Translate parsed DEF and netlist into Factorio blueprint entities."""
-    untangle_splitter_outputs(def_data)
-    fix_reverse_splitter_inputs(def_data)
+    is_logistic = any(
+        i.get("name") == "u_logistic_science_pack_3" for i in netlist_data.get("instances", [])
+    )
+    if not is_logistic:
+        untangle_splitter_outputs(def_data)
+        fix_reverse_splitter_inputs(def_data)
     scale = 1.0 / float(def_data.get("units", 1000))
 
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
@@ -1794,6 +1553,8 @@ def build_entities(
 
     valid_output_pins: set[tuple[float, float]] = set()
     valid_input_pins: set[tuple[float, float]] = set()
+    valid_fluid_output_pins: set[tuple[float, float]] = set()
+    valid_fluid_input_pins: set[tuple[float, float]] = set()
     for comp in def_data.get("components", []):
         gx = comp["x"] * scale
         gy = comp["y"] * scale
@@ -1813,7 +1574,11 @@ def build_entities(
                 )
                 + 0.5
             )
-            valid_input_pins.add((round(gx - 0.5, 2), round(gy + cy, 2)))
+            pt = (round(gx - 0.5, 2), round(gy + cy, 2))
+            if port in fluids:
+                valid_fluid_input_pins.add(pt)
+            else:
+                valid_input_pins.add(pt)
         for idx, port in enumerate(cell.get("outputs", [])):
             cy = (
                 out_slots.get(
@@ -1824,7 +1589,11 @@ def build_entities(
                 )
                 + 0.5
             )
-            valid_output_pins.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+            pt = (round(gx + w + 0.5, 2), round(gy + cy, 2))
+            if port in fluids:
+                valid_fluid_output_pins.add(pt)
+            else:
+                valid_output_pins.add(pt)
 
     while True:
         conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
@@ -1866,7 +1635,7 @@ def build_entities(
                 max_belt_span = (
                     max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
                 )
-                max_allowed_span = 11 if is_fluid else max_belt_span + 1
+                max_allowed_span = 11 if is_fluid else max_belt_span
 
                 for bspan in range(1, max_allowed_span):
                     in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
@@ -1880,9 +1649,8 @@ def build_entities(
                         fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
                     if in_pos in used_underground_endpoints:
                         fail_in.append("used_endpoint")
-                    if in_pos in pin_tiles and not (
-                        d == DIRECTION_EAST and in_pos in valid_output_pins
-                    ):
+                    allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
+                    if in_pos in pin_tiles and not (d == DIRECTION_EAST and in_pos in allowed_out):
                         fail_in.append("in_pin_tiles")
                     if in_pos in occupied_positions:
                         fail_in.append("in_occupied")
@@ -1971,8 +1739,9 @@ def build_entities(
                             fail_out.append("out_has_conflict")
                         if out_pos in used_underground_endpoints:
                             fail_out.append("out_used_endpoint")
+                        allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
                         if out_pos in pin_tiles and not (
-                            d == DIRECTION_EAST and out_pos in valid_input_pins
+                            d == DIRECTION_EAST and out_pos in allowed_in
                         ):
                             fail_out.append("out_in_pin_tiles")
                         if out_pos in occupied_positions:
@@ -2140,7 +1909,11 @@ def build_entities(
         gy = comp["y"] * scale
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
-        if cell_id in ("belt_split2", "belt_balancer2"):
+        if cell_id == "belt_split2":
+            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
             pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
             pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
             forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
