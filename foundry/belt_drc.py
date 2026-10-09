@@ -82,6 +82,7 @@ class BeltDrcChecker:
         _net_map: dict[str, Any] | None = None,
         input_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
         unresolved_crossings: list[tuple[float, float]] | set[tuple[float, float]] | None = None,
+        output_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
     ) -> list[DrcViolation]:
         """Verify all physical rules on a list of placed entities."""
         violations: list[DrcViolation] = []
@@ -126,8 +127,10 @@ class BeltDrcChecker:
             self._check_machine_input_connectivity(entities, tile_map, input_pins=input_pins)
         )
 
-        # 6. Check machine output connectivity (Rule DRC-06)
-        violations.extend(self._check_machine_output_connectivity(entities, tile_map))
+        # 6. Check machine output connectivity and reachability (Rule DRC-06)
+        violations.extend(
+            self._check_machine_output_connectivity(entities, tile_map, output_pins=output_pins)
+        )
 
         # 7. Check underground span overlaps and hood collisions (Rule DRC-07)
         violations.extend(self._check_underground_span_overlap(entities, tile_map))
@@ -566,9 +569,10 @@ class BeltDrcChecker:
     def _check_machine_output_connectivity(
         self,
         entities: list[dict[str, Any]],
-        _tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+        output_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
     ) -> list[DrcViolation]:
-        """Verify that every machine output inserter drops onto a valid receiver entity."""
+        """Verify that every machine output inserter drops onto a valid receiver entity and reaches a sink."""
         violations: list[DrcViolation] = []
 
         machine_sizes: dict[str, tuple[int, int]] = {
@@ -610,6 +614,7 @@ class BeltDrcChecker:
                         machine_tiles.add((tx, ty))
 
         # 2. Map all transport and supply tiles
+        container_tiles: set[tuple[int, int]] = set()
         supply_tiles: set[tuple[int, int]] = set()
         for ent in entities:
             name = ent.get("name", "")
@@ -628,8 +633,16 @@ class BeltDrcChecker:
                     supply_tiles.add((math.floor(cx), math.floor(cy + 0.5)))
             elif "chest" in name or "container" in name:
                 supply_tiles.add((math.floor(cx), math.floor(cy)))
+                container_tiles.add((math.floor(cx), math.floor(cy)))
 
-        # 3. Check every inserter picking up from a machine
+        # 3. Identify machine input pickup tiles and machine output inserters
+        sink_tiles: set[tuple[int, int]] = set(container_tiles)
+        if output_pins is not None:
+            for pin in output_pins:
+                if isinstance(pin, (list, tuple)) and len(pin) >= 2:
+                    sink_tiles.add((math.floor(pin[0]), math.floor(pin[1])))
+
+        output_inserters: list[tuple[int, int, tuple[int, int]]] = []
         for ent in entities:
             if "inserter" not in ent.get("name", ""):
                 continue
@@ -646,11 +659,14 @@ class BeltDrcChecker:
             pickup_tile = (ix + pu_dx, iy + pu_dy)
             drop_tile = (ix + dr_dx, iy + dr_dy)
 
-            if (
-                pickup_tile in machine_tiles
-                and drop_tile not in supply_tiles
-                and drop_tile not in machine_tiles
-            ):
+            if drop_tile in machine_tiles:
+                sink_tiles.add(pickup_tile)
+            elif pickup_tile in machine_tiles:
+                output_inserters.append((ix, iy, drop_tile))
+
+        # 4. Check connectivity and downstream reachability for machine outputs
+        for ix, iy, drop_tile in output_inserters:
+            if drop_tile not in supply_tiles and drop_tile not in machine_tiles:
                 violations.append(
                     DrcViolation(
                         code="DRC-06",
@@ -662,6 +678,121 @@ class BeltDrcChecker:
                         y=iy,
                     )
                 )
+                continue
+
+            # When the design defines sinks, verify reachability from drop_tile
+            if sink_tiles:
+                visited: set[tuple[int, int]] = {drop_tile}
+                queue = collections.deque([drop_tile])
+                reached = False
+                dead_end_tile: tuple[int, int] | None = None
+
+                while queue:
+                    curr = queue.popleft()
+                    if curr in sink_tiles:
+                        reached = True
+                        break
+                    ents = tile_map.get(curr, [])
+                    if not ents:
+                        dead_end_tile = curr
+                        continue
+                    for e in ents:
+                        e_name = e.get("name", "")
+                        e_dir = e.get("direction", DIRECTION_NORTH)
+                        e_dx, e_dy = DIR_STEPS.get(e_dir, (0, 0))
+
+                        if "transport-belt" in e_name:
+                            next_tile = (curr[0] + e_dx, curr[1] + e_dy)
+                            if next_tile in sink_tiles:
+                                reached = True
+                                break
+                            next_ents = tile_map.get(next_tile, [])
+                            for ne in next_ents:
+                                ne_name = ne.get("name", "")
+                                ne_dir = ne.get("direction", DIRECTION_NORTH)
+                                if next_tile not in visited and (
+                                    (
+                                        "transport-belt" in ne_name
+                                        and ne_dir != OPPOSITE_DIR.get(e_dir)
+                                    )
+                                    or (
+                                        "underground-belt" in ne_name
+                                        and ne.get("type") == "input"
+                                        and ne_dir == e_dir
+                                    )
+                                    or ("splitter" in ne_name and ne_dir == e_dir)
+                                ):
+                                    visited.add(next_tile)
+                                    queue.append(next_tile)
+                        elif "underground-belt" in e_name:
+                            u_type = e.get("type", "")
+                            if u_type == "input":
+                                max_span = self.span_limits.get(e_name, 5)
+                                for span in range(1, max_span + 1):
+                                    out_pos = (curr[0] + e_dx * span, curr[1] + e_dy * span)
+                                    for cand in tile_map.get(out_pos, []):
+                                        if (
+                                            cand.get("name") == e_name
+                                            and cand.get("direction") == e_dir
+                                            and cand.get("type") == "output"
+                                        ):
+                                            if out_pos not in visited:
+                                                visited.add(out_pos)
+                                                queue.append(out_pos)
+                                            front_tile = (out_pos[0] + e_dx, out_pos[1] + e_dy)
+                                            if front_tile in sink_tiles:
+                                                reached = True
+                                                break
+                                            if front_tile not in visited:
+                                                visited.add(front_tile)
+                                                queue.append(front_tile)
+                                            break
+                                    if reached:
+                                        break
+                            elif u_type == "output":
+                                front_tile = (curr[0] + e_dx, curr[1] + e_dy)
+                                if front_tile in sink_tiles:
+                                    reached = True
+                                    break
+                                if front_tile not in visited:
+                                    visited.add(front_tile)
+                                    queue.append(front_tile)
+                        elif "splitter" in e_name:
+                            pos = e.get("position", {})
+                            scx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+                            scy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+                            if e_dir in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                                half1 = (math.floor(scx - 0.5), math.floor(scy))
+                                half2 = (math.floor(scx + 0.5), math.floor(scy))
+                            else:
+                                half1 = (math.floor(scx), math.floor(scy - 0.5))
+                                half2 = (math.floor(scx), math.floor(scy + 0.5))
+                            out1 = (half1[0] + e_dx, half1[1] + e_dy)
+                            out2 = (half2[0] + e_dx, half2[1] + e_dy)
+                            for t in (half1, half2, out1, out2):
+                                if t in sink_tiles:
+                                    reached = True
+                                    break
+                                if t not in visited:
+                                    visited.add(t)
+                                    queue.append(t)
+                            if reached:
+                                break
+                    if reached:
+                        break
+
+                if not reached:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-06",
+                            message=(
+                                f"Machine output inserter at ({ix}, {iy}) is not reachable to "
+                                f"any downstream consumer, container, or output pin (dead-end near {dead_end_tile})"
+                            ),
+                            x=ix,
+                            y=iy,
+                        )
+                    )
 
         return violations
 

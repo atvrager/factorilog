@@ -162,6 +162,7 @@ factorilog_science_factory(
     core_margin = 6,
     demand = "automation-science-pack 60.0",
     density = "0.15",
+    routability_driven = False,
     test_min_active_ratio = "0.60",
     test_ticks = 10800,
     tags = [
@@ -178,6 +179,8 @@ factorilog_science_factory(
     core_margin = 8,
     demand = "logistic-science-pack 60.0",
     density = "0.01",
+    layer_adjustment = "0.5",
+    routability_driven = True,
     test_expected_item = "logistic-science-pack",
     test_min_active_ratio = "0.50",
     test_ticks = 25200,

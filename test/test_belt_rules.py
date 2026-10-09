@@ -381,6 +381,61 @@ END DESIGN
         violations = checker.check_entities(entities)
         self.assertTrue(any(v.code == "DRC-06" for v in violations))
 
+    def test_drc_machine_output_dead_end_flags_drc06(self) -> None:
+        """Rule DRC-06 flags machine output belt terminating at dead end without reaching sink."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 21.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 15.5, "y": 21.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 16.5, "y": 21.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, output_pins=[(30.0, 30.0)])
+        self.assertTrue(
+            any(v.code == "DRC-06" and "not reachable" in v.message for v in violations)
+        )
+
+    def test_drc_machine_output_reachable_sink(self) -> None:
+        """Rule DRC-06 passes when machine output reaches a downstream sink."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 21.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 15.5, "y": 21.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 16.5, "y": 21.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 17.5, "y": 21.5},
+            },
+            {
+                "name": "iron-chest",
+                "position": {"x": 18.5, "y": 21.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertEqual(len([v for v in violations if v.code == "DRC-06"]), 0)
+
     def test_drc_underground_span_hood_collision(self) -> None:
         """Rule DRC-07 flags underground belt hood placed inside an active underground span."""
         entities = [

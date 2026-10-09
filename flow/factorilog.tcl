@@ -15,13 +15,6 @@
 # is the belt channel. A block needs its neighbours apart, because two
 # adjacent buildings do not move items: an inserter or a belt tile
 # does. CELL_PAD_SITES sets that gap.
-#
-# The pad raises the effective block footprint by 70 percent for a 3x3
-# block, so a high fill leaves the legalizer no padded slot to move a
-# block into. Measured on the 1220 block fixture, 1 tile of pad:
-#   fill 28 percent: legalizer settles in 5 passes, wirelength +66
-#   fill 35 percent: 147 passes, wirelength +287
-# Above 35 percent it does not converge at all.
 if {![info exists BLOCK_FILL]} {
     set BLOCK_FILL 0.08
 }
@@ -30,6 +23,9 @@ if {![info exists CELL_PAD_SITES]} {
 }
 if {![info exists CORE_MARGIN]} {
     set CORE_MARGIN 4
+}
+if {![info exists density]} {
+    set density 0.18
 }
 
 read_liberty tech.lib
@@ -88,55 +84,53 @@ if {$fluid_count > 0} {
     puts "factorilog: assigned non-default spacing rule (1.25) to $fluid_count fluid nets"
 }
 
-# --- place ----------------------------------------------------------
-# The placer target is its own uniform density floor: the tightest
-# packing the pad allows. The space left over from BLOCK_FILL stays
-# free as the belt channel. Global placement spreads the blocks,
-# legalization snaps them to tile rows, and the check proves every
-# block sits on the grid with no overlap and no site misalignment.
-# That check raises an error on any violation, and the error is fatal
-# here.
-#
-# The pad reaches legalization through set_placement_padding. The pad
-# argument of the placer only shapes its density model. Pad one tile
-# each side of every block, so two neighbouring columns of blocks end
-# up two tiles apart: one belt lane and one inserter lane, which is
-# the smallest game-legal connection between two buildings. Rows stack
-# without a gap, as they do in the game.
-#
-# CTS and STA do not run. The Liberty timing tables are stubs, so the
-# design has no clock and no delay to repair.
 # --- io -------------------------------------------------------------
 # Place pins on the die edge: inputs on the left (West), outputs on the right (East).
 set_io_pin_constraint -direction input -region left:*
 set_io_pin_constraint -direction output -region right:*
 place_pins -hor_layers M1 -ver_layers M2
 
-set is_logistic [expr {[$block findInst "u_logistic_science_pack_3"] != "NULL"}]
-
-if {![info exists density]} {
-    set density 0.18
+# --- place ----------------------------------------------------------
+# The placer target is its own uniform density floor: the tightest
+# packing the pad allows. The space left over from BLOCK_FILL stays
+# free as the belt channel. Global placement spreads the blocks,
+# legalization snaps them to tile rows, and the check proves every
+# block sits on the grid with no overlap and no site misalignment.
+puts "factorilog: placement density [format %.3f $density]"
+if {![info exists SPLIT_PAD_SITES]} {
+    set SPLIT_PAD_SITES 5
 }
+set split_pad [expr {max($CELL_PAD_SITES, $SPLIT_PAD_SITES)}]
+set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $split_pad -right $split_pad
 
-if {$is_logistic} {
-    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-    puts "factorilog: placement density [format %.3f $density]"
+if {[info exists ROUTABILITY_DRIVEN] && $ROUTABILITY_DRIVEN == "1"} {
     global_placement -density $density \
         -pad_left $CELL_PAD_SITES \
         -pad_right $CELL_PAD_SITES \
         -routability_driven
 } else {
-    puts "factorilog: placement density [format %.3f $density]"
     global_placement -density $density \
         -pad_left $CELL_PAD_SITES \
         -pad_right $CELL_PAD_SITES
-    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
 }
 
 place_pins -hor_layers M1 -ver_layers M2
 detailed_placement
+
+if {[catch {check_placement} problem]} {
+    error "factorilog: placement check failed: $problem"
+}
+
+report_design_area
+
+set placed 0
+foreach inst [$block getInsts] {
+    if {[$inst getPlacementStatus] == "PLACED"} {
+        incr placed
+    }
+}
+puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
 
 # --- pin untangling -------------------------------------------------
 # Untangle symmetric splitter outputs and merger inputs based on placed coordinates.
@@ -253,60 +247,6 @@ proc do_untangle {block dbu} {
     }
 }
 
-if {$is_logistic} {
-    do_untangle $block $dbu
-}
-
-if {[catch {check_placement} problem]} {
-    error "factorilog: placement check failed: $problem"
-}
-
-report_design_area
-
-set placed 0
-foreach inst [$block getInsts] {
-    if {[$inst getPlacementStatus] == "PLACED"} {
-        incr placed
-    }
-}
-puts "factorilog: $placed of [llength [$block getInsts]] placed on the tile grid"
-
-# Prevent reverse routing into input b of merge splitters from the east
-foreach inst [$block getInsts] {
-    set master_name [[$inst getMaster] getName]
-    if {[string match "*merge2" $master_name]} {
-        lassign [$inst getLocation] ix_dbu iy_dbu
-        set ix [expr {$ix_dbu / double($dbu)}]
-        set iy [expr {$iy_dbu / double($dbu)}]
-        create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
-    }
-    if {!$is_logistic && [string match "*split2" $master_name]} {
-        lassign [$inst getLocation] ix_dbu iy_dbu
-        set ix [expr {$ix_dbu / double($dbu)}]
-        set iy [expr {$iy_dbu / double($dbu)}]
-        create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] [expr {$iy}] [expr {$ix}] [expr {$iy + 1.0}]]
-    }
-}
-
-if {$is_logistic} {
-    # Protect machine input pins (West) and output pins (East) from perpendicular M2 crossings
-    foreach inst [$block getInsts] {
-        set master_name [[$inst getMaster] getName]
-        lassign [$inst getLocation] ix_dbu iy_dbu
-        set ix [expr {$ix_dbu / double($dbu)}]
-        set iy [expr {$iy_dbu / double($dbu)}]
-        set w [expr {[[$inst getMaster] getWidth] / double($dbu)}]
-        set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
-        
-        # Machine input pins are on the West (x in [ix-1.0, ix], y in [iy, iy+h])
-        # Machine output pins are on the East (x in [ix+w, ix+w+1.0], y in [iy, iy+h])
-        if {[string match "*assembling_machine*" $master_name] || [string match "*electric_furnace*" $master_name] || [string match "*chemical_plant*" $master_name] || [string match "*oil_refinery*" $master_name] || [string match "*split2*" $master_name] || [string match "*merge2*" $master_name] || [string match "*balancer2*" $master_name]} {
-            create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] $iy $ix [expr {$iy + $h}]]
-            create_obstruction -layer M2 -region [list [expr {$ix + $w}] $iy [expr {$ix + $w + 1.0}] [expr {$iy + $h}]]
-        }
-    }
-}
-
 # --- route ----------------------------------------------------------
 # The router connects blocks across four layers:
 # M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
@@ -328,9 +268,12 @@ if {$has_circuit} {
 ::drt::detailed_route_set_unidirectional_layer M2
 ::drt::detailed_route_set_unidirectional_layer M3
 ::drt::detailed_route_set_unidirectional_layer M4
-if {$is_logistic} {
-    set_global_routing_layer_adjustment M1 0.5
-    set_global_routing_layer_adjustment M2 0.5
+
+do_untangle $block $dbu
+
+if {[info exists LAYER_ADJUSTMENT] && $LAYER_ADJUSTMENT != ""} {
+    set_global_routing_layer_adjustment M1 $LAYER_ADJUSTMENT
+    set_global_routing_layer_adjustment M2 $LAYER_ADJUSTMENT
 }
 global_route -verbose
 

@@ -17,7 +17,7 @@ if [ "${FAST_COMMIT:-0}" = "1" ]; then
     exit 0
 fi
 
-if ! bazel test //tools:ruff_test //tools:ty_test //tools:ste_lint_test; then
+if ! bazel test //tools:ruff_test //tools:ty_test //tools:ste_lint_test //tools:check_flow_tcl_test; then
     echo "pre-commit: fix the test findings above, or set FAST_COMMIT=1" >&2
     exit 1
 fi

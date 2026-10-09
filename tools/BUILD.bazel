@@ -32,6 +32,19 @@ py_test(
     main = "test-ste-lint.py",
 )
 
+py_test(
+    name = "check_flow_tcl_test",
+    size = "small",
+    srcs = [
+        "check_flow_tcl.py",
+        "test_check_flow_tcl.py",
+    ],
+    data = [
+        "//flow:flow_scripts",
+    ],
+    main = "test_check_flow_tcl.py",
+)
+
 sh_test(
     name = "ruff_test",
     size = "small",

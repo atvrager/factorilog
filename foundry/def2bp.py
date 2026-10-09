@@ -673,17 +673,137 @@ def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
                         ]
 
 
+def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
+    """Untangle symmetric merger inputs whose initial routing segments cross.
+
+    Merger inputs a and b receive identical items from upstream drivers.
+    When the router connects inputs a and b such that their incoming segments cross,
+    swapping the initial segments and net connections eliminates the crossing.
+    """
+    scale = 1.0 / float(def_data.get("units", 1000))
+    for c in def_data.get("components", []):
+        if c.get("macro") != "belt_merge2":
+            continue
+        name = c.get("name", "")
+        gx = c.get("x", 0) * scale
+        gy = c.get("y", 0) * scale
+        n_a = None
+        n_b = None
+        for n in def_data.get("nets", []):
+            for inst, pin in n.get("connections", []):
+                if inst == name and pin == "a":
+                    n_a = n
+                elif inst == name and pin == "b":
+                    n_b = n
+        if not n_a or not n_b or n_a == n_b:
+            continue
+        pa = (round((gx + 0.25) * 1000), round((gy + 0.5) * 1000))
+        pb = (round((gx + 0.25) * 1000), round((gy + 1.5) * 1000))
+        wa = next(
+            (
+                w
+                for w in n_a.get("wires", [])
+                if w.get("layer") == "M1"
+                and (
+                    (w["x1"] == pa[0] and w["y1"] == pa[1])
+                    or (w["x2"] == pa[0] and w["y2"] == pa[1])
+                )
+            ),
+            None,
+        )
+        wb = next(
+            (
+                w
+                for w in n_b.get("wires", [])
+                if w.get("layer") == "M1"
+                and (
+                    (w["x1"] == pb[0] and w["y1"] == pb[1])
+                    or (w["x2"] == pb[0] and w["y2"] == pb[1])
+                )
+            ),
+            None,
+        )
+        if not wa or not wb:
+            continue
+        enda = (wa["x2"], wa["y2"]) if (wa["x1"], wa["y1"]) == pa else (wa["x1"], wa["y1"])
+        endb = (wb["x2"], wb["y2"]) if (wb["x1"], wb["y1"]) == pb else (wb["x1"], wb["y1"])
+        m2_a = next(
+            (
+                w
+                for w in n_a.get("wires", [])
+                if w.get("layer") == "M2"
+                and (
+                    (w["x1"] == enda[0] and w["y1"] == enda[1])
+                    or (w["x2"] == enda[0] and w["y2"] == enda[1])
+                )
+            ),
+            None,
+        )
+        m2_b = next(
+            (
+                w
+                for w in n_b.get("wires", [])
+                if w.get("layer") == "M2"
+                and (
+                    (w["x1"] == endb[0] and w["y1"] == endb[1])
+                    or (w["x2"] == endb[0] and w["y2"] == endb[1])
+                )
+            ),
+            None,
+        )
+        if not m2_a or not m2_b:
+            continue
+        other_ya = m2_a["y2"] if m2_a["y1"] == enda[1] else m2_a["y1"]
+        dy_a = "N" if other_ya < enda[1] else "S"
+        other_yb = m2_b["y2"] if m2_b["y1"] == endb[1] else m2_b["y1"]
+        dy_b = "N" if other_yb < endb[1] else "S"
+
+        cross = (
+            (dy_a == "S" and dy_b == "N")
+            or (dy_a == "N" and dy_b == "N" and enda[0] > endb[0])
+            or (dy_a == "S" and dy_b == "S" and enda[0] < endb[0])
+        )
+
+        if not cross:
+            continue
+
+        if (wa["x1"], wa["y1"]) == pa:
+            wa["x2"] = endb[0]
+        else:
+            wa["x1"] = endb[0]
+        if (wb["x1"], wb["y1"]) == pb:
+            wb["x2"] = enda[0]
+        else:
+            wb["x1"] = enda[0]
+
+        if (m2_a["x1"], m2_a["y1"]) == enda:
+            m2_a["y1"] = pb[1]
+        else:
+            m2_a["y2"] = pb[1]
+        if (m2_b["x1"], m2_b["y1"]) == endb:
+            m2_b["y1"] = pa[1]
+        else:
+            m2_b["y2"] = pa[1]
+
+        wires_a = [w for w in n_a["wires"] if w is not wa]
+        wires_b = [w for w in n_b["wires"] if w is not wb]
+        n_a["wires"] = [wa, *wires_b]
+        n_b["wires"] = [wb, *wires_a]
+
+        conns_a = [conn for conn in n_a.get("connections", []) if conn[0] != name]
+        conns_b = [conn for conn in n_b.get("connections", []) if conn[0] != name]
+        n_a["connections"] = [(name, "a"), *conns_b]
+        n_b["connections"] = [(name, "b"), *conns_a]
+
+
 def build_entities(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
-    is_logistic = any(
-        i.get("name") == "u_logistic_science_pack_3" for i in netlist_data.get("instances", [])
-    )
-    if not is_logistic:
-        untangle_splitter_outputs(def_data)
-        fix_reverse_splitter_inputs(def_data)
+    untangle_splitter_outputs(def_data)
+    # untangle_merger_inputs(def_data)
+    fix_reverse_splitter_inputs(def_data)
     scale = 1.0 / float(def_data.get("units", 1000))
 
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
@@ -1600,45 +1720,66 @@ def build_entities(
     valid_input_pins: set[tuple[float, float]] = set()
     valid_fluid_output_pins: set[tuple[float, float]] = set()
     valid_fluid_input_pins: set[tuple[float, float]] = set()
+    machine_input_pins: set[tuple[float, float]] = set()
+    machine_output_pins: set[tuple[float, float]] = set()
     for comp in def_data.get("components", []):
         gx = comp["x"] * scale
         gy = comp["y"] * scale
         inst = inst_map.get(comp["name"], {})
         cell_id = inst.get("cell", comp["macro"])
         cell = cell_map.get(cell_id, {})
-        in_slots, out_slots = get_macro_port_slots(cell)
-        w = float(cell.get("width", 3))
-        h = float(cell.get("height", 3))
-        for idx, port in enumerate(cell.get("inputs", [])):
-            cy = (
-                in_slots.get(
-                    port,
-                    (h - len(cell.get("inputs", []))) // 2 + idx
-                    if len(cell.get("inputs", [])) <= h
-                    else idx,
+        if cell_id == "belt_merge2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+        elif cell_id == "belt_split2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "pump":
+            valid_fluid_input_pins.add((round(gx + 0.5, 2), round(gy - 0.5, 2)))
+            valid_fluid_output_pins.add((round(gx + 0.5, 2), round(gy + 2.5, 2)))
+        else:
+            in_slots, out_slots = get_macro_port_slots(cell)
+            w = float(cell.get("width", 3))
+            h = float(cell.get("height", 3))
+            for idx, port in enumerate(cell.get("inputs", [])):
+                cy = (
+                    in_slots.get(
+                        port,
+                        (h - len(cell.get("inputs", []))) // 2 + idx
+                        if len(cell.get("inputs", [])) <= h
+                        else idx,
+                    )
+                    + 0.5
                 )
-                + 0.5
-            )
-            pt = (round(gx - 0.5, 2), round(gy + cy, 2))
-            if port in fluids:
-                valid_fluid_input_pins.add(pt)
-            else:
-                valid_input_pins.add(pt)
-        for idx, port in enumerate(cell.get("outputs", [])):
-            cy = (
-                out_slots.get(
-                    port,
-                    (h - len(cell.get("outputs", []))) // 2 + idx
-                    if len(cell.get("outputs", [])) <= h
-                    else idx,
+                pt = (round(gx - 0.5, 2), round(gy + cy, 2))
+                if port in fluids:
+                    valid_fluid_input_pins.add(pt)
+                else:
+                    valid_input_pins.add(pt)
+                    machine_input_pins.add(pt)
+            for idx, port in enumerate(cell.get("outputs", [])):
+                cy = (
+                    out_slots.get(
+                        port,
+                        (h - len(cell.get("outputs", []))) // 2 + idx
+                        if len(cell.get("outputs", [])) <= h
+                        else idx,
+                    )
+                    + 0.5
                 )
-                + 0.5
-            )
-            pt = (round(gx + w + 0.5, 2), round(gy + cy, 2))
-            if port in fluids:
-                valid_fluid_output_pins.add(pt)
-            else:
-                valid_output_pins.add(pt)
+                pt = (round(gx + w + 0.5, 2), round(gy + cy, 2))
+                if port in fluids:
+                    valid_fluid_output_pins.add(pt)
+                else:
+                    valid_output_pins.add(pt)
+                    machine_output_pins.add(pt)
 
     while True:
         conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
@@ -1688,7 +1829,10 @@ def build_entities(
                     fail_in = []
                     if in_pos not in net_surface_tiles[candidate]:
                         fail_in.append("not_in_net")
-                    elif net_surface_tiles[candidate][in_pos] != d:
+                    elif net_surface_tiles[candidate][in_pos] != d and not (
+                        in_pos in machine_output_pins
+                        and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
+                    ):
                         fail_in.append(f"dir_mismatch({net_surface_tiles[candidate][in_pos]}!={d})")
                     if len(tile_to_nets.get(in_pos, set())) > 1:
                         fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
@@ -1697,8 +1841,17 @@ def build_entities(
                     if in_pos in used_underground_spans_h or in_pos in used_underground_spans_v:
                         fail_in.append("in_underground_span")
                     allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
-                    if in_pos in pin_tiles and not (d == DIRECTION_EAST and in_pos in allowed_out):
-                        fail_in.append("in_pin_tiles")
+                    if in_pos in pin_tiles:
+                        allowed = in_pos in allowed_out and (
+                            d == DIRECTION_EAST
+                            or (
+                                not is_fluid
+                                and in_pos in machine_output_pins
+                                and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
+                            )
+                        )
+                        if not allowed:
+                            fail_in.append("in_pin_tiles")
                     if in_pos in occupied_positions:
                         fail_in.append("in_occupied")
                     if used_underground_endpoints.get(prev_pos) == opp_d:
@@ -1746,7 +1899,10 @@ def build_entities(
                         turn_detour = None
                         if out_pos not in net_surface_tiles[candidate]:
                             fail_out.append("out_not_in_net")
-                        elif net_surface_tiles[candidate][out_pos] != d:
+                        elif net_surface_tiles[candidate][out_pos] != d and not (
+                            out_pos in machine_input_pins
+                            and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
+                        ):
                             turn_dir = net_surface_tiles[candidate][out_pos]
                             if (
                                 not is_fluid
@@ -1769,7 +1925,10 @@ def build_entities(
                                         exit_tile not in pin_tiles
                                         or (
                                             exit_tile in valid_input_pins
-                                            and turn_dir == DIRECTION_EAST
+                                            and (
+                                                turn_dir == DIRECTION_EAST
+                                                or exit_tile in machine_input_pins
+                                            )
                                         )
                                     )
                                     and exit_tile not in used_underground_endpoints
@@ -1779,7 +1938,10 @@ def build_entities(
                                         corner_tile not in pin_tiles
                                         or (
                                             corner_tile in valid_input_pins
-                                            and opp_d == DIRECTION_EAST
+                                            and (
+                                                opp_d == DIRECTION_EAST
+                                                or corner_tile in machine_input_pins
+                                            )
                                         )
                                     )
                                     and corner_tile not in used_underground_endpoints
@@ -1805,10 +1967,17 @@ def build_entities(
                         ):
                             fail_out.append("out_underground_span")
                         allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
-                        if out_pos in pin_tiles and not (
-                            d == DIRECTION_EAST and out_pos in allowed_in
-                        ):
-                            fail_out.append("out_in_pin_tiles")
+                        if out_pos in pin_tiles:
+                            allowed = out_pos in allowed_in and (
+                                d == DIRECTION_EAST
+                                or (
+                                    not is_fluid
+                                    and out_pos in machine_input_pins
+                                    and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
+                                )
+                            )
+                            if not allowed:
+                                fail_out.append("out_in_pin_tiles")
                         if out_pos in occupied_positions:
                             fail_out.append("out_in_occupied")
                         if (
@@ -2137,6 +2306,9 @@ def build_entities(
     ]
     if powered:
         surface_occupied = set(occupied_positions)
+        surface_occupied.update(pin_tiles)
+        surface_occupied.update(valid_input_pins)
+        surface_occupied.update(valid_output_pins)
         for ent in entities:
             ep = ent["position"]
             surface_occupied.add((round(ep["x"], 2), round(ep["y"], 2)))
@@ -2423,8 +2595,23 @@ def build_entities(
         for pos, nets in tile_to_nets.items()
         if len(nets) > 1 or pos in adjacent_fluid_conflicts
     ]
+    drc_in_pins = [
+        (pin["x"] * scale, pin["y"] * scale)
+        for pin in def_data.get("pins", [])
+        if pin.get("direction") == "INPUT"
+    ]
+    drc_out_pins = [
+        (pin["x"] * scale, pin["y"] * scale)
+        for pin in def_data.get("pins", [])
+        if pin.get("direction") == "OUTPUT"
+    ]
     drc = BeltDrcChecker()
-    violations = drc.check_entities(entities, unresolved_crossings=remaining_conflicts)
+    violations = drc.check_entities(
+        entities,
+        input_pins=drc_in_pins,
+        output_pins=drc_out_pins,
+        unresolved_crossings=remaining_conflicts,
+    )
     if violations:
         for v in violations:
             sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")

@@ -159,6 +159,7 @@ def _factorilog_pnr_impl(ctx):
     out_drc = ctx.outputs.route_drc
     out_timing = ctx.outputs.timing_rpt
     out_time = ctx.outputs.time_json
+    out_log = ctx.outputs.log_file
 
     inputs = [ctx.file.netlist_v, ctx.file.tech_lef, ctx.file.tech_lib, ctx.file.script]
     outputs = [out_def, out_time]
@@ -166,6 +167,8 @@ def _factorilog_pnr_impl(ctx):
         outputs.append(out_drc)
     if out_timing:
         outputs.append(out_timing)
+    if out_log:
+        outputs.append(out_log)
 
     work_dir = "%s/%s_pnr_work" % (out_def.dirname, ctx.attr.name)
 
@@ -180,8 +183,11 @@ def _factorilog_pnr_impl(ctx):
         "cat << 'EOF' > \"$WORK_DIR/run_pnr.tcl\"",
         "set BLOCK_FILL %s" % ctx.attr.block_fill,
         "set CELL_PAD_SITES %d" % ctx.attr.cell_pad_sites,
+        "set SPLIT_PAD_SITES %d" % ctx.attr.split_pad_sites,
         "set CORE_MARGIN %d" % ctx.attr.core_margin,
         "set density %s" % ctx.attr.density,
+        "set ROUTABILITY_DRIVEN %s" % ("1" if ctx.attr.routability_driven else "0"),
+        "set LAYER_ADJUSTMENT \"%s\"" % ctx.attr.layer_adjustment,
         "source [file join [file dirname [info script]] factorilog.tcl]",
         "EOF",
         "START_NS=$(date +%s%N)",
@@ -190,7 +196,7 @@ def _factorilog_pnr_impl(ctx):
         "-v \"$(pwd)/$WORK_DIR\":/work " +
         "-w /work " +
         "docker.io/openroad/orfs:latest " +
-        "bash -lc \"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit /work/run_pnr.tcl\"",
+        "bash -lc \"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit /work/run_pnr.tcl\" > \"$WORK_DIR/pnr.log\" 2>&1 || (cat \"$WORK_DIR/pnr.log\" >&2 && exit 1)",
         "END_NS=$(date +%s%N)",
         "ELAPSED_NS=$((END_NS - START_NS))",
         "ELAPSED_SEC=$(awk \"BEGIN {printf \\\"%.3f\\\", $ELAPSED_NS / 1000000000}\")",
@@ -206,6 +212,11 @@ def _factorilog_pnr_impl(ctx):
         cmd_parts.append(
             "if [ -f \"$WORK_DIR/timing.rpt\" ]; then cp -f \"$WORK_DIR/timing.rpt\" '%s'; else touch '%s'; fi" %
             (out_timing.path, out_timing.path),
+        )
+    if out_log:
+        cmd_parts.append(
+            "if [ -f \"$WORK_DIR/pnr.log\" ]; then cp -f \"$WORK_DIR/pnr.log\" '%s'; else touch '%s'; fi" %
+            (out_log.path, out_log.path),
         )
 
     cmd_parts.append("echo \"{\\\"stage\\\": \\\"pnr\\\", \\\"elapsed_seconds\\\": $ELAPSED_SEC}\" > '%s'" % out_time.path)
@@ -242,10 +253,14 @@ factorilog_pnr = rule(
         "cell_pad_sites": attr.int(default = 4, doc = "Cell padding sites"),
         "density": attr.string(default = "0.18", doc = "Target placement density"),
         "core_margin": attr.int(default = 4, doc = "Core margin in sites"),
+        "split_pad_sites": attr.int(default = 5, doc = "Splitter and merger padding sites"),
+        "routability_driven": attr.bool(default = True, doc = "Enable routability-driven placement"),
+        "layer_adjustment": attr.string(default = "", doc = "Global routing layer adjustment factor"),
         "def_file": attr.output(mandatory = True, doc = "Routed DEF output file"),
         "route_drc": attr.output(doc = "DRC report output file"),
         "timing_rpt": attr.output(doc = "Timing STA report output file"),
         "time_json": attr.output(mandatory = True, doc = "Timing JSON output file"),
+        "log_file": attr.output(doc = "PnR log output file"),
     },
     doc = "Executes OpenROAD placement and routing for a factory design.",
 )
@@ -578,6 +593,9 @@ def factorilog_science_factory(
         cell_pad_sites = 4,
         density = "0.18",
         core_margin = 4,
+        split_pad_sites = 5,
+        routability_driven = True,
+        layer_adjustment = "",
         enable_display_readouts = False,
         enable_circuit_readouts = False,
         telemetry_taps = "none",
@@ -622,11 +640,15 @@ def factorilog_science_factory(
         def_file = name + ".def",
         route_drc = name + "_route_drc.rpt",
         timing_rpt = name + "_sta.rpt",
+        log_file = name + "_pnr.log",
         time_json = name + "_pnr_time.json",
         block_fill = block_fill,
         cell_pad_sites = cell_pad_sites,
+        split_pad_sites = split_pad_sites,
         density = density,
         core_margin = core_margin,
+        routability_driven = routability_driven,
+        layer_adjustment = layer_adjustment,
         tags = merged_tags,
     )
 
