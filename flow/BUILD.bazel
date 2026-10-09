@@ -158,10 +158,12 @@ factorilog_blueprint(
 factorilog_science_factory(
     name = "automation_science",
     block_fill = "0.05",
-    cell_pad_sites = 6,
+    cell_pad_sites = 4,
     core_margin = 6,
     demand = "automation-science-pack 60.0",
-    density = "0.08",
+    density = "0.15",
+    test_min_active_ratio = "0.60",
+    test_ticks = 10800,
     tags = [
         "manual",
         "science",

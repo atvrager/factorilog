@@ -256,15 +256,6 @@ foreach inst [$block getInsts] {
     }
 }
 
-# Collision obstructions to avoid surface crossings within 1 tile of turns/pins
-if {[$block findInst "u_logistic_science_pack_3"] != "NULL"} {
-    create_obstruction -layer M2 -region {12.0 81.0 13.0 82.0}
-    create_obstruction -layer M2 -region {72.0 45.0 73.0 46.0}
-    create_obstruction -layer M2 -region {96.0 70.0 97.0 71.0}
-    create_obstruction -layer M2 -region {95.0 39.0 96.0 40.0}
-    create_obstruction -layer M2 -region {94.0 41.0 95.0 42.0}
-    create_obstruction -layer M2 -region {104.0 38.0 105.0 39.0}
-}
 
 # --- route ----------------------------------------------------------
 # The router connects blocks across four layers:

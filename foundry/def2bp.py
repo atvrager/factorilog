@@ -678,7 +678,6 @@ def build_entities(
     netlist_data: dict[str, Any],
     strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
-    """Translate parsed DEF and netlist into Factorio blueprint entities."""
     is_logistic = any(
         i.get("name") == "u_logistic_science_pack_3" for i in netlist_data.get("instances", [])
     )
