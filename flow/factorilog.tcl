@@ -107,19 +107,23 @@ if {$fluid_count > 0} {
 # CTS and STA do not run. The Liberty timing tables are stubs, so the
 # design has no clock and no delay to repair.
 # --- io -------------------------------------------------------------
-# Place pins on the die edge closest to their connected instances.
+# Place pins on the die edge: inputs on the left (West), outputs on the right (East).
+set_io_pin_constraint -direction input -region left:*
+set_io_pin_constraint -direction output -region right:*
 place_pins -hor_layers M1 -ver_layers M2
 
 if {![info exists density]} {
     set density 0.18
 }
+set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
+
 puts "factorilog: placement density [format %.3f $density]"
 global_placement -density $density \
     -pad_left $CELL_PAD_SITES \
-    -pad_right $CELL_PAD_SITES
+    -pad_right $CELL_PAD_SITES \
+    -routability_driven
 
-set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
 place_pins -hor_layers M1 -ver_layers M2
 detailed_placement
 
@@ -253,6 +257,12 @@ foreach inst [$block getInsts] {
         set ix [expr {$ix_dbu / double($dbu)}]
         set iy [expr {$iy_dbu / double($dbu)}]
         create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
+    }
+    if {[string match "*split2" $master_name]} {
+        lassign [$inst getLocation] ix_dbu iy_dbu
+        set ix [expr {$ix_dbu / double($dbu)}]
+        set iy [expr {$iy_dbu / double($dbu)}]
+        create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] [expr {$iy}] [expr {$ix}] [expr {$iy + 1.0}]]
     }
 }
 

@@ -382,6 +382,178 @@ END DESIGN
         violations = checker.check_entities(entities)
         self.assertTrue(any(v.code == "DRC-06" for v in violations))
 
+    def test_drc_underground_span_hood_collision(self) -> None:
+        """Rule DRC-07 flags underground belt hood placed inside an active underground span."""
+        entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 4, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_SOUTH,
+                "type": "input",
+                "position": {"x": 2, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_SOUTH,
+                "type": "output",
+                "position": {"x": 2, "y": 3},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-07" for v in violations))
+
+    def test_drc_underground_parallel_span_overlap(self) -> None:
+        """Rule DRC-07 flags overlapping parallel underground spans."""
+        entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 4, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_WEST,
+                "type": "input",
+                "position": {"x": 5, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_WEST,
+                "type": "output",
+                "position": {"x": 1, "y": 0},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-07" for v in violations))
+
+    def test_drc_underground_perpendicular_crossing_allowed(self) -> None:
+        """Rule DRC-07 allows perpendicular underground spans to cross underground."""
+        entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 2},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 4, "y": 2},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_SOUTH,
+                "type": "input",
+                "position": {"x": 2, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_SOUTH,
+                "type": "output",
+                "position": {"x": 2, "y": 4},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertEqual(len(violations), 0)
+
+    def test_drc_hood_rear_feed_collision(self) -> None:
+        """Rule DRC-03 flags surface belt feeding into rear of underground output hood."""
+        entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "input",
+                "position": {"x": 0, "y": 0},
+            },
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_EAST,
+                "type": "output",
+                "position": {"x": 3, "y": 0},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 2, "y": 0},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-03" for v in violations))
+
+    def test_drc_machine_input_unreachable_supply(self) -> None:
+        """Rule DRC-05 flags machine input inserter disconnected from input pins."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 11.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 11.5, "y": 11.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 10.5, "y": 11.5},
+            },
+        ]
+        # input pin is far away at (0, 0), disconnected from the pickup belt at (10, 11)
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, input_pins=[(0.0, 0.0)])
+        self.assertTrue(any(v.code == "DRC-05" and "not reachable" in v.message for v in violations))
+
+    def test_drc_machine_input_reachable_supply(self) -> None:
+        """Rule DRC-05 passes when machine input inserter is reachable from input pins."""
+        entities = [
+            {
+                "name": "electric-furnace",
+                "position": {"x": 13.5, "y": 11.5},
+            },
+            {
+                "name": "fast-inserter",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 11.5, "y": 11.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 9.5, "y": 11.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 10.5, "y": 11.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, input_pins=[(9.0, 11.0)])
+        self.assertEqual(len([v for v in violations if v.code == "DRC-05"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
