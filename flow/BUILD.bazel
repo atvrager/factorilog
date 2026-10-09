@@ -173,11 +173,13 @@ factorilog_science_factory(
 
 factorilog_science_factory(
     name = "logistic_science",
-    block_fill = "0.05",
-    cell_pad_sites = 6,
+    block_fill = "0.008",
+    cell_pad_sites = 20,
+    core_margin = 8,
     demand = "logistic-science-pack 60.0",
-    density = "0.12",
+    density = "0.01",
     test_expected_item = "logistic-science-pack",
+    test_min_active_ratio = "0.50",
     test_ticks = 25200,
     tags = [
         "manual",

@@ -342,7 +342,6 @@ END DESIGN
         violations = checker.check_entities(entities)
         self.assertTrue(any(v.code == "DRC-05" for v in violations))
 
-
     def test_drc_machine_output_connected(self) -> None:
         """Rule DRC-06 accepts machine output inserter with receiver belt at drop."""
         entities = [
@@ -524,7 +523,9 @@ END DESIGN
         # input pin is far away at (0, 0), disconnected from the pickup belt at (10, 11)
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities, input_pins=[(0.0, 0.0)])
-        self.assertTrue(any(v.code == "DRC-05" and "not reachable" in v.message for v in violations))
+        self.assertTrue(
+            any(v.code == "DRC-05" and "not reachable" in v.message for v in violations)
+        )
 
     def test_drc_machine_input_reachable_supply(self) -> None:
         """Rule DRC-05 passes when machine input inserter is reachable from input pins."""
@@ -553,7 +554,39 @@ END DESIGN
         violations = checker.check_entities(entities, input_pins=[(9.0, 11.0)])
         self.assertEqual(len([v for v in violations if v.code == "DRC-05"]), 0)
 
+    def test_drc_unresolved_surface_crossing_flags_drc08(self) -> None:
+        """Rule DRC-08 flags unresolved surface crossings."""
+        entities = [
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 5.5, "y": 5.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, unresolved_crossings=[(5.5, 5.5)])
+        self.assertTrue(any(v.code == "DRC-08" and "Unresolved" in v.message for v in violations))
+
+    def test_drc_surface_tile_collision_flags_drc08(self) -> None:
+        """Rule DRC-08 flags multiple surface entities on the same tile."""
+        entities = [
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 5.5, "y": 5.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 5.5, "y": 5.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(
+            any(v.code == "DRC-08" and "Surface tile collision" in v.message for v in violations)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

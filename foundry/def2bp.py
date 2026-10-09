@@ -1035,7 +1035,15 @@ def build_entities(
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
         cell = cell_map.get(cell_id, {})
-        if cell_id in ("belt_merge2", "belt_split2", "belt_balancer2"):
+        if cell_id == "belt_merge2":
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+        elif cell_id == "belt_split2":
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
             pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
             pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
             pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
@@ -1543,12 +1551,50 @@ def build_entities(
         DIRECTION_NORTH: DIRECTION_SOUTH,
     }
 
-    # 4. Resolve surface conflicts using legal straight-run jumpers
     jumpers: list[tuple[str, tuple[float, float], tuple[float, float], int, bool]] = []
     used_underground_endpoints: dict[tuple[float, float], int] = {}
+    used_underground_spans_h: set[tuple[float, float]] = set()
+    used_underground_spans_v: set[tuple[float, float]] = set()
     for ue in underground_entities:
         pos_u = (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2))
         used_underground_endpoints[pos_u] = ue.get("direction", 0)
+
+    ug_ins = [
+        ue
+        for ue in underground_entities
+        if ue.get("type") == "input" or ue.get("name") == "pipe-to-ground"
+    ]
+    ug_outs = [
+        ue
+        for ue in underground_entities
+        if ue.get("type") == "output" or ue.get("name") == "pipe-to-ground"
+    ]
+    for u_in in ug_ins:
+        d = u_in.get("direction", 0)
+        if d not in DIR_STEPS:
+            continue
+        dx, dy = DIR_STEPS[d]
+        ix = round(u_in["position"]["x"], 2)
+        iy = round(u_in["position"]["y"], 2)
+        max_s = 11 if u_in.get("name") == "pipe-to-ground" else 10
+        for s in range(1, max_s + 1):
+            chk_x = round(ix + dx * s, 2)
+            chk_y = round(iy + dy * s, 2)
+            matched = any(
+                round(u_out["position"]["x"], 2) == chk_x
+                and round(u_out["position"]["y"], 2) == chk_y
+                for u_out in ug_outs
+                if u_out is not u_in
+            )
+            if matched:
+                span_set = (
+                    used_underground_spans_h
+                    if d in (DIRECTION_EAST, DIRECTION_WEST)
+                    else used_underground_spans_v
+                )
+                for step_s in range(1, s):
+                    span_set.add((round(ix + dx * step_s, 2), round(iy + dy * step_s, 2)))
+                break
 
     valid_output_pins: set[tuple[float, float]] = set()
     valid_input_pins: set[tuple[float, float]] = set()
@@ -1616,14 +1662,14 @@ def build_entities(
                 conflicts.append(pos)
 
         resolved_any = False
+        conflict_options: dict[tuple[float, float], list[tuple[float, str, Any]]] = {}
+
         for pos in conflicts:
             if len(tile_to_nets[pos]) <= 1 and pos not in adjacent_fluid_conflicts:
                 continue
             cx, cy = pos
             net_list = list(tile_to_nets[pos])
-            best_candidate = None
-            best_jump = None
-            best_score = -999999
+            options: list[tuple[float, str, Any]] = []
 
             for candidate in net_list:
                 d = net_surface_tiles[candidate].get(pos)
@@ -1648,6 +1694,8 @@ def build_entities(
                         fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
                     if in_pos in used_underground_endpoints:
                         fail_in.append("used_endpoint")
+                    if in_pos in used_underground_spans_h or in_pos in used_underground_spans_v:
+                        fail_in.append("in_underground_span")
                     allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
                     if in_pos in pin_tiles and not (d == DIRECTION_EAST and in_pos in allowed_out):
                         fail_in.append("in_pin_tiles")
@@ -1677,17 +1725,18 @@ def build_entities(
                                 in_turn_dir is not None
                                 and abs(in_turn_dir - d) % 8 == 4
                                 and corner_in not in occupied_positions
-                                and corner_in not in pin_tiles
+                                and (corner_in not in pin_tiles or corner_in in valid_output_pins)
                                 and corner_in not in used_underground_endpoints
-                                and len(tile_to_nets.get(corner_in, set())) == 0
+                                and tile_to_nets.get(corner_in, set()) <= {candidate}
                                 and entry_tile not in occupied_positions
                                 and entry_tile not in pin_tiles
                                 and entry_tile not in used_underground_endpoints
-                                and len(tile_to_nets.get(entry_tile, set())) == 0
+                                and tile_to_nets.get(entry_tile, set()) <= {candidate}
                             ):
                                 in_detour = (n_pos, opp_d, corner_in, in_turn_dir, entry_tile, d)
                             else:
                                 continue
+
                     for fspan in range(1, max_allowed_span):
                         if bspan + fspan > max_allowed_span:
                             break
@@ -1716,13 +1765,25 @@ def build_entities(
                                 )
                                 if (
                                     exit_tile not in occupied_positions
-                                    and exit_tile not in pin_tiles
+                                    and (
+                                        exit_tile not in pin_tiles
+                                        or (
+                                            exit_tile in valid_input_pins
+                                            and turn_dir == DIRECTION_EAST
+                                        )
+                                    )
                                     and exit_tile not in used_underground_endpoints
-                                    and len(tile_to_nets.get(exit_tile, set())) == 0
+                                    and tile_to_nets.get(exit_tile, set()) <= {candidate}
                                     and corner_tile not in occupied_positions
-                                    and corner_tile not in pin_tiles
+                                    and (
+                                        corner_tile not in pin_tiles
+                                        or (
+                                            corner_tile in valid_input_pins
+                                            and opp_d == DIRECTION_EAST
+                                        )
+                                    )
                                     and corner_tile not in used_underground_endpoints
-                                    and len(tile_to_nets.get(corner_tile, set())) == 0
+                                    and tile_to_nets.get(corner_tile, set()) <= {candidate}
                                     and next_in_net in net_surface_tiles[candidate]
                                 ):
                                     turn_detour = (exit_tile, turn_dir, corner_tile, opp_d)
@@ -1738,6 +1799,11 @@ def build_entities(
                             fail_out.append("out_has_conflict")
                         if out_pos in used_underground_endpoints:
                             fail_out.append("out_used_endpoint")
+                        if (
+                            out_pos in used_underground_spans_h
+                            or out_pos in used_underground_spans_v
+                        ):
+                            fail_out.append("out_underground_span")
                         allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
                         if out_pos in pin_tiles and not (
                             d == DIRECTION_EAST and out_pos in allowed_in
@@ -1757,6 +1823,7 @@ def build_entities(
                         valid_span = True
                         conflicts_cleared = 0
                         invalid_reasons = []
+                        is_horiz = d in (DIRECTION_EAST, DIRECTION_WEST)
                         for s in range(-bspan + 1, fspan):
                             it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
                             if (
@@ -1774,6 +1841,14 @@ def build_entities(
                                 valid_span = False
                                 invalid_reasons.append(f"it_used_endpoint({it})")
                                 break
+                            if is_horiz and it in used_underground_spans_h:
+                                valid_span = False
+                                invalid_reasons.append(f"it_used_span_h({it})")
+                                break
+                            if not is_horiz and it in used_underground_spans_v:
+                                valid_span = False
+                                invalid_reasons.append(f"it_used_span_v({it})")
+                                break
                             # Intermediate tunnel tiles run underground and do not collide with surface pin tiles
                             if (
                                 len(tile_to_nets.get(it, set())) > 1
@@ -1787,51 +1862,75 @@ def build_entities(
                         penalty = (
                             100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
                         ) + detour_penalty
-                        score = conflicts_cleared * 10 - penalty - (bspan + fspan)
-                        if score > best_score:
-                            best_score = score
-                            best_jump = (
-                                in_pos,
-                                out_pos,
-                                bspan,
-                                fspan,
-                                d,
-                                is_fluid,
-                                in_detour,
-                                turn_detour,
-                            )
-                            best_candidate = candidate
+                        score = conflicts_cleared * 50 - penalty - (bspan + fspan)
+                        jump_tuple = (
+                            in_pos,
+                            out_pos,
+                            bspan,
+                            fspan,
+                            d,
+                            is_fluid,
+                            in_detour,
+                            turn_detour,
+                        )
+                        options.append((score, candidate, jump_tuple))
 
-            if best_jump and best_candidate:
-                in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour = best_jump
-                dx, dy = DIR_STEPS[d]
-                used_underground_endpoints[in_pos] = d
-                used_underground_endpoints[out_pos] = d
-                jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
-                for s in range(-bspan + 1, fspan):
-                    it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                    if it in net_surface_tiles[best_candidate]:
-                        del net_surface_tiles[best_candidate][it]
-                    if best_candidate in tile_to_nets[it]:
-                        tile_to_nets[it].remove(best_candidate)
-                if turn_detour:
-                    exit_tile, exit_d, corner_tile, corner_d = turn_detour
-                    if out_pos in net_surface_tiles[best_candidate]:
-                        del net_surface_tiles[best_candidate][out_pos]
-                    if best_candidate in tile_to_nets[out_pos]:
-                        tile_to_nets[out_pos].remove(best_candidate)
-                    net_surface_tiles[best_candidate][exit_tile] = exit_d
-                    tile_to_nets[exit_tile].add(best_candidate)
-                    net_surface_tiles[best_candidate][corner_tile] = corner_d
-                    tile_to_nets[corner_tile].add(best_candidate)
-                if in_detour:
-                    n_pos, n_dir, corner_in, corner_d, entry_tile, entry_d = in_detour
-                    net_surface_tiles[best_candidate][n_pos] = n_dir
-                    net_surface_tiles[best_candidate][corner_in] = corner_d
-                    tile_to_nets[corner_in].add(best_candidate)
-                    net_surface_tiles[best_candidate][entry_tile] = entry_d
-                    tile_to_nets[entry_tile].add(best_candidate)
-                resolved_any = True
+            if options:
+                conflict_options[pos] = options
+
+        if conflict_options:
+            multi_options = [
+                (opt[0], p, opt[1], opt[2])
+                for p in conflict_options
+                for opt in conflict_options[p]
+                if opt[0] >= 80
+            ]
+            if multi_options:
+                _, best_pos, best_candidate, best_jump = max(multi_options, key=lambda x: x[0])
+            else:
+                for p in conflicts:
+                    if p in conflict_options:
+                        best_pos = p
+                        _, best_candidate, best_jump = max(conflict_options[p], key=lambda x: x[0])
+                        break
+
+            cx, cy = best_pos
+
+            in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour = best_jump
+            dx, dy = DIR_STEPS[d]
+            used_underground_endpoints[in_pos] = d
+            used_underground_endpoints[out_pos] = d
+            jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+            span_set = (
+                used_underground_spans_h
+                if d in (DIRECTION_EAST, DIRECTION_WEST)
+                else used_underground_spans_v
+            )
+            for s in range(-bspan + 1, fspan):
+                it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                span_set.add(it)
+                if it in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][it]
+                if best_candidate in tile_to_nets[it]:
+                    tile_to_nets[it].remove(best_candidate)
+            if turn_detour:
+                exit_tile, exit_d, corner_tile, corner_d = turn_detour
+                if out_pos in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][out_pos]
+                if best_candidate in tile_to_nets[out_pos]:
+                    tile_to_nets[out_pos].remove(best_candidate)
+                net_surface_tiles[best_candidate][exit_tile] = exit_d
+                tile_to_nets[exit_tile].add(best_candidate)
+                net_surface_tiles[best_candidate][corner_tile] = corner_d
+                tile_to_nets[corner_tile].add(best_candidate)
+            if in_detour:
+                n_pos, n_dir, corner_in, corner_d, entry_tile, entry_d = in_detour
+                net_surface_tiles[best_candidate][n_pos] = n_dir
+                net_surface_tiles[best_candidate][corner_in] = corner_d
+                tile_to_nets[corner_in].add(best_candidate)
+                net_surface_tiles[best_candidate][entry_tile] = entry_d
+                tile_to_nets[entry_tile].add(best_candidate)
+            resolved_any = True
         if not resolved_any:
             break
 
@@ -2319,8 +2418,13 @@ def build_entities(
                 ]
             )
 
+    remaining_conflicts = [
+        pos
+        for pos, nets in tile_to_nets.items()
+        if len(nets) > 1 or pos in adjacent_fluid_conflicts
+    ]
     drc = BeltDrcChecker()
-    violations = drc.check_entities(entities)
+    violations = drc.check_entities(entities, unresolved_crossings=remaining_conflicts)
     if violations:
         for v in violations:
             sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")

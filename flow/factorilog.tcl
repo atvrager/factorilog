@@ -112,17 +112,28 @@ set_io_pin_constraint -direction input -region left:*
 set_io_pin_constraint -direction output -region right:*
 place_pins -hor_layers M1 -ver_layers M2
 
+set is_logistic [expr {[$block findInst "u_logistic_science_pack_3"] != "NULL"}]
+
 if {![info exists density]} {
     set density 0.18
 }
-set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
 
-puts "factorilog: placement density [format %.3f $density]"
-global_placement -density $density \
-    -pad_left $CELL_PAD_SITES \
-    -pad_right $CELL_PAD_SITES \
-    -routability_driven
+if {$is_logistic} {
+    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+    puts "factorilog: placement density [format %.3f $density]"
+    global_placement -density $density \
+        -pad_left $CELL_PAD_SITES \
+        -pad_right $CELL_PAD_SITES \
+        -routability_driven
+} else {
+    puts "factorilog: placement density [format %.3f $density]"
+    global_placement -density $density \
+        -pad_left $CELL_PAD_SITES \
+        -pad_right $CELL_PAD_SITES
+    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left 5 -right 5
+}
 
 place_pins -hor_layers M1 -ver_layers M2
 detailed_placement
@@ -218,11 +229,22 @@ proc do_untangle {block dbu} {
                     if {$na != "NULL" && $nb != "NULL" && $na != $nb} {
                         set ya [get_net_driver_center_y $na $dbu]
                         set yb [get_net_driver_center_y $nb $dbu]
-                        if {$ya > $yb} {
-                            odb::dbITerm_disconnect $ita
-                            odb::dbITerm_disconnect $itb
-                            odb::dbITerm_connect $ita $nb
-                            odb::dbITerm_connect $itb $na
+                        lassign [$inst getLocation] ix_dbu iy_dbu
+                        set my [expr {$iy_dbu / double($dbu) + 1.0}]
+                        if {$ya > $my && $yb > $my} {
+                            if {$ya < $yb} {
+                                odb::dbITerm_disconnect $ita
+                                odb::dbITerm_disconnect $itb
+                                odb::dbITerm_connect $ita $nb
+                                odb::dbITerm_connect $itb $na
+                            }
+                        } else {
+                            if {$ya > $yb} {
+                                odb::dbITerm_disconnect $ita
+                                odb::dbITerm_disconnect $itb
+                                odb::dbITerm_connect $ita $nb
+                                odb::dbITerm_connect $itb $na
+                            }
                         }
                     }
                 }
@@ -231,7 +253,7 @@ proc do_untangle {block dbu} {
     }
 }
 
-if {[$block findInst "u_logistic_science_pack_3"] != "NULL"} {
+if {$is_logistic} {
     do_untangle $block $dbu
 }
 
@@ -258,7 +280,7 @@ foreach inst [$block getInsts] {
         set iy [expr {$iy_dbu / double($dbu)}]
         create_obstruction -layer M1 -region [list [expr {$ix + 0.5}] [expr {$iy + 1.0}] [expr {$ix + 1.0}] [expr {$iy + 2.0}]]
     }
-    if {[string match "*split2" $master_name]} {
+    if {!$is_logistic && [string match "*split2" $master_name]} {
         lassign [$inst getLocation] ix_dbu iy_dbu
         set ix [expr {$ix_dbu / double($dbu)}]
         set iy [expr {$iy_dbu / double($dbu)}]
@@ -266,6 +288,24 @@ foreach inst [$block getInsts] {
     }
 }
 
+if {$is_logistic} {
+    # Protect machine input pins (West) and output pins (East) from perpendicular M2 crossings
+    foreach inst [$block getInsts] {
+        set master_name [[$inst getMaster] getName]
+        lassign [$inst getLocation] ix_dbu iy_dbu
+        set ix [expr {$ix_dbu / double($dbu)}]
+        set iy [expr {$iy_dbu / double($dbu)}]
+        set w [expr {[[$inst getMaster] getWidth] / double($dbu)}]
+        set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
+        
+        # Machine input pins are on the West (x in [ix-1.0, ix], y in [iy, iy+h])
+        # Machine output pins are on the East (x in [ix+w, ix+w+1.0], y in [iy, iy+h])
+        if {[string match "*assembling_machine*" $master_name] || [string match "*electric_furnace*" $master_name] || [string match "*chemical_plant*" $master_name] || [string match "*oil_refinery*" $master_name] || [string match "*split2*" $master_name] || [string match "*merge2*" $master_name] || [string match "*balancer2*" $master_name]} {
+            create_obstruction -layer M2 -region [list [expr {$ix - 1.0}] $iy $ix [expr {$iy + $h}]]
+            create_obstruction -layer M2 -region [list [expr {$ix + $w}] $iy [expr {$ix + $w + 1.0}] [expr {$iy + $h}]]
+        }
+    }
+}
 
 # --- route ----------------------------------------------------------
 # The router connects blocks across four layers:
@@ -288,7 +328,12 @@ if {$has_circuit} {
 ::drt::detailed_route_set_unidirectional_layer M2
 ::drt::detailed_route_set_unidirectional_layer M3
 ::drt::detailed_route_set_unidirectional_layer M4
+if {$is_logistic} {
+    set_global_routing_layer_adjustment M1 0.5
+    set_global_routing_layer_adjustment M2 0.5
+}
 global_route -verbose
+
 detailed_route -output_drc route_drc.rpt -verbose 1
 
 write_def factory.def

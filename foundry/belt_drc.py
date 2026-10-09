@@ -81,6 +81,7 @@ class BeltDrcChecker:
         entities: list[dict[str, Any]],
         _net_map: dict[str, Any] | None = None,
         input_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
+        unresolved_crossings: list[tuple[float, float]] | set[tuple[float, float]] | None = None,
     ) -> list[DrcViolation]:
         """Verify all physical rules on a list of placed entities."""
         violations: list[DrcViolation] = []
@@ -130,6 +131,11 @@ class BeltDrcChecker:
 
         # 7. Check underground span overlaps and hood collisions (Rule DRC-07)
         violations.extend(self._check_underground_span_overlap(entities, tile_map))
+
+        # 8. Check surface tile collisions and unresolved crossings (Rule DRC-08)
+        violations.extend(
+            self._check_surface_collision(tile_map, unresolved_crossings=unresolved_crossings)
+        )
 
         return violations
 
@@ -737,5 +743,37 @@ class BeltDrcChecker:
                     )
                 else:
                     axis_map[st] = ((ix, iy), (ox, oy))
+
+        return violations
+
+    def _check_surface_collision(
+        self,
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+        unresolved_crossings: list[tuple[float, float]] | set[tuple[float, float]] | None = None,
+    ) -> list[DrcViolation]:
+        """Detect unresolved surface crossings and multiple entities on the same surface tile (Rule DRC-08)."""
+        violations: list[DrcViolation] = []
+        if unresolved_crossings:
+            violations.extend(
+                DrcViolation(
+                    code="DRC-08",
+                    message=f"Unresolved surface crossing at ({pt[0]}, {pt[1]})",
+                    x=float(pt[0]),
+                    y=float(pt[1]),
+                )
+                for pt in unresolved_crossings
+            )
+
+        for pos, ents in tile_map.items():
+            if len(ents) > 1:
+                names = [e.get("name", "unknown") for e in ents]
+                violations.append(
+                    DrcViolation(
+                        code="DRC-08",
+                        message=f"Surface tile collision between {len(ents)} entities {names} at ({pos[0]}, {pos[1]})",
+                        x=float(pos[0]),
+                        y=float(pos[1]),
+                    )
+                )
 
         return violations
