@@ -1,0 +1,1237 @@
+"""Routing track rasterization and underground jumper resolution.
+
+Extracts M1-M4 wire segments from OpenROAD DEF routing, resolves surface crossings
+using underground belt and pipe jumpers, enforces pin chirality, and prevents
+unintended belt sideloading.
+"""
+
+from __future__ import annotations
+
+import collections
+import heapq
+import math
+from dataclasses import dataclass
+from typing import Any
+
+try:
+    from foundry.entity_helpers import (
+        DIR_STEPS,
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+        OPPOSITE_DIR,
+    )
+    from foundry.lef import get_macro_port_slots
+    from foundry.placement import PlacementResult
+except ImportError:
+    from entity_helpers import (
+        DIR_STEPS,
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+        OPPOSITE_DIR,
+    )
+    from lef import get_macro_port_slots
+    from placement import PlacementResult
+
+DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
+    "underground-belt": 5,
+    "fast-underground-belt": 7,
+    "express-underground-belt": 9,
+}
+
+ALL_UG_LAYERS: frozenset[str] = frozenset({"M3", "M4", "M7", "M8", "M9", "M10"})
+
+
+@dataclass
+class RouteResult:
+    """Surface routes, conflict tiles, and pin locations."""
+
+    net_surface_tiles: dict[str, dict[tuple[float, float], int]]
+    tile_to_nets: dict[tuple[float, float], set[str]]
+    adjacent_fluid_conflicts: set[tuple[float, float]]
+    pin_tiles: set[tuple[float, float]]
+    valid_input_pins: set[tuple[float, float]]
+    valid_output_pins: set[tuple[float, float]]
+
+
+def route_and_resolve_jumpers(
+    def_data: dict[str, Any],
+    netlist_data: dict[str, Any],
+    placement: PlacementResult,
+) -> RouteResult:
+    """Rasterize DEF routes and resolve surface crossings with underground jumpers."""
+    scale = 1.0 / float(def_data.get("units", 1000))
+    inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
+    cell_map = netlist_data.get("cells", {})
+
+    entities = placement.entities
+    occupied_positions = placement.occupied_positions
+    grid_entities = placement.grid_entities
+    fluids = placement.fluids
+    has_fluid_metadata = placement.has_fluid_metadata
+
+    def add_entity(
+        name: str,
+        x: float,
+        y: float,
+        direction: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        pos_key = (round(x, 2), round(y, 2))
+        if pos_key in occupied_positions:
+            return grid_entities.get(pos_key, {})
+        occupied_positions.add(pos_key)
+        entity: dict[str, Any] = {
+            "name": name,
+            "position": {"x": pos_key[0], "y": pos_key[1]},
+        }
+        if direction is not None:
+            entity["direction"] = direction
+        if extra:
+            entity.update(extra)
+        entities.append(entity)
+        grid_entities[pos_key] = entity
+        return entity
+
+    def is_fluid_wire(net: dict[str, Any], layer: str) -> bool:
+        if has_fluid_metadata:
+            net_name = net.get("name", "")
+            base = net_name.split("__")[0].replace("_", "-")
+            return base in fluids
+        return layer in ("M3", "M4")
+
+    tier_spans = dict(DEFAULT_UNDERGROUND_SPANS)
+    if netlist_data and "underground_spans" in netlist_data:
+        tier_spans.update(netlist_data["underground_spans"])
+
+    def choose_belt_tier(span_tiles: int) -> str:
+        for name, max_span in sorted(tier_spans.items(), key=lambda kv: kv[1]):
+            if span_tiles <= max_span:
+                return name
+        return max(tier_spans.items(), key=lambda kv: kv[1])[0]
+
+    def segment_run(
+        start: float,
+        end: float,
+        max_allowed_span: int,
+        axis_coord: float = 0.0,
+        is_horizontal: bool = True,
+        blocked_tiles: set[tuple[float, float]] | None = None,
+    ) -> list[tuple[float, float, int]]:
+        length = round(abs(end - start))
+        step = 1 if end > start else -1
+        if length <= max_allowed_span:
+            return [(start, end, length)]
+        blocked = blocked_tiles or set()
+        hops = []
+        curr = start
+        while True:
+            rem = round(abs(end - curr))
+            if rem <= max_allowed_span:
+                hops.append((curr, end, rem))
+                break
+            best_span = None
+            for span in range(min(max_allowed_span, rem - 2), 0, -1):
+                exit_pos = round(curr + step * span, 2)
+                next_in = round(exit_pos + step, 2)
+                p_exit = (exit_pos, axis_coord) if is_horizontal else (axis_coord, exit_pos)
+                p_next = (next_in, axis_coord) if is_horizontal else (axis_coord, next_in)
+                if p_exit not in blocked and p_next not in blocked:
+                    best_span = span
+                    break
+            if best_span is None:
+                best_span = min(max_allowed_span, rem - 2)
+                if best_span < 1:
+                    best_span = max_allowed_span
+            exit_pos = round(curr + step * best_span, 2)
+            hops.append((curr, exit_pos, best_span))
+            curr = round(exit_pos + step, 2)
+        return hops
+
+    def get_pin_offset(cell_id: str, pin: str) -> tuple[float, float]:
+        if cell_id == "belt_merge2":
+            merge_pins = {
+                "a": (0.25, 0.5),
+                "b": (0.25, 1.5),
+                "y": (0.75, 0.5),
+            }
+            return merge_pins.get(pin, (0.5, 0.5))
+        if cell_id == "belt_split2":
+            split_pins = {
+                "a": (0.25, 0.5),
+                "y1": (0.75, 0.5),
+                "y2": (0.75, 1.5),
+            }
+            return split_pins.get(pin, (0.5, 0.5))
+        if cell_id == "belt_balancer2":
+            balancer_pins = {
+                "a1": (0.25, 0.5),
+                "a2": (0.25, 1.5),
+                "y1": (0.75, 0.5),
+                "y2": (0.75, 1.5),
+            }
+            return balancer_pins.get(pin, (0.5, 0.5))
+        if cell_id == "pump":
+            pump_pins = {
+                "a": (0.5, 0.25),
+                "y": (0.5, 1.75),
+            }
+            return pump_pins.get(pin, (0.5, 1.0))
+        c = cell_map.get(cell_id, {})
+        width = float(c.get("width", 3))
+        height = float(c.get("height", 3))
+        outputs = [o.replace("-", "_") for o in c.get("outputs", [])]
+        if pin in outputs:
+            _, out_slots = get_macro_port_slots(c)
+            orig_outputs = c.get("outputs", [])
+            idx = outputs.index(pin)
+            orig_name = orig_outputs[idx] if idx < len(orig_outputs) else ""
+            if orig_name in out_slots:
+                return (width - 0.25, out_slots[orig_name] + 0.5)
+            total = len(outputs)
+            if total <= height:
+                offset = (height - total) // 2
+                return (width - 0.25, offset + idx + 0.5)
+            if idx < height:
+                return (width - 0.25, idx + 0.5)
+            if idx < height + width:
+                return (idx - height + 0.5, 0.25)
+            if idx < 2 * height + width:
+                return (0.25, idx - height - width + 0.5)
+            return ((idx - 2 * height - width) % width + 0.5, height - 0.25)
+        return (width / 2.0, height / 2.0)
+
+    comp_map = {c["name"]: c for c in def_data.get("components", [])}
+    input_pins: dict[str, tuple[float, float]] = {}
+    for p in def_data.get("pins", []):
+        if p.get("direction") == "INPUT":
+            input_pins[p["net"]] = (p["x"] * scale, p["y"] * scale)
+
+    pin_tiles: set[tuple[float, float]] = set()
+    for p in def_data.get("pins", []):
+        pin_tiles.add(
+            (
+                round(math.floor(p["x"] * scale) + 0.5, 2),
+                round(math.floor(p["y"] * scale) + 0.5, 2),
+            )
+        )
+    for comp in def_data.get("components", []):
+        cname = comp["name"]
+        macro = comp["macro"]
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = inst_map.get(cname, {})
+        cell_id = inst.get("cell", macro)
+        cell = cell_map.get(cell_id, {})
+        if cell_id == "belt_merge2":
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+        elif cell_id == "belt_split2":
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            pin_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "pump":
+            pin_tiles.add((round(gx + 0.5, 2), round(gy - 0.5, 2)))
+            pin_tiles.add((round(gx + 0.5, 2), round(gy + 2.5, 2)))
+        else:
+            w = float(cell.get("width", 3))
+            h = float(cell.get("height", 3))
+            inputs = cell.get("inputs", [])
+            outputs = cell.get("outputs", [])
+            in_slots, out_slots = get_macro_port_slots(cell)
+            for idx, port in enumerate(inputs):
+                cy = (
+                    in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx)
+                    + 0.5
+                )
+                pin_tiles.add((round(gx + 0.5, 2), round(gy + cy, 2)))
+                pin_tiles.add((round(gx - 0.5, 2), round(gy + cy, 2)))
+            for idx, port in enumerate(outputs):
+                cy = (
+                    out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
+                    + 0.5
+                )
+                pin_tiles.add((round(gx + w - 0.5, 2), round(gy + cy, 2)))
+                pin_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+
+    net_dists: dict[str, dict[tuple[float, float], float]] = {}
+    for net in def_data.get("nets", []):
+        nname = net.get("name", "")
+        wires = net.get("wires", [])
+        if not wires:
+            continue
+        graph = collections.defaultdict(list)
+        for w in wires:
+            p1 = (round(w["x1"] * scale, 2), round(w["y1"] * scale, 2))
+            p2 = (round(w["x2"] * scale, 2), round(w["y2"] * scale, 2))
+            d = abs(p2[0] - p1[0]) + abs(p2[1] - p1[1])
+            graph[p1].append((p2, d))
+            graph[p2].append((p1, d))
+
+        drivers: list[tuple[float, float]] = []
+        if nname in input_pins:
+            drivers.append(input_pins[nname])
+        for inst, pin in net.get("connections", []):
+            if inst in comp_map:
+                c = comp_map[inst]
+                cell_id = inst_map.get(inst, {}).get("cell", c.get("macro", ""))
+                if cell_id in ("belt_merge2", "pump"):
+                    outputs = ["y"]
+                elif cell_id in ("belt_split2", "belt_balancer2"):
+                    outputs = ["y1", "y2"]
+                else:
+                    outputs = [
+                        o.replace("-", "_") for o in cell_map.get(cell_id, {}).get("outputs", [])
+                    ]
+                if pin in outputs:
+                    po = get_pin_offset(cell_id, pin)
+                    drivers.append((c["x"] * scale + po[0], c["y"] * scale + po[1]))
+
+        if not drivers:
+            drivers = [next(iter(graph.keys()))]
+
+        dist: dict[tuple[float, float], float] = {}
+        pq: list[tuple[float, tuple[float, float]]] = []
+        for drv in drivers:
+            closest = min(graph.keys(), key=lambda p: abs(p[0] - drv[0]) + abs(p[1] - drv[1]))
+            init_d = abs(closest[0] - drv[0]) + abs(closest[1] - drv[1])
+            dist[closest] = init_d
+            heapq.heappush(pq, (init_d, closest))
+
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, 1e9):
+                continue
+            for v, weight in graph[u]:
+                if d + weight < dist.get(v, 1e9):
+                    dist[v] = d + weight
+                    heapq.heappush(pq, (d + weight, v))
+        net_dists[nname] = dist
+
+    perp_conn: dict[tuple[str, tuple[float, float]], set[str]] = collections.defaultdict(set)
+    for net in def_data.get("nets", []):
+        nname = net.get("name", "")
+        for w in net.get("wires", []):
+            if w.get("layer") in ("M5", "M6"):
+                continue
+            p1 = (
+                round(math.floor(w["x1"] * scale) + 0.5, 2),
+                round(math.floor(w["y1"] * scale) + 0.5, 2),
+            )
+            p2 = (
+                round(math.floor(w["x2"] * scale) + 0.5, 2),
+                round(math.floor(w["y2"] * scale) + 0.5, 2),
+            )
+            axis = "H" if p1[1] == p2[1] else "V"
+            perp_conn[(nname, p1)].add(axis)
+            perp_conn[(nname, p2)].add(axis)
+
+    net_surface_tiles: dict[str, dict[tuple[float, float], int]] = collections.defaultdict(dict)
+    tile_to_nets: dict[tuple[float, float], set[str]] = collections.defaultdict(set)
+    underground_entities: list[dict[str, Any]] = []
+
+    m3_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = (
+        collections.defaultdict(dict)
+    )
+    m4_runs_by_net: dict[str, dict[float, list[tuple[float, float, int]]]] = (
+        collections.defaultdict(dict)
+    )
+
+    for net in def_data.get("nets", []):
+        nname = net.get("name", "")
+        dist = net_dists.get(nname, {})
+
+        for wire in net.get("wires", []):
+            layer = wire["layer"]
+            x1, y1 = wire["x1"], wire["y1"]
+            x2, y2 = wire["x2"], wire["y2"]
+            if (x1, y1) == (x2, y2):
+                continue
+
+            p1 = (round(x1 * scale, 2), round(y1 * scale, 2))
+            p2 = (round(x2 * scale, 2), round(y2 * scale, 2))
+            from_p, to_p = (p1, p2) if dist.get(p1, 0) <= dist.get(p2, 0) else (p2, p1)
+
+            t1_x = math.floor(from_p[0]) + 0.5
+            t1_y = math.floor(from_p[1]) + 0.5
+            t2_x = math.floor(to_p[0]) + 0.5
+            t2_y = math.floor(to_p[1]) + 0.5
+
+            if from_p[0] == to_p[0]:
+                d = DIRECTION_SOUTH if to_p[1] >= from_p[1] else DIRECTION_NORTH
+            else:
+                d = DIRECTION_EAST if to_p[0] >= from_p[0] else DIRECTION_WEST
+
+            if layer in ("M5", "M6"):
+                continue
+
+            is_fluid = is_fluid_wire(net, layer)
+            net_has_ug = any(w.get("layer") in ALL_UG_LAYERS for w in net.get("wires", []))
+            if layer in ALL_UG_LAYERS or (is_fluid and layer in ("M1", "M2") and not net_has_ug):
+                if from_p[0] == to_p[0]:
+                    dx, dy = (0, 1) if d == DIRECTION_SOUTH else (0, -1)
+                    while (t1_x, t1_y) in occupied_positions:
+                        t1_y = round(t1_y + dy, 2)
+                    while (t2_x, t2_y) in occupied_positions:
+                        t2_y = round(t2_y - dy, 2)
+                    if (t2_y - t1_y) * dy >= 1:
+                        m4_runs_by_net[nname].setdefault(t1_x, []).append((t1_y, t2_y, d))
+                    elif (t1_x, t1_y) == (t2_x, t2_y) and (t1_x, t1_y) not in occupied_positions:
+                        net_surface_tiles[nname][(t1_x, t1_y)] = d
+                        tile_to_nets[(t1_x, t1_y)].add(nname)
+                else:
+                    dx, dy = (1, 0) if d == DIRECTION_EAST else (-1, 0)
+                    while (t1_x, t1_y) in occupied_positions:
+                        t1_x = round(t1_x + dx, 2)
+                    while (t2_x, t2_y) in occupied_positions:
+                        t2_x = round(t2_x - dx, 2)
+                    if (t2_x - t1_x) * dx >= 1:
+                        m3_runs_by_net[nname].setdefault(t1_y, []).append((t1_x, t2_x, d))
+                    elif (t1_x, t1_y) == (t2_x, t2_y) and (t1_x, t1_y) not in occupied_positions:
+                        net_surface_tiles[nname][(t1_x, t1_y)] = d
+                        tile_to_nets[(t1_x, t1_y)].add(nname)
+            else:
+                if from_p[0] == to_p[0]:
+                    tx = t1_x
+                    y_start = math.floor(from_p[1])
+                    y_end = math.floor(to_p[1])
+                    step = 1 if y_end >= y_start else -1
+                    for ty in range(y_start, y_end + step, step):
+                        pos = (tx, ty + 0.5)
+                        if pos in occupied_positions:
+                            continue
+                        tile_to_nets[pos].add(nname)
+                        if ty != y_end or pos not in net_surface_tiles[nname]:
+                            net_surface_tiles[nname][pos] = d
+                else:
+                    ty = t1_y
+                    x_start = math.floor(from_p[0])
+                    x_end = math.floor(to_p[0])
+                    step = 1 if x_end >= x_start else -1
+                    for tx in range(x_start, x_end + step, step):
+                        pos = (tx + 0.5, ty)
+                        if pos in occupied_positions:
+                            continue
+                        tile_to_nets[pos].add(nname)
+                        if tx != x_end or pos not in net_surface_tiles[nname]:
+                            net_surface_tiles[nname][pos] = d
+
+    # Process M3 and M4 runs with obstacle-aware segmentation
+    for net in def_data.get("nets", []):
+        nname = net.get("name", "")
+        is_fluid = is_fluid_wire(net, "M3")
+        blocked_tiles = {pos for pos, nets in tile_to_nets.items() if any(n != nname for n in nets)}
+
+        for cy, segs in m3_runs_by_net.get(nname, {}).items():
+            for s1, s2, d in segs:
+                if s1 == s2:
+                    continue
+                step = 1 if s2 >= s1 else -1
+                start_x, end_x = s1, s2
+                ug_start = round(start_x, 2)
+                ug_end = round(end_x, 2)
+                start_is_turn = "V" in perp_conn.get((nname, (start_x, cy)), set())
+                end_is_turn = "V" in perp_conn.get((nname, (end_x, cy)), set())
+
+                if start_is_turn:
+                    cand_start = round(start_x + step, 2)
+                    if (cand_start, cy) not in occupied_positions and len(
+                        tile_to_nets.get((cand_start, cy), set())
+                    ) == 0:
+                        net_surface_tiles[nname][(start_x, cy)] = d
+                        tile_to_nets[(start_x, cy)].add(nname)
+                        ug_start = cand_start
+
+                if end_is_turn:
+                    cand_end = round(end_x - step, 2)
+                    if (cand_end, cy) not in occupied_positions and len(
+                        tile_to_nets.get((cand_end, cy), set())
+                    ) == 0:
+                        if (end_x, cy) not in occupied_positions:
+                            if (end_x, cy) not in net_surface_tiles[nname]:
+                                net_surface_tiles[nname][(end_x, cy)] = d
+                            tile_to_nets[(end_x, cy)].add(nname)
+                        ug_end = cand_end
+
+                if not is_fluid:
+                    while (ug_start, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(ug_start, cy)] = d
+                        tile_to_nets[(ug_start, cy)].add(nname)
+                        ug_start = round(ug_start + step, 2)
+
+                    while (ug_end, cy) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(ug_end, cy)] = d
+                        tile_to_nets[(ug_end, cy)].add(nname)
+                        ug_end = round(ug_end - step, 2)
+
+                if start_is_turn and ug_start == start_x:
+                    ug_end = ug_start
+                if end_is_turn and ug_end == end_x:
+                    ug_end = ug_start
+
+                min_span = 1 if is_fluid else 2
+                if (ug_end - ug_start) * step < min_span:
+                    cur = ug_start
+                    while (ug_end - cur) * step >= 0:
+                        net_surface_tiles[nname][(cur, cy)] = d
+                        tile_to_nets[(cur, cy)].add(nname)
+                        cur = round(cur + step, 2)
+                else:
+                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles)
+                    for h_start, h_end, h_span in hops:
+                        tile_to_nets[(h_start, cy)].add(nname)
+                        tile_to_nets[(h_end, cy)].add(nname)
+                        if is_fluid:
+                            d_in = DIRECTION_WEST if d == DIRECTION_EAST else DIRECTION_EAST
+                            d_out = DIRECTION_EAST if d == DIRECTION_EAST else DIRECTION_WEST
+                            underground_entities.append(
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": h_start, "y": cy},
+                                    "direction": d_in,
+                                }
+                            )
+                            underground_entities.append(
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": h_end, "y": cy},
+                                    "direction": d_out,
+                                }
+                            )
+                        else:
+                            ent_name = choose_belt_tier(h_span)
+                            underground_entities.append(
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": h_start, "y": cy},
+                                    "direction": d,
+                                    "type": "input",
+                                }
+                            )
+                            underground_entities.append(
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": h_end, "y": cy},
+                                    "direction": d,
+                                    "type": "output",
+                                }
+                            )
+
+        for cx, segs in m4_runs_by_net.get(nname, {}).items():
+            for s1, s2, d in segs:
+                if s1 == s2:
+                    continue
+                step = 1 if s2 >= s1 else -1
+                start_y, end_y = s1, s2
+                ug_start = round(start_y, 2)
+                ug_end = round(end_y, 2)
+                start_is_turn = "H" in perp_conn.get((nname, (cx, start_y)), set())
+                end_is_turn = "H" in perp_conn.get((nname, (cx, end_y)), set())
+
+                if start_is_turn:
+                    cand_start = round(start_y + step, 2)
+                    if (cx, cand_start) not in occupied_positions and len(
+                        tile_to_nets.get((cx, cand_start), set())
+                    ) == 0:
+                        net_surface_tiles[nname][(cx, start_y)] = d
+                        tile_to_nets[(cx, start_y)].add(nname)
+                        ug_start = cand_start
+
+                if end_is_turn:
+                    cand_end = round(end_y - step, 2)
+                    if (cx, cand_end) not in occupied_positions and len(
+                        tile_to_nets.get((cx, cand_end), set())
+                    ) == 0:
+                        if (cx, end_y) not in occupied_positions:
+                            if (cx, end_y) not in net_surface_tiles[nname]:
+                                net_surface_tiles[nname][(cx, end_y)] = d
+                            tile_to_nets[(cx, end_y)].add(nname)
+                        ug_end = cand_end
+
+                if not is_fluid:
+                    while (cx, ug_start) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(cx, ug_start)] = d
+                        tile_to_nets[(cx, ug_start)].add(nname)
+                        ug_start = round(ug_start + step, 2)
+
+                    while (cx, ug_end) in pin_tiles and (ug_end - ug_start) * step >= 0:
+                        net_surface_tiles[nname][(cx, ug_end)] = d
+                        tile_to_nets[(cx, ug_end)].add(nname)
+                        ug_end = round(ug_end - step, 2)
+
+                if start_is_turn and ug_start == start_y:
+                    ug_end = ug_start
+                if end_is_turn and ug_end == end_y:
+                    ug_end = ug_start
+
+                min_span = 1 if is_fluid else 2
+                if (ug_end - ug_start) * step < min_span:
+                    cur = ug_start
+                    while (ug_end - cur) * step >= 0:
+                        net_surface_tiles[nname][(cx, cur)] = d
+                        tile_to_nets[(cx, cur)].add(nname)
+                        cur = round(cur + step, 2)
+                else:
+                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles)
+                    for h_start, h_end, h_span in hops:
+                        tile_to_nets[(cx, h_start)].add(nname)
+                        tile_to_nets[(cx, h_end)].add(nname)
+                        if is_fluid:
+                            d_in = DIRECTION_NORTH if d == DIRECTION_SOUTH else DIRECTION_SOUTH
+                            d_out = DIRECTION_SOUTH if d == DIRECTION_SOUTH else DIRECTION_NORTH
+                            underground_entities.append(
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": cx, "y": h_start},
+                                    "direction": d_in,
+                                }
+                            )
+                            underground_entities.append(
+                                {
+                                    "name": "pipe-to-ground",
+                                    "position": {"x": cx, "y": h_end},
+                                    "direction": d_out,
+                                }
+                            )
+                        else:
+                            ent_name = choose_belt_tier(h_span)
+                            underground_entities.append(
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": cx, "y": h_start},
+                                    "direction": d,
+                                    "type": "input",
+                                }
+                            )
+                            underground_entities.append(
+                                {
+                                    "name": ent_name,
+                                    "position": {"x": cx, "y": h_end},
+                                    "direction": d,
+                                    "type": "output",
+                                }
+                            )
+
+    net_map = {n.get("name", ""): n for n in def_data.get("nets", [])}
+    jumpers: list[tuple[str, tuple[float, float], tuple[float, float], int, bool]] = []
+    used_underground_endpoints: dict[tuple[float, float], int] = {}
+    used_underground_spans_h: set[tuple[float, float]] = set()
+    used_underground_spans_v: set[tuple[float, float]] = set()
+    for ue in underground_entities:
+        pos_u = (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2))
+        used_underground_endpoints[pos_u] = ue.get("direction", 0)
+
+    ug_ins = [
+        ue
+        for ue in underground_entities
+        if ue.get("type") == "input" or ue.get("name") == "pipe-to-ground"
+    ]
+    ug_outs = [
+        ue
+        for ue in underground_entities
+        if ue.get("type") == "output" or ue.get("name") == "pipe-to-ground"
+    ]
+    for u_in in ug_ins:
+        d = u_in.get("direction", 0)
+        if d not in DIR_STEPS:
+            continue
+        dx, dy = DIR_STEPS[d]
+        ix = round(u_in["position"]["x"], 2)
+        iy = round(u_in["position"]["y"], 2)
+        max_s = 11 if u_in.get("name") == "pipe-to-ground" else 10
+        for s in range(1, max_s + 1):
+            chk_x = round(ix + dx * s, 2)
+            chk_y = round(iy + dy * s, 2)
+            matched = any(
+                round(u_out["position"]["x"], 2) == chk_x
+                and round(u_out["position"]["y"], 2) == chk_y
+                for u_out in ug_outs
+                if u_out is not u_in
+            )
+            if matched:
+                span_set = (
+                    used_underground_spans_h
+                    if d in (DIRECTION_EAST, DIRECTION_WEST)
+                    else used_underground_spans_v
+                )
+                for step_s in range(1, s):
+                    span_set.add((round(ix + dx * step_s, 2), round(iy + dy * step_s, 2)))
+                break
+
+    valid_output_pins: set[tuple[float, float]] = set()
+    valid_input_pins: set[tuple[float, float]] = set()
+    valid_fluid_output_pins: set[tuple[float, float]] = set()
+    valid_fluid_input_pins: set[tuple[float, float]] = set()
+    machine_input_pins: set[tuple[float, float]] = set()
+    machine_output_pins: set[tuple[float, float]] = set()
+    for comp in def_data.get("components", []):
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = inst_map.get(comp["name"], {})
+        cell_id = inst.get("cell", comp["macro"])
+        cell = cell_map.get(cell_id, {})
+        if cell_id == "belt_merge2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+        elif cell_id == "belt_split2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            valid_output_pins.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "pump":
+            valid_fluid_input_pins.add((round(gx + 0.5, 2), round(gy - 0.5, 2)))
+            valid_fluid_output_pins.add((round(gx + 0.5, 2), round(gy + 2.5, 2)))
+        else:
+            in_slots, out_slots = get_macro_port_slots(cell)
+            w = float(cell.get("width", 3))
+            h = float(cell.get("height", 3))
+            for idx, port in enumerate(cell.get("inputs", [])):
+                cy = (
+                    in_slots.get(
+                        port,
+                        (h - len(cell.get("inputs", []))) // 2 + idx
+                        if len(cell.get("inputs", [])) <= h
+                        else idx,
+                    )
+                    + 0.5
+                )
+                pt = (round(gx - 0.5, 2), round(gy + cy, 2))
+                if port in fluids:
+                    valid_fluid_input_pins.add(pt)
+                else:
+                    valid_input_pins.add(pt)
+                    machine_input_pins.add(pt)
+            for idx, port in enumerate(cell.get("outputs", [])):
+                cy = (
+                    out_slots.get(
+                        port,
+                        (h - len(cell.get("outputs", []))) // 2 + idx
+                        if len(cell.get("outputs", [])) <= h
+                        else idx,
+                    )
+                    + 0.5
+                )
+                pt = (round(gx + w + 0.5, 2), round(gy + cy, 2))
+                if port in fluids:
+                    valid_fluid_output_pins.add(pt)
+                else:
+                    valid_output_pins.add(pt)
+                    machine_output_pins.add(pt)
+
+    while True:
+        conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
+        adjacent_fluid_conflicts = set()
+        for pos, nets in tile_to_nets.items():
+            if len(nets) != 1:
+                continue
+            n1 = next(iter(nets))
+            if not is_fluid_wire(net_map.get(n1, {}), "M1"):
+                continue
+            cx, cy = pos
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                npos = (round(cx + dx, 2), round(cy + dy, 2))
+                adj_nets = tile_to_nets.get(npos, set())
+                if len(adj_nets) >= 1 and any(
+                    n2 != n1 and is_fluid_wire(net_map.get(n2, {}), "M1") for n2 in adj_nets
+                ):
+                    adjacent_fluid_conflicts.add(pos)
+        for pos in sorted(adjacent_fluid_conflicts):
+            if pos not in conflicts:
+                conflicts.append(pos)
+
+        resolved_any = False
+        conflict_options: dict[tuple[float, float], list[tuple[float, str, Any]]] = {}
+
+        for pos in conflicts:
+            if len(tile_to_nets[pos]) <= 1 and pos not in adjacent_fluid_conflicts:
+                continue
+            cx, cy = pos
+            net_list = list(tile_to_nets[pos])
+            options: list[tuple[float, str, Any]] = []
+
+            for candidate in net_list:
+                d = net_surface_tiles[candidate].get(pos)
+                if d not in DIR_STEPS:
+                    continue
+                dx, dy = DIR_STEPS[d]
+                opp_d = OPPOSITE_DIR[d]
+                max_belt_span = (
+                    max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
+                )
+                max_allowed_span = 11 if is_fluid else max_belt_span
+
+                for bspan in range(1, max_allowed_span):
+                    in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
+                    prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
+                    fail_in = []
+                    if in_pos not in net_surface_tiles[candidate]:
+                        fail_in.append("not_in_net")
+                    elif net_surface_tiles[candidate][in_pos] != d and not (
+                        in_pos in machine_output_pins
+                        and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
+                    ):
+                        fail_in.append(f"dir_mismatch({net_surface_tiles[candidate][in_pos]}!={d})")
+                    if len(tile_to_nets.get(in_pos, set())) > 1:
+                        fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
+                    if in_pos in used_underground_endpoints:
+                        fail_in.append("used_endpoint")
+                    if in_pos in used_underground_spans_h or in_pos in used_underground_spans_v:
+                        fail_in.append("in_underground_span")
+                    allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
+                    if in_pos in pin_tiles:
+                        allowed = in_pos in allowed_out and (
+                            d == DIRECTION_EAST
+                            or (
+                                not is_fluid
+                                and in_pos in machine_output_pins
+                                and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
+                            )
+                        )
+                        if not allowed:
+                            fail_in.append("in_pin_tiles")
+                    if in_pos in occupied_positions:
+                        fail_in.append("in_occupied")
+                    if used_underground_endpoints.get(prev_pos) == opp_d:
+                        fail_in.append("opp_prev")
+                    if fail_in:
+                        continue
+
+                    in_detour = None
+                    if not is_fluid:
+                        side_feed = False
+                        in_turn_dir = None
+                        for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
+                            if b_dir == d:
+                                continue
+                            n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
+                            if net_surface_tiles[candidate].get(n_pos) == b_dir:
+                                side_feed = True
+                                in_turn_dir = b_dir
+                                break
+                        if side_feed:
+                            corner_in = (round(n_pos[0] - dx, 2), round(n_pos[1] - dy, 2))
+                            entry_tile = prev_pos
+                            if (
+                                in_turn_dir is not None
+                                and abs(in_turn_dir - d) % 8 == 4
+                                and corner_in not in occupied_positions
+                                and (corner_in not in pin_tiles or corner_in in valid_output_pins)
+                                and corner_in not in used_underground_endpoints
+                                and tile_to_nets.get(corner_in, set()) <= {candidate}
+                                and entry_tile not in occupied_positions
+                                and entry_tile not in pin_tiles
+                                and entry_tile not in used_underground_endpoints
+                                and tile_to_nets.get(entry_tile, set()) <= {candidate}
+                            ):
+                                in_detour = (n_pos, opp_d, corner_in, in_turn_dir, entry_tile, d)
+                            else:
+                                continue
+
+                    for fspan in range(1, max_allowed_span):
+                        if bspan + fspan > max_allowed_span:
+                            break
+                        out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
+                        next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                        fail_out = []
+                        turn_detour = None
+                        if out_pos not in net_surface_tiles[candidate]:
+                            fail_out.append("out_not_in_net")
+                        elif net_surface_tiles[candidate][out_pos] != d and not (
+                            out_pos in machine_input_pins
+                            and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
+                        ):
+                            turn_dir = net_surface_tiles[candidate][out_pos]
+                            if (
+                                not is_fluid
+                                and turn_dir in DIR_STEPS
+                                and abs(turn_dir - d) % 8 == 4
+                            ):
+                                tdx, tdy = DIR_STEPS[turn_dir]
+                                exit_tile = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                                corner_tile = (
+                                    round(exit_tile[0] + tdx, 2),
+                                    round(exit_tile[1] + tdy, 2),
+                                )
+                                next_in_net = (
+                                    round(out_pos[0] + tdx, 2),
+                                    round(out_pos[1] + tdy, 2),
+                                )
+                                if (
+                                    exit_tile not in occupied_positions
+                                    and (
+                                        exit_tile not in pin_tiles
+                                        or (
+                                            exit_tile in valid_input_pins
+                                            and (
+                                                turn_dir == DIRECTION_EAST
+                                                or exit_tile in machine_input_pins
+                                            )
+                                        )
+                                    )
+                                    and exit_tile not in used_underground_endpoints
+                                    and tile_to_nets.get(exit_tile, set()) <= {candidate}
+                                    and corner_tile not in occupied_positions
+                                    and (
+                                        corner_tile not in pin_tiles
+                                        or (
+                                            corner_tile in valid_input_pins
+                                            and (
+                                                opp_d == DIRECTION_EAST
+                                                or corner_tile in machine_input_pins
+                                            )
+                                        )
+                                    )
+                                    and corner_tile not in used_underground_endpoints
+                                    and tile_to_nets.get(corner_tile, set()) <= {candidate}
+                                    and next_in_net in net_surface_tiles[candidate]
+                                ):
+                                    turn_detour = (exit_tile, turn_dir, corner_tile, opp_d)
+                                else:
+                                    fail_out.append(
+                                        f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
+                                    )
+                            else:
+                                fail_out.append(
+                                    f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
+                                )
+                        if len(tile_to_nets.get(out_pos, set())) > 1:
+                            fail_out.append("out_has_conflict")
+                        if out_pos in used_underground_endpoints:
+                            fail_out.append("out_used_endpoint")
+                        if (
+                            out_pos in used_underground_spans_h
+                            or out_pos in used_underground_spans_v
+                        ):
+                            fail_out.append("out_underground_span")
+                        allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
+                        if out_pos in pin_tiles:
+                            allowed = out_pos in allowed_in and (
+                                d == DIRECTION_EAST
+                                or (
+                                    not is_fluid
+                                    and out_pos in machine_input_pins
+                                    and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
+                                )
+                            )
+                            if not allowed:
+                                fail_out.append("out_in_pin_tiles")
+                        if out_pos in occupied_positions:
+                            fail_out.append("out_in_occupied")
+                        if (
+                            turn_detour is None
+                            and used_underground_endpoints.get(next_pos) == opp_d
+                        ):
+                            fail_out.append("out_opp_next")
+                        if fail_out:
+                            continue
+
+                        valid_span = True
+                        conflicts_cleared = 0
+                        invalid_reasons = []
+                        is_horiz = d in (DIRECTION_EAST, DIRECTION_WEST)
+                        for s in range(-bspan + 1, fspan):
+                            it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                            if (
+                                it in net_surface_tiles[candidate]
+                                and net_surface_tiles[candidate][it] != d
+                            ):
+                                valid_span = False
+                                invalid_reasons.append(f"it_dir_mismatch({it})")
+                                break
+                            if it in occupied_positions:
+                                valid_span = False
+                                invalid_reasons.append(f"it_occupied({it})")
+                                break
+                            if it in used_underground_endpoints:
+                                valid_span = False
+                                invalid_reasons.append(f"it_used_endpoint({it})")
+                                break
+                            if is_horiz and it in used_underground_spans_h:
+                                valid_span = False
+                                invalid_reasons.append(f"it_used_span_h({it})")
+                                break
+                            if not is_horiz and it in used_underground_spans_v:
+                                valid_span = False
+                                invalid_reasons.append(f"it_used_span_v({it})")
+                                break
+                            if (
+                                len(tile_to_nets.get(it, set())) > 1
+                                or it in adjacent_fluid_conflicts
+                            ):
+                                conflicts_cleared += 1
+                        if not valid_span:
+                            continue
+
+                        detour_penalty = (20 if turn_detour else 0) + (20 if in_detour else 0)
+                        penalty = (
+                            100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
+                        ) + detour_penalty
+                        score = conflicts_cleared * 50 - penalty - (bspan + fspan)
+                        jump_tuple = (
+                            in_pos,
+                            out_pos,
+                            bspan,
+                            fspan,
+                            d,
+                            is_fluid,
+                            in_detour,
+                            turn_detour,
+                        )
+                        options.append((score, candidate, jump_tuple))
+
+            if options:
+                conflict_options[pos] = options
+
+        if conflict_options:
+            multi_options = [
+                (opt[0], p, opt[1], opt[2])
+                for p in conflict_options
+                for opt in conflict_options[p]
+                if opt[0] >= 80
+            ]
+            if multi_options:
+                _, best_pos, best_candidate, best_jump = max(multi_options, key=lambda x: x[0])
+            else:
+                for p in conflicts:
+                    if p in conflict_options:
+                        best_pos = p
+                        _, best_candidate, best_jump = max(conflict_options[p], key=lambda x: x[0])
+                        break
+
+            cx, cy = best_pos
+
+            in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour = best_jump
+            dx, dy = DIR_STEPS[d]
+            used_underground_endpoints[in_pos] = d
+            used_underground_endpoints[out_pos] = d
+            jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+            span_set = (
+                used_underground_spans_h
+                if d in (DIRECTION_EAST, DIRECTION_WEST)
+                else used_underground_spans_v
+            )
+            for s in range(-bspan + 1, fspan):
+                it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                span_set.add(it)
+                if it in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][it]
+                if best_candidate in tile_to_nets[it]:
+                    tile_to_nets[it].remove(best_candidate)
+            if turn_detour:
+                exit_tile, exit_d, corner_tile, corner_d = turn_detour
+                if out_pos in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][out_pos]
+                if best_candidate in tile_to_nets[out_pos]:
+                    tile_to_nets[out_pos].remove(best_candidate)
+                net_surface_tiles[best_candidate][exit_tile] = exit_d
+                tile_to_nets[exit_tile].add(best_candidate)
+                net_surface_tiles[best_candidate][corner_tile] = corner_d
+                tile_to_nets[corner_tile].add(best_candidate)
+            if in_detour:
+                n_pos, n_dir, corner_in, corner_d, entry_tile, entry_d = in_detour
+                net_surface_tiles[best_candidate][n_pos] = n_dir
+                net_surface_tiles[best_candidate][corner_in] = corner_d
+                tile_to_nets[corner_in].add(best_candidate)
+                net_surface_tiles[best_candidate][entry_tile] = entry_d
+                tile_to_nets[entry_tile].add(best_candidate)
+            resolved_any = True
+        if not resolved_any:
+            break
+
+    for _candidate, in_pos, out_pos, d, is_fluid in jumpers:
+        span = round(abs(out_pos[0] - in_pos[0]) + abs(out_pos[1] - in_pos[1]))
+        if is_fluid:
+            if d == DIRECTION_EAST:
+                d_in, d_out = DIRECTION_WEST, DIRECTION_EAST
+            elif d == DIRECTION_WEST:
+                d_in, d_out = DIRECTION_EAST, DIRECTION_WEST
+            elif d == DIRECTION_SOUTH:
+                d_in, d_out = DIRECTION_NORTH, DIRECTION_SOUTH
+            else:
+                d_in, d_out = DIRECTION_SOUTH, DIRECTION_NORTH
+            underground_entities.append(
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": in_pos[0], "y": in_pos[1]},
+                    "direction": d_in,
+                }
+            )
+            underground_entities.append(
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": out_pos[0], "y": out_pos[1]},
+                    "direction": d_out,
+                }
+            )
+        else:
+            ent_name = choose_belt_tier(span)
+            underground_entities.append(
+                {
+                    "name": ent_name,
+                    "position": {"x": in_pos[0], "y": in_pos[1]},
+                    "direction": d,
+                    "type": "input",
+                }
+            )
+            underground_entities.append(
+                {
+                    "name": ent_name,
+                    "position": {"x": out_pos[0], "y": out_pos[1]},
+                    "direction": d,
+                    "type": "output",
+                }
+            )
+
+    for ue in underground_entities:
+        add_entity(
+            ue["name"],
+            ue["position"]["x"],
+            ue["position"]["y"],
+            direction=ue.get("direction"),
+            extra={"type": ue["type"]} if "type" in ue else None,
+        )
+
+    for nname, tiles in net_surface_tiles.items():
+        is_fluid = is_fluid_wire(net_map.get(nname, {}), "M1")
+        entity_name = "pipe" if is_fluid else "transport-belt"
+        for pos, d in tiles.items():
+            add_entity(entity_name, pos[0], pos[1], direction=d if entity_name != "pipe" else None)
+
+    pin_directions: dict[tuple[float, float], int] = {}
+    forbidden_west_tiles: set[tuple[float, float]] = set()
+
+    for comp in def_data.get("components", []):
+        cname = comp["name"]
+        macro = comp["macro"]
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = inst_map.get(cname, {})
+        cell_id = inst.get("cell", macro)
+        if cell_id == "belt_split2":
+            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_balancer2":
+            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
+            pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_merge2":
+            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
+            pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
+            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
+        elif cell_id == "pump":
+            pin_directions[(round(gx + 0.5, 2), round(gy - 0.5, 2))] = DIRECTION_NORTH
+            pin_directions[(round(gx + 0.5, 2), round(gy + 2.5, 2))] = DIRECTION_NORTH
+        else:
+            cell = cell_map.get(cell_id, {})
+            w = float(cell.get("width", 3))
+            h = float(cell.get("height", 3))
+            inputs = cell.get("inputs", [])
+            outputs = cell.get("outputs", [])
+            in_slots, out_slots = get_macro_port_slots(cell)
+            for idx, port in enumerate(inputs):
+                cy = (
+                    in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx)
+                    + 0.5
+                )
+                pin_directions[(round(gx - 0.5, 2), round(gy + cy, 2))] = DIRECTION_EAST
+            for idx, port in enumerate(outputs):
+                cy = (
+                    out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
+                    + 0.5
+                )
+                forbidden_west_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+
+            machine = cell.get("machine", "")
+            if machine == "rocket-silo" or "rocket-silo" in cell_id or "rocket_silo" in macro:
+                mid_pickup_pos = (round(gx - 0.5, 2), round(gy + 4.5, 2))
+                if mid_pickup_pos not in grid_entities:
+                    add_entity(
+                        "transport-belt",
+                        mid_pickup_pos[0],
+                        mid_pickup_pos[1],
+                        direction=DIRECTION_EAST,
+                    )
+                else:
+                    pin_directions[mid_pickup_pos] = DIRECTION_EAST
+
+                mid_turn_pos = (round(gx - 1.5, 2), round(gy + 4.5, 2))
+                if mid_turn_pos not in grid_entities:
+                    add_entity(
+                        "transport-belt",
+                        mid_turn_pos[0],
+                        mid_turn_pos[1],
+                        direction=DIRECTION_EAST,
+                    )
+                else:
+                    pin_directions[mid_turn_pos] = DIRECTION_EAST
+
+    for pos, req_dir in pin_directions.items():
+        if pos in grid_entities and "transport-belt" in grid_entities[pos].get("name", ""):
+            grid_entities[pos]["direction"] = req_dir
+
+    for pos in forbidden_west_tiles:
+        if (
+            pos in grid_entities
+            and "transport-belt" in grid_entities[pos].get("name", "")
+            and grid_entities[pos].get("direction") == DIRECTION_WEST
+        ):
+            grid_entities[pos]["direction"] = DIRECTION_EAST
+
+    grid_ents = {(round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities}
+    for pos, ent in grid_ents.items():
+        if "transport-belt" not in ent.get("name", ""):
+            continue
+        d = ent.get("direction", 0)
+        if d not in DIR_STEPS:
+            continue
+        dx, dy = DIR_STEPS[d]
+        tpos = (round(pos[0] + dx, 2), round(pos[1] + dy, 2))
+        if tpos in grid_ents:
+            target = grid_ents[tpos]
+            if "transport-belt" in target.get("name", ""):
+                td = target.get("direction", 0)
+                diff = abs(td - d) % 16
+                if diff in (4, 12):
+                    tdx, tdy = DIR_STEPS.get(td, (0, 0))
+                    behind_pos = (round(tpos[0] - tdx, 2), round(tpos[1] - tdy, 2))
+                    if behind_pos in grid_ents and "transport-belt" in grid_ents[behind_pos].get(
+                        "name", ""
+                    ):
+                        from_nets = tile_to_nets.get(pos, set())
+                        target_nets = tile_to_nets.get(tpos, set())
+                        from_mats = {n.split("__")[0] for n in from_nets}
+                        target_mats = {n.split("__")[0] for n in target_nets}
+                        if from_mats and target_mats and not from_mats.intersection(target_mats):
+                            net = next(iter(from_nets))
+                            for cand_d, (cdx, cdy) in DIR_STEPS.items():
+                                np = (round(pos[0] + cdx, 2), round(pos[1] + cdy, 2))
+                                if net in tile_to_nets.get(np, set()) and np != tpos:
+                                    ent["direction"] = cand_d
+                                    break
+
+    return RouteResult(
+        net_surface_tiles=net_surface_tiles,
+        tile_to_nets=tile_to_nets,
+        adjacent_fluid_conflicts=adjacent_fluid_conflicts,
+        pin_tiles=pin_tiles,
+        valid_input_pins=valid_input_pins,
+        valid_output_pins=valid_output_pins,
+    )
