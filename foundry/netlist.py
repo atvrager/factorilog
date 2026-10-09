@@ -244,9 +244,21 @@ def build(
     )
     # Some demanded items feed other recipes. They must still leave the
     # block, so an output is any demand item with a driver.
-    raw_materials = set(raw.keys())
+    # Order input ports by reverse recipe DAG depth (higher depth intermediates before lower depth base inputs)
+    depths: dict[str, int] = dict.fromkeys(raw, 0)
+    changed = True
+    while changed:
+        changed = False
+        for cell in nl.cells.values():
+            in_depth = max((depths.get(p, 0) for p in cell.get("inputs", [])), default=0)
+            for out_p in cell.get("outputs", []):
+                new_d = in_depth + 1
+                if new_d > depths.get(out_p, 0):
+                    depths[out_p] = new_d
+                    changed = True
+
     for cell in nl.cells.values():
-        cell["inputs"] = sorted(cell["inputs"], key=lambda p: (1 if p in raw_materials else 0, p))
+        cell["inputs"] = sorted(cell["inputs"], key=lambda p: (depths.get(p, 0), p))
     return nl
 
 

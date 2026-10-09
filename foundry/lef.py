@@ -146,8 +146,7 @@ def _input_pin_rect(
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
-        machine = cell.get("machine", "")
-        if port and machine in ("chemical-plant", "oil-refinery"):
+        if port:
             in_slots, _ = get_macro_port_slots(cell)
             if port in in_slots and in_slots[port] < height:
                 cy = in_slots[port] + 0.5
@@ -174,8 +173,7 @@ def _output_pin_rect(
         offset = (height - total) // 2
         tile_y = offset + idx
         cy = tile_y + 0.5
-        machine = cell.get("machine", "")
-        if port and machine in ("chemical-plant", "oil-refinery"):
+        if port:
             _, out_slots = get_macro_port_slots(cell)
             if port in out_slots and out_slots[port] < height:
                 cy = out_slots[port] + 0.5

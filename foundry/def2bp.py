@@ -20,6 +20,7 @@ try:
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
     from foundry.def_untangle import (
         fix_reverse_splitter_inputs,
+        untangle_machine_inputs,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -45,6 +46,7 @@ except ImportError:
     from def_parser import extract_pins, merge_collinear_wires, parse_def
     from def_untangle import (
         fix_reverse_splitter_inputs,
+        untangle_machine_inputs,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -82,6 +84,7 @@ __all__ = [
     "merge_collinear_wires",
     "parse_def",
     "prune_dead_end_belts",
+    "untangle_machine_inputs",
     "untangle_merger_inputs",
     "untangle_splitter_outputs",
 ]
@@ -93,9 +96,11 @@ def build_entities(
     strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
-    # 1. Untangle symmetric splitter outputs and inputs
+    # 1. Untangle symmetric splitter outputs, inputs, and commutative machine inputs
     untangle_splitter_outputs(def_data)
+    untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
+    untangle_machine_inputs(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 

@@ -61,6 +61,7 @@ def route_and_resolve_jumpers(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     placement: PlacementResult,
+    debug_trace: dict[tuple[float, float], list[dict[str, Any]]] | None = None,
 ) -> RouteResult:
     """Rasterize DEF routes and resolve surface crossings with underground jumpers."""
     scale = 1.0 / float(def_data.get("units", 1000))
@@ -766,6 +767,7 @@ def route_and_resolve_jumpers(
             options: list[tuple[float, str, Any]] = []
 
             for candidate in net_list:
+                is_fluid = is_fluid_wire(net_map.get(candidate, {}), "M1")
                 d = net_surface_tiles[candidate].get(pos)
                 if d not in DIR_STEPS:
                     continue
@@ -799,7 +801,7 @@ def route_and_resolve_jumpers(
                             d == DIRECTION_EAST
                             or (
                                 not is_fluid
-                                and in_pos in machine_output_pins
+                                and in_pos in allowed_out
                                 and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
                             )
                         )
@@ -810,6 +812,21 @@ def route_and_resolve_jumpers(
                     if used_underground_endpoints.get(prev_pos) == opp_d:
                         fail_in.append("opp_prev")
                     if fail_in:
+                        if debug_trace is not None:
+                            debug_trace.setdefault(pos, []).append(
+                                {
+                                    "candidate": candidate,
+                                    "dir": d,
+                                    "bspan": bspan,
+                                    "fspan": None,
+                                    "in_pos": in_pos,
+                                    "out_pos": None,
+                                    "fail_in": list(fail_in),
+                                    "fail_out": [],
+                                    "valid_span": False,
+                                    "invalid_reasons": [],
+                                }
+                            )
                         continue
 
                     in_detour = None
@@ -827,20 +844,46 @@ def route_and_resolve_jumpers(
                         if side_feed:
                             corner_in = (round(n_pos[0] - dx, 2), round(n_pos[1] - dy, 2))
                             entry_tile = prev_pos
-                            if (
-                                in_turn_dir is not None
-                                and abs(in_turn_dir - d) % 8 == 4
-                                and corner_in not in occupied_positions
-                                and (corner_in not in pin_tiles or corner_in in valid_output_pins)
-                                and corner_in not in used_underground_endpoints
-                                and tile_to_nets.get(corner_in, set()) <= {candidate}
-                                and entry_tile not in occupied_positions
-                                and entry_tile not in pin_tiles
-                                and entry_tile not in used_underground_endpoints
-                                and tile_to_nets.get(entry_tile, set()) <= {candidate}
-                            ):
+                            detour_fails = []
+                            if in_turn_dir is None or abs(in_turn_dir - d) % 8 != 4:
+                                detour_fails.append(f"turn_dir({in_turn_dir})")
+                            if corner_in in occupied_positions:
+                                detour_fails.append(f"corner_in_occ({corner_in})")
+                            if corner_in in pin_tiles and corner_in not in valid_output_pins:
+                                detour_fails.append(f"corner_in_pin({corner_in})")
+                            if corner_in in used_underground_endpoints:
+                                detour_fails.append(f"corner_in_ug({corner_in})")
+                            if not (tile_to_nets.get(corner_in, set()) <= {candidate}):
+                                detour_fails.append(f"corner_in_net({tile_to_nets.get(corner_in)})")
+                            if entry_tile in occupied_positions:
+                                detour_fails.append(f"entry_occ({entry_tile})")
+                            if entry_tile in pin_tiles:
+                                detour_fails.append(f"entry_pin({entry_tile})")
+                            if entry_tile in used_underground_endpoints:
+                                detour_fails.append(f"entry_ug({entry_tile})")
+                            if not (tile_to_nets.get(entry_tile, set()) <= {candidate}):
+                                detour_fails.append(f"entry_net({tile_to_nets.get(entry_tile)})")
+
+                            if not detour_fails:
                                 in_detour = (n_pos, opp_d, corner_in, in_turn_dir, entry_tile, d)
                             else:
+                                if debug_trace is not None:
+                                    debug_trace.setdefault(pos, []).append(
+                                        {
+                                            "candidate": candidate,
+                                            "dir": d,
+                                            "bspan": bspan,
+                                            "fspan": None,
+                                            "in_pos": in_pos,
+                                            "out_pos": None,
+                                            "fail_in": [
+                                                f"in_detour_blocked:{','.join(detour_fails)}"
+                                            ],
+                                            "fail_out": [],
+                                            "valid_span": False,
+                                            "invalid_reasons": [],
+                                        }
+                                    )
                                 continue
 
                     for fspan in range(1, max_allowed_span):
@@ -872,6 +915,24 @@ def route_and_resolve_jumpers(
                                     round(out_pos[0] + tdx, 2),
                                     round(out_pos[1] + tdy, 2),
                                 )
+                                next_in_net_dir = net_surface_tiles[candidate].get(next_in_net)
+                                if next_in_net_dir == d:
+                                    target_corner_d = d
+                                    bypass_tile = next_in_net
+                                    downstream_ok = (
+                                        corner_tile in net_surface_tiles[candidate]
+                                        or corner_tile in valid_input_pins
+                                        or (
+                                            round(corner_tile[0] + dx, 2),
+                                            round(corner_tile[1] + dy, 2),
+                                        )
+                                        in net_surface_tiles[candidate]
+                                    )
+                                else:
+                                    target_corner_d = opp_d
+                                    bypass_tile = None
+                                    downstream_ok = next_in_net in net_surface_tiles[candidate]
+
                                 if (
                                     exit_tile not in occupied_positions
                                     and (
@@ -892,16 +953,22 @@ def route_and_resolve_jumpers(
                                         or (
                                             corner_tile in valid_input_pins
                                             and (
-                                                opp_d == DIRECTION_EAST
+                                                target_corner_d == DIRECTION_EAST
                                                 or corner_tile in machine_input_pins
                                             )
                                         )
                                     )
                                     and corner_tile not in used_underground_endpoints
                                     and tile_to_nets.get(corner_tile, set()) <= {candidate}
-                                    and next_in_net in net_surface_tiles[candidate]
+                                    and downstream_ok
                                 ):
-                                    turn_detour = (exit_tile, turn_dir, corner_tile, opp_d)
+                                    turn_detour = (
+                                        exit_tile,
+                                        turn_dir,
+                                        corner_tile,
+                                        target_corner_d,
+                                        bypass_tile,
+                                    )
                                 else:
                                     fail_out.append(
                                         f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
@@ -935,10 +1002,31 @@ def route_and_resolve_jumpers(
                             fail_out.append("out_in_occupied")
                         if (
                             turn_detour is None
+                            and out_pos not in pin_tiles
+                            and next_pos not in net_surface_tiles[candidate]
+                        ):
+                            fail_out.append("out_next_not_in_net")
+                        if (
+                            turn_detour is None
                             and used_underground_endpoints.get(next_pos) == opp_d
                         ):
                             fail_out.append("out_opp_next")
                         if fail_out:
+                            if debug_trace is not None:
+                                debug_trace.setdefault(pos, []).append(
+                                    {
+                                        "candidate": candidate,
+                                        "dir": d,
+                                        "bspan": bspan,
+                                        "fspan": fspan,
+                                        "in_pos": in_pos,
+                                        "out_pos": out_pos,
+                                        "fail_in": [],
+                                        "fail_out": list(fail_out),
+                                        "valid_span": False,
+                                        "invalid_reasons": [],
+                                    }
+                                )
                             continue
 
                         valid_span = True
@@ -976,6 +1064,21 @@ def route_and_resolve_jumpers(
                             ):
                                 conflicts_cleared += 1
                         if not valid_span:
+                            if debug_trace is not None:
+                                debug_trace.setdefault(pos, []).append(
+                                    {
+                                        "candidate": candidate,
+                                        "dir": d,
+                                        "bspan": bspan,
+                                        "fspan": fspan,
+                                        "in_pos": in_pos,
+                                        "out_pos": out_pos,
+                                        "fail_in": [],
+                                        "fail_out": [],
+                                        "valid_span": False,
+                                        "invalid_reasons": list(invalid_reasons),
+                                    }
+                                )
                             continue
 
                         detour_penalty = (20 if turn_detour else 0) + (20 if in_detour else 0)
@@ -994,6 +1097,22 @@ def route_and_resolve_jumpers(
                             turn_detour,
                         )
                         options.append((score, candidate, jump_tuple))
+                        if debug_trace is not None:
+                            debug_trace.setdefault(pos, []).append(
+                                {
+                                    "candidate": candidate,
+                                    "dir": d,
+                                    "bspan": bspan,
+                                    "fspan": fspan,
+                                    "in_pos": in_pos,
+                                    "out_pos": out_pos,
+                                    "fail_in": [],
+                                    "fail_out": [],
+                                    "valid_span": True,
+                                    "invalid_reasons": [],
+                                    "score": score,
+                                }
+                            )
 
             if options:
                 conflict_options[pos] = options
@@ -1021,6 +1140,20 @@ def route_and_resolve_jumpers(
             used_underground_endpoints[in_pos] = d
             used_underground_endpoints[out_pos] = d
             jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+            if debug_trace is not None:
+                debug_trace.setdefault(best_pos, []).append(
+                    {
+                        "action": "jump_committed",
+                        "candidate": best_candidate,
+                        "in_pos": in_pos,
+                        "out_pos": out_pos,
+                        "dir": d,
+                        "bspan": bspan,
+                        "fspan": fspan,
+                        "turn_detour": turn_detour is not None,
+                        "in_detour": in_detour is not None,
+                    }
+                )
             span_set = (
                 used_underground_spans_h
                 if d in (DIRECTION_EAST, DIRECTION_WEST)
@@ -1034,11 +1167,16 @@ def route_and_resolve_jumpers(
                 if best_candidate in tile_to_nets[it]:
                     tile_to_nets[it].remove(best_candidate)
             if turn_detour:
-                exit_tile, exit_d, corner_tile, corner_d = turn_detour
+                exit_tile, exit_d, corner_tile, corner_d, bypass_tile = turn_detour
                 if out_pos in net_surface_tiles[best_candidate]:
                     del net_surface_tiles[best_candidate][out_pos]
                 if best_candidate in tile_to_nets[out_pos]:
                     tile_to_nets[out_pos].remove(best_candidate)
+                if bypass_tile:
+                    if bypass_tile in net_surface_tiles[best_candidate]:
+                        del net_surface_tiles[best_candidate][bypass_tile]
+                    if best_candidate in tile_to_nets[bypass_tile]:
+                        tile_to_nets[bypass_tile].remove(best_candidate)
                 net_surface_tiles[best_candidate][exit_tile] = exit_d
                 tile_to_nets[exit_tile].add(best_candidate)
                 net_surface_tiles[best_candidate][corner_tile] = corner_d

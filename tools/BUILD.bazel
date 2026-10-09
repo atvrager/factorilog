@@ -22,6 +22,37 @@ py_binary(
     main = "ste-lint.py",
 )
 
+py_binary(
+    name = "debug_drc",
+    srcs = ["debug_drc.py"],
+    main = "debug_drc.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_binary(
+    name = "inspect_def",
+    srcs = ["inspect_def.py"],
+    main = "inspect_def.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "inspect_def_test",
+    size = "small",
+    srcs = [
+        "inspect_def.py",
+        "test_inspect_def.py",
+    ],
+    main = "test_inspect_def.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
 py_test(
     name = "ste_lint_test",
     size = "small",
