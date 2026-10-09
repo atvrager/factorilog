@@ -63,6 +63,17 @@ py_binary(
     ],
 )
 
+py_library(
+    name = "test_factory_lib",
+    srcs = ["test_factory.py"],
+)
+
+py_binary(
+    name = "test_factory",
+    srcs = ["test_factory.py"],
+    main = "test_factory.py",
+)
+
 # 1. Synthesis Stage: dump fixture -> Verilog, LEF, Liberty, JSON
 factorilog_synth(
     name = "synth",

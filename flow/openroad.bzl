@@ -480,6 +480,96 @@ factorilog_timing_summary = rule(
 )
 
 
+def _factorilog_factory_test_impl(ctx):
+    runner = ctx.executable._test_runner
+    save_zip = ctx.file.save_zip
+    expected_item = ctx.attr.expected_item
+    min_produced = ctx.attr.min_produced
+    ticks = ctx.attr.ticks
+    min_active_ratio = ctx.attr.min_active_ratio
+    max_area = ctx.attr.max_area
+    min_slack = ctx.attr.min_slack
+    def_file = ctx.file.def_file
+    sta_rpt = ctx.file.sta_rpt
+    drc_rpt = ctx.file.drc_rpt
+
+    inputs = [save_zip]
+    extra_flags = []
+    if def_file:
+        inputs.append(def_file)
+        extra_flags.append('--def-file "${PREFIX}%s"' % def_file.short_path)
+    if max_area and max_area != "0.0":
+        extra_flags.append("--max-area %s" % max_area)
+    if sta_rpt:
+        inputs.append(sta_rpt)
+        extra_flags.append('--sta-rpt "${PREFIX}%s"' % sta_rpt.short_path)
+        extra_flags.append("--min-slack %s" % min_slack)
+    if drc_rpt:
+        inputs.append(drc_rpt)
+        extra_flags.append('--drc-rpt "${PREFIX}%s"' % drc_rpt.short_path)
+
+    extra_str = " ".join(extra_flags)
+
+    script = """#!/bin/bash
+set -euo pipefail
+RUNFILES="${PYTHON_RUNFILES:-${TEST_SRCDIR:-}}"
+PREFIX=""
+if [ -n "$RUNFILES" ] && [ -d "$RUNFILES/_main" ]; then
+    PREFIX="$RUNFILES/_main/"
+elif [ -d "${0}.runfiles/_main" ]; then
+    PREFIX="${0}.runfiles/_main/"
+fi
+
+RUNNER="${PREFIX}%s"
+SAVE="${PREFIX}%s"
+
+exec "$RUNNER" --save "$SAVE" --expected-item "%s" --min-produced %d --ticks %d --min-active-ratio %s %s "$@"
+""" % (
+        runner.short_path,
+        save_zip.short_path,
+        expected_item,
+        min_produced,
+        ticks,
+        min_active_ratio,
+        extra_str,
+    )
+
+    ctx.actions.write(
+        output = ctx.outputs.executable,
+        content = script,
+        is_executable = True,
+    )
+
+    runfiles = ctx.runfiles(
+        files = inputs,
+        transitive_files = ctx.attr._test_runner[DefaultInfo].default_runfiles.files,
+    )
+    return [DefaultInfo(executable = ctx.outputs.executable, runfiles = runfiles)]
+
+factorilog_factory_test = rule(
+    implementation = _factorilog_factory_test_impl,
+    test = True,
+    attrs = {
+        "save_zip": attr.label(allow_single_file = [".zip"], mandatory = True, doc = "Playable Factorio save file (.zip)"),
+        "expected_item": attr.string(default = "automation-science-pack", doc = "Expected science pack or item name"),
+        "min_produced": attr.int(default = 20, doc = "Minimum produced item count"),
+        "ticks": attr.int(default = 7200, doc = "Simulation ticks"),
+        "min_active_ratio": attr.string(default = "0.70", doc = "Minimum machine activity ratio"),
+        "def_file": attr.label(allow_single_file = [".def"], doc = "Routed DEF file"),
+        "max_area": attr.string(default = "0.0", doc = "Maximum allowed tile area"),
+        "sta_rpt": attr.label(allow_single_file = [".rpt"], doc = "STA timing report"),
+        "min_slack": attr.string(default = "0.0", doc = "Minimum allowed timing slack"),
+        "drc_rpt": attr.label(allow_single_file = [".rpt"], doc = "Routing DRC report"),
+        "_test_runner": attr.label(
+            default = Label("//flow:test_factory"),
+            executable = True,
+            cfg = "target",
+        ),
+    },
+    doc = "Runs automated regression tests on physical factory throughput and metrics.",
+)
+
+
 def factorilog_science_factory(
         name,
         demand,
@@ -589,4 +679,25 @@ def factorilog_science_factory(
             ":" + name + "_timing.json",
         ],
         tags = merged_tags,
+    )
+
+    test_name = name + "_test"
+    demand_tokens = demand.split(" ")
+    primary_item = demand_tokens[0] if demand_tokens else "automation-science-pack"
+    test_tags = list(merged_tags)
+    for t in ("local", "no-sandbox"):
+        if t not in test_tags:
+            test_tags.append(t)
+
+    factorilog_factory_test(
+        name = test_name,
+        save_zip = ":" + name + ".zip",
+        expected_item = primary_item,
+        min_produced = 20,
+        ticks = 7200,
+        min_active_ratio = "0.70",
+        def_file = ":" + name + ".def",
+        drc_rpt = ":" + name + "_route_drc.rpt",
+        sta_rpt = ":" + name + "_sta.rpt",
+        tags = test_tags,
     )

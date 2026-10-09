@@ -302,6 +302,9 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
                 "rocket-silo",
                 "inserter",
                 "pump",
+                "combinator",
+                "lab",
+                "radar",
             )
         )
     ]
@@ -684,7 +687,7 @@ def prune_dead_end_belts(
                     dx, dy = dirs[d]
                     target = (round(out_pos[0] + dx, 1), round(out_pos[1] + dy, 1))
                     reaches = False
-                    if target in sinks:
+                    if out_pos in sinks or in_pos in sinks or target in sinks:
                         reaches = True
                     elif target in active_belts:
                         td = active_belts[target].get("direction", DIRECTION_NORTH)
@@ -780,14 +783,17 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                     n_y2 = n
         if not n_y1 or not n_y2:
             continue
-        py1 = (int(round((gx + 0.75) * 1000)), int(round((gy + 0.5) * 1000)))
-        py2 = (int(round((gx + 0.75) * 1000)), int(round((gy + 1.5) * 1000)))
+        py1 = (round((gx + 0.75) * 1000), round((gy + 0.5) * 1000))
+        py2 = (round((gx + 0.75) * 1000), round((gy + 1.5) * 1000))
         w1 = next(
             (
                 w
                 for w in n_y1.get("wires", [])
                 if w.get("layer") == "M1"
-                and ((w["x1"] == py1[0] and w["y1"] == py1[1]) or (w["x2"] == py1[0] and w["y2"] == py1[1]))
+                and (
+                    (w["x1"] == py1[0] and w["y1"] == py1[1])
+                    or (w["x2"] == py1[0] and w["y2"] == py1[1])
+                )
             ),
             None,
         )
@@ -796,7 +802,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                 w
                 for w in n_y2.get("wires", [])
                 if w.get("layer") == "M1"
-                and ((w["x1"] == py2[0] and w["y1"] == py2[1]) or (w["x2"] == py2[0] and w["y2"] == py2[1]))
+                and (
+                    (w["x1"] == py2[0] and w["y1"] == py2[1])
+                    or (w["x2"] == py2[0] and w["y2"] == py2[1])
+                )
             ),
             None,
         )
@@ -809,7 +818,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                 w
                 for w in n_y1.get("wires", [])
                 if w.get("layer") == "M2"
-                and ((w["x1"] == end1[0] and w["y1"] == end1[1]) or (w["x2"] == end1[0] and w["y2"] == end1[1]))
+                and (
+                    (w["x1"] == end1[0] and w["y1"] == end1[1])
+                    or (w["x2"] == end1[0] and w["y2"] == end1[1])
+                )
             ),
             None,
         )
@@ -818,7 +830,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                 w
                 for w in n_y2.get("wires", [])
                 if w.get("layer") == "M2"
-                and ((w["x1"] == end2[0] and w["y1"] == end2[1]) or (w["x2"] == end2[0] and w["y2"] == end2[1]))
+                and (
+                    (w["x1"] == end2[0] and w["y1"] == end2[1])
+                    or (w["x2"] == end2[0] and w["y2"] == end2[1])
+                )
             ),
             None,
         )
@@ -829,11 +844,9 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
         other_y2 = m2_2["y2"] if m2_2["y1"] == end2[1] else m2_2["y1"]
         dy2 = "N" if other_y2 < end2[1] else "S"
 
-        cross = False
-        if dy1 == "N" and dy2 == "N" and end2[0] < end1[0]:
-            cross = True
-        elif dy1 == "S" and dy2 == "S" and end1[0] < end2[0]:
-            cross = True
+        cross = (dy1 == "N" and dy2 == "N" and end2[0] < end1[0]) or (
+            dy1 == "S" and dy2 == "S" and end1[0] < end2[0]
+        )
 
         if not cross:
             continue
@@ -858,13 +871,13 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
 
         wires1 = [w for w in n_y1["wires"] if w is not w1]
         wires2 = [w for w in n_y2["wires"] if w is not w2]
-        n_y1["wires"] = [w1] + wires2
-        n_y2["wires"] = [w2] + wires1
+        n_y1["wires"] = [w1, *wires2]
+        n_y2["wires"] = [w2, *wires1]
 
         conns1 = [conn for conn in n_y1.get("connections", []) if conn[0] != name]
         conns2 = [conn for conn in n_y2.get("connections", []) if conn[0] != name]
-        n_y1["connections"] = [(name, "y1")] + conns2
-        n_y2["connections"] = [(name, "y2")] + conns1
+        n_y1["connections"] = [(name, "y1"), *conns2]
+        n_y2["connections"] = [(name, "y2"), *conns1]
 
 
 def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
@@ -1814,8 +1827,6 @@ def build_entities(
             valid_output_pins.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
 
     while True:
-
-
         conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
         adjacent_fluid_conflicts = set()
         for pos, nets in tile_to_nets.items():
@@ -1851,7 +1862,7 @@ def build_entities(
                 if d not in DIR_STEPS:
                     continue
                 dx, dy = DIR_STEPS[d]
-                opp_d = OPPOSITE_DIR.get(d)
+                opp_d = OPPOSITE_DIR[d]
                 max_belt_span = (
                     max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
                 )
@@ -1879,7 +1890,6 @@ def build_entities(
                         fail_in.append("opp_prev")
                     if fail_in:
                         continue
-
 
                     in_detour = None
                     if not is_fluid:
@@ -1967,12 +1977,13 @@ def build_entities(
                             fail_out.append("out_in_pin_tiles")
                         if out_pos in occupied_positions:
                             fail_out.append("out_in_occupied")
-                        if turn_detour is None and used_underground_endpoints.get(next_pos) == opp_d:
+                        if (
+                            turn_detour is None
+                            and used_underground_endpoints.get(next_pos) == opp_d
+                        ):
                             fail_out.append("out_opp_next")
                         if fail_out:
                             continue
-
-
 
                         # Verify straight run
                         valid_span = True
@@ -2005,11 +2016,22 @@ def build_entities(
                             continue
 
                         detour_penalty = (20 if turn_detour else 0) + (20 if in_detour else 0)
-                        penalty = (100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0) + detour_penalty
+                        penalty = (
+                            100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
+                        ) + detour_penalty
                         score = conflicts_cleared * 10 - penalty - (bspan + fspan)
                         if score > best_score:
                             best_score = score
-                            best_jump = (in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour)
+                            best_jump = (
+                                in_pos,
+                                out_pos,
+                                bspan,
+                                fspan,
+                                d,
+                                is_fluid,
+                                in_detour,
+                                turn_detour,
+                            )
                             best_candidate = candidate
 
             if best_jump and best_candidate:
@@ -2044,7 +2066,6 @@ def build_entities(
                 resolved_any = True
         if not resolved_any:
             break
-
 
     # Add underground jumpers to underground_entities
     for _candidate, in_pos, out_pos, d, is_fluid in jumpers:
@@ -2237,6 +2258,9 @@ def build_entities(
                 "rocket-silo",
                 "inserter",
                 "pump",
+                "combinator",
+                "lab",
+                "radar",
             )
         )
     ]

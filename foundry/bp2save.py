@@ -19,9 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_GAME_PATH = Path(
-    os.path.expanduser("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio")
-)
+DEFAULT_GAME_PATH = Path("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio").expanduser()
 
 
 def find_factorio_binary(override: Path | None = None) -> Path:
@@ -473,7 +471,9 @@ def main() -> int:
         }
         args.time_file.write_text(json.dumps(timing_data, indent=2) + "\n")
 
-    print(f"Generated save file: {args.out_file} ({args.out_file.stat().st_size} bytes in {elapsed}s)")
+    print(
+        f"Generated save file: {args.out_file} ({args.out_file.stat().st_size} bytes in {elapsed}s)"
+    )
     return 0
 
 

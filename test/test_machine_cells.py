@@ -498,11 +498,11 @@ class TestMachineCells(unittest.TestCase):
         self.run_machine_cell_e2e(
             machine_name="centrifuge",
             recipe_name="uranium-processing",
-            input_feeds={"uranium-ore": 20},
+            input_feeds={"uranium-ore": 30},
             expected_output_item="uranium-238",
             expected_output_count=1,
             demand_rate=5.0,
-            ticks=1800,
+            ticks=2200,
         )
 
     def test_cell_rocket_silo(self) -> None:
@@ -630,10 +630,10 @@ class TestMachineCells(unittest.TestCase):
             storage.revived = revived
 
             local poles = surface.find_entities_filtered{{name = "medium-electric-pole"}}
-            if #poles > 0 then
+            for _, p in ipairs(poles) do
                 surface.create_entity{{
                     name = "electric-energy-interface",
-                    position = {{poles[1].position.x, poles[1].position.y - 1}},
+                    position = {{p.position.x, p.position.y - 1}},
                     force = "player"
                 }}
             end
