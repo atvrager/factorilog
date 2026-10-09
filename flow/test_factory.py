@@ -156,18 +156,88 @@ script.on_event(defines.events.on_tick, function(event)
 
         local asms = surface.find_entities_filtered{{type = "assembling-machine"}}
         local active_asms = 0
+        local productive_asms = 0
+        local zero_prod = {{}}
         for _, a in ipairs(asms) do
             if a.is_crafting() then active_asms = active_asms + 1 end
+            local pf = a.products_finished or 0
+            if pf > 0 then
+                productive_asms = productive_asms + 1
+            else
+                local rec = a.get_recipe()
+                local sname = tostring(a.status)
+                for k, v in pairs(defines.entity_status) do
+                    if v == a.status then sname = k break end
+                end
+                log(string.format("ZERO_PROD_ASM: at (%.1f,%.1f) recipe=%s status=%s energy=%.1f",
+                    a.position.x, a.position.y,
+                    tostring(rec and rec.name),
+                    sname,
+                    a.energy
+                ))
+                local inserters = surface.find_entities_filtered{{type = "inserter"}}
+                for _, ins in ipairs(inserters) do
+                    if math.abs(ins.drop_position.x - a.position.x) <= 2.0 and math.abs(ins.drop_position.y - a.position.y) <= 2.0 then
+                        local held = ins.held_stack.valid_for_read and ins.held_stack.name or "empty"
+                        local ptx = math.floor(ins.pickup_position.x) + 0.5
+                        local pty = math.floor(ins.pickup_position.y) + 0.5
+                        local belt_ents = surface.find_entities_filtered{{position = {{ptx, pty}}}}
+                        local b_info = "no_belt"
+                        for _, be in ipairs(belt_ents) do
+                            if be.type == "transport-belt" then
+                                local c1 = be.get_transport_line(1).get_item_count()
+                                local c2 = be.get_transport_line(2).get_item_count()
+                                b_info = string.format("belt dir=%s items=%d+%d", tostring(be.direction), c1, c2)
+                            end
+                        end
+                        log(string.format("  INSERTER at (%.1f,%.1f) dir=%s held=%s pickup=(%.1f,%.1f) %s",
+                            ins.position.x, ins.position.y, tostring(ins.direction), held, ptx, pty, b_info
+                        ))
+                    end
+                end
+                local splitters = surface.find_entities_filtered{{type = "splitter"}}
+                for _, sp in ipairs(splitters) do
+                    local lines_info = {{}}
+                    for li = 1, 8 do
+                        local tl = sp.get_transport_line(li)
+                        if tl and tl.get_item_count() > 0 then
+                            table.insert(lines_info, string.format("L%d=%d", li, tl.get_item_count()))
+                        end
+                    end
+                    log(string.format("SPLITTER at (%.1f,%.1f) dir=%s contents=[%s]",
+                        sp.position.x, sp.position.y, tostring(sp.direction), table.concat(lines_info, ",")
+                    ))
+                end
+                local belts = surface.find_entities_filtered{{type = "transport-belt"}}
+                local belts_with_items = {{}}
+                for _, b in ipairs(belts) do
+                    local c1 = b.get_transport_line(1).get_item_count()
+                    local c2 = b.get_transport_line(2).get_item_count()
+                    if c1 + c2 > 0 then
+                        table.insert(belts_with_items, string.format("(%.1f,%.1f:d=%d:%d+%d)", b.position.x, b.position.y, b.direction, c1, c2))
+                    end
+                end
+                log(string.format("BELTS_WITH_ITEMS (%d total): %s", #belts_with_items, table.concat(belts_with_items, " ")))
+                table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", a.name, a.position.x, a.position.y))
+            end
         end
 
         local furnaces = surface.find_entities_filtered{{type = "furnace"}}
         local active_furnaces = 0
+        local productive_furnaces = 0
         for _, f in ipairs(furnaces) do
             if f.is_crafting() then active_furnaces = active_furnaces + 1 end
+            local pf = f.products_finished or 0
+            if pf > 0 then
+                productive_furnaces = productive_furnaces + 1
+            else
+                table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", f.name, f.position.x, f.position.y))
+            end
         end
 
         local total_machines = #asms + #furnaces
         local active_machines = active_asms + active_furnaces
+        local productive_machines = productive_asms + productive_furnaces
         local active_ratio = total_machines > 0 and (active_machines / total_machines) or 0.0
 
         local check_types = {{"assembling-machine", "furnace", "inserter"}}
@@ -180,9 +250,10 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
 
+        local zero_prod_str = table.concat(zero_prod, "; ")
         log(string.format(
-            "FACTORY_TEST_RESULT: item=%s produced=%d active=%d/%d ratio=%.3f unpowered=%d",
-            "{expected_item}", produced, active_machines, total_machines, active_ratio, unpowered
+            "FACTORY_TEST_RESULT: item=%s produced=%d active=%d/%d ratio=%.3f productive=%d/%d unpowered=%d zero_prod=[%s]",
+            "{expected_item}", produced, active_machines, total_machines, active_ratio, productive_machines, total_machines, unpowered, zero_prod_str
         ))
     end
 end)
@@ -218,11 +289,11 @@ end)
         raise FileNotFoundError(f"Simulation log not written at {log_file}")
 
     log_text = log_file.read_text(encoding="utf-8")
-    result_line = None
     for line in log_text.splitlines():
+        if "ZERO_PROD_ASM:" in line or "INSERTER at" in line or "SPLITTER at" in line:
+            print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:
             result_line = line
-            break
 
     if not result_line:
         raise RuntimeError(f"No FACTORY_TEST_RESULT found in simulation log.\nLOG:\n{log_text}")
@@ -230,14 +301,18 @@ end)
     m_prod = re.search(r"produced=(\d+)", result_line)
     m_active = re.search(r"active=(\d+)/(\d+)", result_line)
     m_ratio = re.search(r"ratio=([\d.]+)", result_line)
+    m_productive = re.search(r"productive=(\d+)/(\d+)", result_line)
     m_unpowered = re.search(r"unpowered=(\d+)", result_line)
+    m_zero_prod = re.search(r"zero_prod=\[(.*?)\]", result_line)
 
     return {
         "produced": int(m_prod.group(1)) if m_prod else 0,
         "active_machines": int(m_active.group(1)) if m_active else 0,
         "total_machines": int(m_active.group(2)) if m_active else 0,
         "active_ratio": float(m_ratio.group(1)) if m_ratio else 0.0,
+        "productive_machines": int(m_productive.group(1)) if m_productive else 0,
         "unpowered": int(m_unpowered.group(1)) if m_unpowered else 0,
+        "zero_prod": m_zero_prod.group(1) if m_zero_prod else "",
     }
 
 
@@ -327,17 +402,28 @@ def main() -> None:
     total_cnt = metrics["total_machines"]
     unpowered = metrics["unpowered"]
 
+    productive_cnt = metrics["productive_machines"]
+    zero_prod = metrics["zero_prod"]
+
     print(
         f"factorilog: Simulation completed at tick {args.ticks}: "
         f"{produced} {args.expected_item} produced (required >= {args.min_produced}), "
         f"active machines: {active_cnt}/{total_cnt} ({active_ratio * 100:.1f}%), "
+        f"productive machines: {productive_cnt}/{total_cnt} ({productive_cnt / total_cnt * 100:.1f}%), "
         f"unpowered machines: {unpowered}"
     )
+    if zero_prod:
+        print(f"factorilog: Zero-production machines: {zero_prod}")
 
     failures = []
     if produced < args.min_produced:
         failures.append(
             f"Production below target: {produced} {args.expected_item} < minimum {args.min_produced}"
+        )
+    if productive_cnt < total_cnt:
+        failures.append(
+            f"Machine productivity below 100%: {productive_cnt}/{total_cnt} machines produced items. "
+            f"Zero-production machines: {zero_prod}"
         )
     if active_ratio < args.min_active_ratio:
         failures.append(

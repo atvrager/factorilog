@@ -183,6 +183,25 @@ class TestBeltRules(unittest.TestCase):
         peeling_violations = peeling_checker.check_entities(entities)
         self.assertFalse(any(v.code == "DRC-03" for v in peeling_violations))
 
+    def test_drc_splitter_into_underground_hood_flank(self) -> None:
+        """Rule DRC-03 detects splitter output feeding into underground hood flank."""
+        entities = [
+            {
+                "name": "underground-belt",
+                "direction": DIRECTION_NORTH,
+                "type": "input",
+                "position": {"x": 2, "y": 2},
+            },
+            {
+                "name": "splitter",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 1.0, "y": 2.5},
+            },
+        ]
+        checker = BeltDrcChecker(allow_peeling=False)
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-03" for v in violations))
+
     def test_drc_splitter_flank_feed(self) -> None:
         """Rule DRC-04 detects perpendicular feeds into splitter flanks."""
         entities = [

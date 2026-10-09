@@ -20,6 +20,7 @@ try:
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
     from foundry.def_untangle import (
         fix_reverse_splitter_inputs,
+        relocate_blocked_splitter_inputs,
         untangle_machine_inputs,
         untangle_merger_inputs,
         untangle_splitter_outputs,
@@ -46,6 +47,7 @@ except ImportError:
     from def_parser import extract_pins, merge_collinear_wires, parse_def
     from def_untangle import (
         fix_reverse_splitter_inputs,
+        relocate_blocked_splitter_inputs,
         untangle_machine_inputs,
         untangle_merger_inputs,
         untangle_splitter_outputs,
@@ -100,7 +102,8 @@ def build_entities(
     untangle_splitter_outputs(def_data)
     untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
-    untangle_machine_inputs(def_data, netlist_data)
+    relocate_blocked_splitter_inputs(def_data)
+    # untangle_machine_inputs(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 

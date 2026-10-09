@@ -17,7 +17,7 @@ from foundry.belt_drc import BeltDrcChecker
 from foundry.def_parser import parse_def
 from foundry.def_untangle import (
     fix_reverse_splitter_inputs,
-    untangle_machine_inputs,
+    relocate_blocked_splitter_inputs,
     untangle_merger_inputs,
     untangle_splitter_outputs,
 )
@@ -112,7 +112,8 @@ def run_diagnostics(
     untangle_splitter_outputs(def_data)
     untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
-    untangle_machine_inputs(def_data, netlist_data)
+    relocate_blocked_splitter_inputs(def_data)
+    # untangle_machine_inputs(def_data, netlist_data)
 
     # 2. Placement
     placement = place_components(def_data, netlist_data)

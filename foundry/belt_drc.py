@@ -282,7 +282,11 @@ class BeltDrcChecker:
                             y=nb_pos[1],
                         )
                         for nb in tile_map.get(nb_pos, [])
-                        if nb.get("name") == "transport-belt" and nb.get("direction") == s_dir
+                        if (
+                            "transport-belt" in nb.get("name", "")
+                            or "splitter" in nb.get("name", "")
+                        )
+                        and nb.get("direction") == s_dir
                     ]
                 )
 
@@ -299,7 +303,11 @@ class BeltDrcChecker:
                             y=rear_pos[1],
                         )
                         for nb in tile_map.get(rear_pos, [])
-                        if nb.get("name") == "transport-belt" and nb.get("direction") == hood_d
+                        if (
+                            "transport-belt" in nb.get("name", "")
+                            or "splitter" in nb.get("name", "")
+                        )
+                        and nb.get("direction") == hood_d
                     ]
                 )
         return violations

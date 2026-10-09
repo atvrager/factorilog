@@ -163,6 +163,7 @@ def route_and_resolve_jumpers(
         if cell_id == "belt_split2":
             split_pins = {
                 "a": (0.25, 0.5),
+                "b": (0.25, 1.5),
                 "y1": (0.75, 0.5),
                 "y2": (0.75, 1.5),
             }
@@ -219,6 +220,11 @@ def route_and_resolve_jumpers(
                 round(math.floor(p["y"] * scale) + 0.5, 2),
             )
         )
+    connected_pins: set[tuple[str, str]] = set()
+    for net in def_data.get("nets", []):
+        for inst, pin in net.get("connections", []):
+            connected_pins.add((inst, pin))
+
     for comp in def_data.get("components", []):
         cname = comp["name"]
         macro = comp["macro"]
@@ -232,7 +238,10 @@ def route_and_resolve_jumpers(
             pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
             pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
         elif cell_id == "belt_split2":
-            pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            if (cname, "b") in connected_pins:
+                pin_tiles.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            if (cname, "a") in connected_pins or (cname, "b") not in connected_pins:
+                pin_tiles.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
             pin_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
             pin_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
         elif cell_id == "belt_balancer2":
@@ -687,9 +696,16 @@ def route_and_resolve_jumpers(
             valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
             valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
         elif cell_id == "belt_split2":
-            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
+            if (comp["name"], "b") in connected_pins:
+                valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            if (comp["name"], "a") in connected_pins or (comp["name"], "b") not in connected_pins:
+                valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
             valid_output_pins.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
             valid_output_pins.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+        elif cell_id == "belt_split4":
+            valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
+            for ty in range(4):
+                valid_output_pins.add((round(gx + 2.5, 2), round(gy + ty + 0.5, 2)))
         elif cell_id == "belt_balancer2":
             valid_input_pins.add((round(gx - 0.5, 2), round(gy + 0.5, 2)))
             valid_input_pins.add((round(gx - 0.5, 2), round(gy + 1.5, 2)))
@@ -734,6 +750,19 @@ def route_and_resolve_jumpers(
                 else:
                     valid_output_pins.add(pt)
                     machine_output_pins.add(pt)
+
+    splitter_feeds: dict[tuple[float, float], set[int]] = collections.defaultdict(set)
+    for comp in def_data.get("components", []):
+        gx = comp["x"] * scale
+        gy = comp["y"] * scale
+        inst = inst_map.get(comp["name"], {})
+        cell_id = inst.get("cell", comp["macro"])
+        if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
+            splitter_feeds[(round(gx + 1.5, 2), round(gy + 0.5, 2))].add(DIRECTION_EAST)
+            splitter_feeds[(round(gx + 1.5, 2), round(gy + 1.5, 2))].add(DIRECTION_EAST)
+        elif cell_id == "belt_split4":
+            for ty in range(4):
+                splitter_feeds[(round(gx + 2.5, 2), round(gy + ty + 0.5, 2))].add(DIRECTION_EAST)
 
     while True:
         conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
@@ -801,12 +830,29 @@ def route_and_resolve_jumpers(
                             d == DIRECTION_EAST
                             or (
                                 not is_fluid
-                                and in_pos in allowed_out
+                                and in_pos in machine_output_pins
                                 and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
                             )
                         )
                         if not allowed:
                             fail_in.append("in_pin_tiles")
+                    if any(s_dir != d for s_dir in splitter_feeds.get(in_pos, set())):
+                        fail_in.append("flank_feed_from_splitter")
+                    side_dirs = (
+                        (DIRECTION_EAST, DIRECTION_WEST)
+                        if d in (DIRECTION_NORTH, DIRECTION_SOUTH)
+                        else (DIRECTION_NORTH, DIRECTION_SOUTH)
+                    )
+                    for s_dir in side_dirs:
+                        sdx, sdy = DIR_STEPS[s_dir]
+                        nb_pos = (round(in_pos[0] - sdx, 2), round(in_pos[1] - sdy, 2))
+                        if any(
+                            tiles.get(nb_pos) == s_dir
+                            for c_net, tiles in net_surface_tiles.items()
+                            if c_net != candidate
+                        ):
+                            fail_in.append("perpendicular_belt_feed")
+                            break
                     if in_pos in occupied_positions:
                         fail_in.append("in_occupied")
                     if used_underground_endpoints.get(prev_pos) == opp_d:
@@ -1000,6 +1046,26 @@ def route_and_resolve_jumpers(
                                 fail_out.append("out_in_pin_tiles")
                         if out_pos in occupied_positions:
                             fail_out.append("out_in_occupied")
+                        if splitter_feeds.get(out_pos):
+                            fail_out.append("feed_into_exit_hood")
+                        for s_dir in side_dirs:
+                            sdx, sdy = DIR_STEPS[s_dir]
+                            nb_pos = (round(out_pos[0] - sdx, 2), round(out_pos[1] - sdy, 2))
+                            if any(
+                                tiles.get(nb_pos) == s_dir
+                                for c_net, tiles in net_surface_tiles.items()
+                                if c_net != candidate
+                            ):
+                                fail_out.append("perpendicular_belt_feed")
+                                break
+                        rdx, rdy = DIR_STEPS[d]
+                        rear_pos = (round(out_pos[0] - rdx, 2), round(out_pos[1] - rdy, 2))
+                        if any(
+                            tiles.get(rear_pos) == d
+                            for c_net, tiles in net_surface_tiles.items()
+                            if c_net != candidate
+                        ):
+                            fail_out.append("rear_belt_feed")
                         if (
                             turn_detour is None
                             and out_pos not in pin_tiles
@@ -1261,11 +1327,7 @@ def route_and_resolve_jumpers(
         gy = comp["y"] * scale
         inst = inst_map.get(cname, {})
         cell_id = inst.get("cell", macro)
-        if cell_id == "belt_split2":
-            pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
-            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))
-            forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
-        elif cell_id == "belt_balancer2":
+        if cell_id in ("belt_split2", "belt_balancer2"):
             pin_directions[(round(gx - 0.5, 2), round(gy + 0.5, 2))] = DIRECTION_EAST
             pin_directions[(round(gx - 0.5, 2), round(gy + 1.5, 2))] = DIRECTION_EAST
             forbidden_west_tiles.add((round(gx + 1.5, 2), round(gy + 0.5, 2)))

@@ -514,3 +514,146 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
                     w["y1"] = py1
                 if w["y2"] == py0:
                     w["y2"] = py1
+
+
+def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
+    """Relocate splitter inputs from blocked pin a to pin b when pin a is crossed.
+
+    Factorio splitters accept items equally on either input lane (a at y=0.5 or
+    b at y=1.5). When a routing net crossing occurs directly in front of pin a,
+    an underground jumper cannot resolve it because the splitter body blocks the
+    exit hood. Shifting the input connection from pin a to pin b moves the
+    surface crossing away from the splitter body, allowing underground jumpers
+    to resolve cleanly.
+    """
+    units = int(def_data.get("units", 1000))
+
+    for c in def_data.get("components", []):
+        if c.get("macro") != "belt_split2":
+            continue
+        cname = c.get("name", "")
+        orient = c.get("orient", "N")
+        if orient not in ("N", ""):
+            continue
+        gx = c.get("x", 0)
+        gy = c.get("y", 0)
+
+        py_a = gy + int(0.5 * units)
+        py_b = gy + int(1.5 * units)
+        front_x = gx - int(0.5 * units)
+
+        net_a = None
+        net_b = None
+        for n in def_data.get("nets", []):
+            for inst, pin in n.get("connections", []):
+                if inst == cname:
+                    if pin == "a":
+                        net_a = n
+                    elif pin == "b":
+                        net_b = n
+
+        if not net_a or net_b is not None:
+            continue
+
+        pin_a_blocked = False
+        for other_net in def_data.get("nets", []):
+            if other_net is net_a:
+                continue
+            for w in other_net.get("wires", []):
+                if (
+                    w.get("layer") == "M2"
+                    and abs(w["x1"] - front_x) <= 250
+                    and min(w["y1"], w["y2"]) <= py_a <= max(w["y1"], w["y2"])
+                ):
+                    pin_a_blocked = True
+                    break
+            if pin_a_blocked:
+                break
+
+        if not pin_a_blocked:
+            continue
+
+        incoming_m1 = [
+            w
+            for w in net_a.get("wires", [])
+            if w.get("layer") == "M1" and w["y1"] == py_a and w["y2"] == py_a
+        ]
+        pin_a_m1 = [w for w in incoming_m1 if max(w["x1"], w["x2"]) >= gx]
+        if not pin_a_m1:
+            continue
+
+        start_x = min(min(w["x1"], w["x2"]) for w in incoming_m1)
+        end_x = max(max(w["x1"], w["x2"]) for w in incoming_m1)
+
+        m2_feeder = next(
+            (
+                w
+                for w in net_a.get("wires", [])
+                if w.get("layer") == "M2"
+                and w["x1"] == start_x
+                and (w["y1"] == py_a or w["y2"] == py_a)
+            ),
+            None,
+        )
+        if not m2_feeder:
+            continue
+
+        b_m1_blocked = False
+        for other_net in def_data.get("nets", []):
+            if other_net is net_a:
+                continue
+            for ow in other_net.get("wires", []):
+                if (
+                    ow.get("layer") == "M1"
+                    and ow["y1"] == py_b
+                    and ow["y2"] == py_b
+                    and not (max(ow["x1"], ow["x2"]) <= start_x or min(ow["x1"], ow["x2"]) >= end_x)
+                ):
+                    b_m1_blocked = True
+                    break
+            if b_m1_blocked:
+                break
+        if b_m1_blocked:
+            continue
+
+        ext_min_y = min(py_a, py_b)
+        ext_max_y = max(py_a, py_b)
+        b_m2_blocked = False
+        for other_net in def_data.get("nets", []):
+            if other_net is net_a:
+                continue
+            for ow in other_net.get("wires", []):
+                if (
+                    ow.get("layer") == "M2"
+                    and ow["x1"] == start_x
+                    and not (
+                        max(ow["y1"], ow["y2"]) <= ext_min_y or min(ow["y1"], ow["y2"]) >= ext_max_y
+                    )
+                ):
+                    b_m2_blocked = True
+                    break
+            if b_m2_blocked:
+                break
+        if b_m2_blocked:
+            continue
+
+        if m2_feeder["y1"] == py_a:
+            m2_feeder["y1"] = py_b
+        elif m2_feeder["y2"] == py_a:
+            m2_feeder["y2"] = py_b
+
+        for w in incoming_m1:
+            w["y1"] = py_b
+            w["y2"] = py_b
+
+        for v in net_a.get("vias", []):
+            if v.get("y") == py_a and start_x <= v.get("x", 0) <= end_x:
+                v["y"] = py_b
+
+        new_conns = []
+        for inst, pin in net_a.get("connections", []):
+            if inst == cname and pin == "a":
+                new_conns.append((inst, "b"))
+            else:
+                new_conns.append((inst, pin))
+        net_a["connections"] = new_conns
