@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# commit-msg - mechanical commit message rules: subject length, wrap, prose.
+set -uo pipefail
+
+if ! python3 "$(git rev-parse --show-toplevel)/tools/ste-lint.py" --stdin < "$1"; then
+    echo "commit-msg: fix the message findings above" >&2
+    exit 1
+fi
