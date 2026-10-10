@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO_ROOT / "flow"))
 sys.path.insert(0, str(REPO_ROOT / "test"))
 
 import blueprint
+import bp2save
 import check_blueprint
 import circuit
 import circuit_synth
@@ -752,6 +753,146 @@ class TestCircuitPower(unittest.TestCase):
                 self.assertIn("decs=7 conn_decs=7", line)
                 self.assertIn("switch_wires=3", line)
                 self.assertIn("const_wires=5", line)
+
+        self.assertTrue(matched, f"Test result pattern not found in simulation output: {results}")
+
+    def test_off_chip_power_single_generator_in_save(self) -> None:
+        """Verify off-chip power feed connects a single generator outside floorplan."""
+        entities = [
+            {"name": "medium-electric-pole", "position": {"x": 10.0, "y": 5.0}},
+            {"name": "medium-electric-pole", "position": {"x": 17.0, "y": 5.0}},
+            {"name": "assembling-machine-1", "position": {"x": 17.0, "y": 8.0}},
+        ]
+        # Copper wire connection between pole 1 and pole 2
+        wires = [[1, 5, 2, 5]]
+        bp_str = blueprint.encode(entities, "test_off_chip_power", wires=wires)
+
+        lua_script = bp2save.generate_control_lua(bp_str, {"inputs": [], "outputs": []})
+        self.assertIn("Off-chip power supply", lua_script)
+        self.assertIn("electric-energy-interface", lua_script)
+
+        init_lua = f"""
+        local BP = [==[{bp_str}]==]
+        game.forces.player.research_all_technologies()
+        local surface = game.surfaces[1]
+        for cx = -2, 2 do
+            for cy = -2, 2 do
+                surface.request_to_generate_chunks({{cx * 32, cy * 32}}, 1)
+            end
+        end
+        surface.force_generate_chunk_requests()
+
+        local tiles = {{}}
+        for x = -20, 30 do
+            for y = -20, 30 do
+                tiles[#tiles + 1] = {{name = "concrete", position = {{x, y}}}}
+            end
+        end
+        surface.set_tiles(tiles)
+
+        local inv = game.create_inventory(1)
+        local stack = inv[1]
+        stack.set_stack{{name = "blueprint", count = 1}}
+        stack.import_stack(BP)
+        stack.build_blueprint{{
+            surface = surface,
+            force = game.forces.player,
+            position = {{0, 0}},
+            force_build = true
+        }}
+        for _, g in ipairs(surface.find_entities_filtered{{name = "entity-ghost"}}) do
+            g.silent_revive()
+        end
+
+        local all_poles = surface.find_entities_filtered{{type = "electric-pole"}}
+        local min_x = 1e9
+        for _, p in ipairs(all_poles) do
+            if p.position.x < min_x then min_x = p.position.x end
+        end
+
+        local target_pole = nil
+        local best_x = 1e9
+        for _, p in ipairs(all_poles) do
+            if p.position.x < best_x then
+                best_x = p.position.x
+                target_pole = p
+            end
+        end
+
+        if target_pole then
+            local gen_x = math.floor(min_x - 5.5) + 0.5
+            local gen_y = target_pole.position.y
+
+            local curr_x = gen_x
+            local prev_pole = nil
+            while (target_pole.position.x - curr_x) > 8.0 do
+                local p = surface.create_entity{{
+                    name = "medium-electric-pole",
+                    position = {{curr_x, gen_y}},
+                    force = game.forces.player
+                }}
+                if prev_pole and p then
+                    local c1 = prev_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                    local c2 = p.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                    c1.connect_to(c2, false)
+                end
+                prev_pole = p
+                curr_x = curr_x + 7.0
+            end
+
+            local feed_pole = surface.create_entity{{
+                name = "medium-electric-pole",
+                position = {{curr_x, gen_y}},
+                force = game.forces.player
+            }}
+            if prev_pole and feed_pole then
+                local c1 = prev_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                local c2 = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                c1.connect_to(c2, false)
+            end
+            if feed_pole and target_pole then
+                local c1 = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                local c2 = target_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                c1.connect_to(c2, false)
+            end
+
+            surface.create_entity{{
+                name = "electric-energy-interface",
+                position = {{gen_x, gen_y}},
+                force = game.forces.player
+            }}
+        end
+        """
+
+        tick_lua = """
+        if event.tick >= 2 then
+            local surface = game.surfaces[1]
+            local eeis = surface.find_entities_filtered{name = "electric-energy-interface"}
+            local machines = surface.find_entities_filtered{type = "assembling-machine"}
+            local eei_cnt = #eeis
+            local mach_cnt = #machines
+            local powered = 0
+            for _, m in ipairs(machines) do
+                if m.energy > 0 then
+                    powered = powered + 1
+                end
+            end
+            local gen_x = eeis[1] and eeis[1].position.x or 999
+            log("TEST_RESULT: eeis=" .. eei_cnt .. " machines=" .. mach_cnt .. " powered=" .. powered .. " gen_x=" .. gen_x)
+        end
+        """
+
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=5)
+        self.assertGreater(len(results), 0, "Simulation results must not be empty")
+
+        matched = False
+        for line in results:
+            if "TEST_RESULT: eeis=" in line:
+                matched = True
+                self.assertIn("eeis=1", line)
+                self.assertIn("machines=1", line)
+                self.assertIn("powered=1", line)
+                self.assertIn("gen_x=-8", line)
 
         self.assertTrue(matched, f"Test result pattern not found in simulation output: {results}")
 

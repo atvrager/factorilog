@@ -45,12 +45,21 @@ def encode(
         if not icons:
             icons = [{"index": 1, "signal": {"type": "item", "name": "assembling-machine-1"}}]
 
+    encoded_entities: list[dict[str, Any]] = []
+    for idx, ent in enumerate(entities, start=1):
+        if "entity_number" not in ent:
+            e = dict(ent)
+            e["entity_number"] = idx
+            encoded_entities.append(e)
+        else:
+            encoded_entities.append(ent)
+
     bp_dict: dict[str, Any] = {
         "item": "blueprint",
         "label": label,
         "version": VERSION_2_0,
         "icons": icons,
-        "entities": entities,
+        "entities": encoded_entities,
     }
     if wires:
         bp_dict["wires"] = wires

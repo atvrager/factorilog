@@ -32,6 +32,9 @@ class TestBp2Save(unittest.TestCase):
         self.assertIn("script.on_init", lua_code)
         self.assertIn("loader", lua_code)
         self.assertIn("infinity-chest", lua_code)
+        self.assertIn("Off-chip power supply", lua_code)
+        self.assertIn("electric-energy-interface", lua_code)
+        self.assertIn("SAVE_GEN_EEIS", lua_code)
 
     def test_build_scenario_archive(self) -> None:
         """Verify scenario archive contains required control.lua and metadata."""
