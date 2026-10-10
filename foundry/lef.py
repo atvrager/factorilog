@@ -158,8 +158,13 @@ def get_macro_port_geometry(
 
     face = port_faces.get(port, "E") if is_output else port_faces.get(port, "W")
 
-    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
-    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
+    circ = cell.get("circuit_layers")
+    if circ:
+        red_layer, green_layer = circ[0], circ[1]
+    else:
+        red_layer, green_layer = pdk.circuit_layers()
+    h_layer = red_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE
+    v_layer = green_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
 
     if (
         machine in ("chemical-plant", "oil-refinery")
@@ -251,8 +256,8 @@ def _input_pin_rect(
         return geom["layer"], r[0], r[1], r[2], r[3]
     width = cell["width"]
     height = cell["height"]
-    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
-    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
+    h_layer = pdk.LAYER_SURFACE
+    v_layer = pdk.LAYER_SURFACE_V
     if total <= height:
         offset = (height - total) // 2
         tile_y = offset + idx
@@ -280,8 +285,8 @@ def _output_pin_rect(
         return geom["layer"], r[0], r[1], r[2], r[3]
     width = cell["width"]
     height = cell["height"]
-    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
-    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
+    h_layer = pdk.LAYER_SURFACE
+    v_layer = pdk.LAYER_SURFACE_V
     w = float(width)
     h = float(height)
     if total <= height:
@@ -492,72 +497,21 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         "  WIDTH 0.5 ;",
         "  SPACING 0.25 ;",
         "END M2",
-        # VL2: surface-to-underground transition cut layer (tunnel mouth).
-        "LAYER VL2",
-        "  TYPE CUT ;",
-        "  SPACING 0.25 ;",
-        "END VL2",
-        # M3: underground horizontal tunnel layer.
-        "LAYER M3",
-        "  TYPE ROUTING ;",
-        "  DIRECTION HORIZONTAL ;",
-        "  PITCH 1.0 ;",
-        "  OFFSET 0.5 ;",
-        "  WIDTH 0.5 ;",
-        "  SPACING 0.25 ;",
-        "END M3",
-        # VL3: underground turn cut layer.
-        "LAYER VL3",
-        "  TYPE CUT ;",
-        "  SPACING 0.25 ;",
-        "END VL3",
-        # M4: underground vertical tunnel layer.
-        "LAYER M4",
-        "  TYPE ROUTING ;",
-        "  DIRECTION VERTICAL ;",
-        "  PITCH 1.0 ;",
-        "  OFFSET 0.5 ;",
-        "  WIDTH 0.5 ;",
-        "  SPACING 0.25 ;",
-        "END M4",
-        # VL4: underground-to-circuit cut layer.
-        "LAYER VL4",
-        "  TYPE CUT ;",
-        "  SPACING 0.25 ;",
-        "END VL4",
-        # M5: circuit red wire horizontal.
-        "LAYER M5",
-        "  TYPE ROUTING ;",
-        "  DIRECTION HORIZONTAL ;",
-        "  PITCH 1.0 ;",
-        "  OFFSET 0.5 ;",
-        "  WIDTH 0.5 ;",
-        "  SPACING 0.25 ;",
-        "END M5",
-        # VL5: circuit wire turn cut layer.
-        "LAYER VL5",
-        "  TYPE CUT ;",
-        "  SPACING 0.25 ;",
-        "END VL5",
-        # M6: circuit green wire vertical.
-        "LAYER M6",
-        "  TYPE ROUTING ;",
-        "  DIRECTION VERTICAL ;",
-        "  PITCH 1.0 ;",
-        "  OFFSET 0.5 ;",
-        "  WIDTH 0.5 ;",
-        "  SPACING 0.25 ;",
-        "END M6",
     ]
 
-    for idx, tier in enumerate(tiers[1:], start=1):
-        h_layer = f"M{2 * idx + 5}"
-        v_layer = f"M{2 * idx + 6}"
-        vl_cut = f"VL{2 * idx + 4}"
-        vl_turn = f"VL{2 * idx + 5}"
+    for idx, tier in enumerate(tiers):
+        h_layer = f"M{2 * idx + 3}"
+        v_layer = f"M{2 * idx + 4}"
+        vl_cut = f"VL{2 * idx + 2}"
+        vl_turn = f"VL{2 * idx + 3}"
         bname = tier["belt"]
         lines.extend(
             [
+                f"# {bname} surface-to-underground transition cut layer.",
+                f"LAYER {vl_cut}",
+                "  TYPE CUT ;",
+                "  SPACING 0.25 ;",
+                f"END {vl_cut}",
                 f"# {bname} underground horizontal tunnel layer.",
                 f"LAYER {h_layer}",
                 "  TYPE ROUTING ;",
@@ -581,13 +535,51 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
                 "  WIDTH 0.5 ;",
                 "  SPACING 0.25 ;",
                 f"END {v_layer}",
-                f"# {bname} surface-to-underground transition cut layer.",
-                f"LAYER {vl_cut}",
-                "  TYPE CUT ;",
-                "  SPACING 0.25 ;",
-                f"END {vl_cut}",
             ]
         )
+
+    circ = tech.get("circuit_layers")
+    if circ:
+        red_layer, green_layer = circ[0], circ[1]
+    else:
+        red_layer, green_layer = pdk.circuit_layers(len(tiers))
+    n_tiers = len(tiers)
+    vl_drop = f"VL{2 * n_tiers + 2}"
+    vl_circ_turn = f"VL{2 * n_tiers + 3}"
+    last_v_layer = f"M{2 * n_tiers + 2}" if n_tiers > 0 else "M2"
+
+    lines.extend(
+        [
+            "# Circuit drop cut layer.",
+            f"LAYER {vl_drop}",
+            "  TYPE CUT ;",
+            "  SPACING 0.25 ;",
+            f"END {vl_drop}",
+            "# Circuit red wire horizontal layer.",
+            f"LAYER {red_layer}",
+            "  TYPE ROUTING ;",
+            "  DIRECTION HORIZONTAL ;",
+            "  PITCH 1.0 ;",
+            "  OFFSET 0.5 ;",
+            "  WIDTH 0.5 ;",
+            "  SPACING 0.25 ;",
+            f"END {red_layer}",
+            "# Circuit wire turn cut layer.",
+            f"LAYER {vl_circ_turn}",
+            "  TYPE CUT ;",
+            "  SPACING 0.25 ;",
+            f"END {vl_circ_turn}",
+            "# Circuit green wire vertical layer.",
+            f"LAYER {green_layer}",
+            "  TYPE ROUTING ;",
+            "  DIRECTION VERTICAL ;",
+            "  PITCH 1.0 ;",
+            "  OFFSET 0.5 ;",
+            "  WIDTH 0.5 ;",
+            "  SPACING 0.25 ;",
+            f"END {green_layer}",
+        ]
+    )
 
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
     lines.extend(
@@ -607,13 +599,14 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
     for idx, tier in enumerate(tiers):
         name = tier["belt"].replace("-", "_").upper()
         default_tag = "  DEFAULT" if idx == 0 else ""
-        h_layer = "M3"
-        vl_layer = "VL2"
+        bottom_layer = f"M{2 * idx + 2}"
+        h_layer = f"M{2 * idx + 3}"
+        vl_layer = f"VL{2 * idx + 2}"
         lines.extend(
             [
                 f"VIA {name}_VIA",
                 default_tag,
-                "  LAYER M2 ;",
+                f"  LAYER {bottom_layer} ;",
                 "    RECT -0.75 -0.25 0.75 0.25 ;",
                 f"  LAYER {vl_layer} ;",
                 "    RECT -0.125 -0.125 0.125 0.125 ;",
@@ -639,45 +632,51 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
         ]
     )
 
-    # 4. Underground turn connection (M3 -> VL3 -> M4)
-    lines.extend(
-        [
-            "VIA TUNNEL_TURN_VIA",
-            "  DEFAULT",
-            "  LAYER M3 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL3 ;",
-            "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M4 ;",
-            "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "END TUNNEL_TURN_VIA",
-        ]
-    )
+    # 4. Underground turn connection (h_layer -> vl_turn -> v_layer) for each tier
+    for idx, tier in enumerate(tiers):
+        name = tier["belt"].replace("-", "_").upper()
+        h_layer = f"M{2 * idx + 3}"
+        v_layer = f"M{2 * idx + 4}"
+        vl_turn = f"VL{2 * idx + 3}"
+        default_tag = "  DEFAULT" if idx == 0 else ""
+        lines.extend(
+            [
+                f"VIA {name}_TURN_VIA",
+                default_tag,
+                f"  LAYER {h_layer} ;",
+                "    RECT -0.25 -0.25 0.25 0.25 ;",
+                f"  LAYER {vl_turn} ;",
+                "    RECT -0.125 -0.125 0.125 0.125 ;",
+                f"  LAYER {v_layer} ;",
+                "    RECT -0.25 -0.25 0.25 0.25 ;",
+                f"END {name}_TURN_VIA",
+            ]
+        )
 
-    # 5. Circuit drop connection (M4 -> VL4 -> M5)
+    # 5. Circuit drop connection
     lines.extend(
         [
             "VIA CIRCUIT_DROP_VIA",
             "  DEFAULT",
-            "  LAYER M4 ;",
+            f"  LAYER {last_v_layer} ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL4 ;",
+            f"  LAYER {vl_drop} ;",
             "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M5 ;",
+            f"  LAYER {red_layer} ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
             "END CIRCUIT_DROP_VIA",
         ]
     )
-    # 6. Circuit turn connection (M5 -> VL5 -> M6)
+    # 6. Circuit turn connection
     lines.extend(
         [
             "VIA CIRCUIT_TURN_VIA",
             "  DEFAULT",
-            "  LAYER M5 ;",
+            f"  LAYER {red_layer} ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
-            "  LAYER VL5 ;",
+            f"  LAYER {vl_circ_turn} ;",
             "    RECT -0.125 -0.125 0.125 0.125 ;",
-            "  LAYER M6 ;",
+            f"  LAYER {green_layer} ;",
             "    RECT -0.25 -0.25 0.25 0.25 ;",
             "END CIRCUIT_TURN_VIA",
             "SITE tile",

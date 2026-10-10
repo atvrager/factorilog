@@ -96,6 +96,14 @@ def _factorilog_synth_impl(ctx):
     flags_str = " ".join(extra_flags)
     target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
 
+    inputs = [ctx.file.dump]
+    ctrl_export = ""
+    ctrl_flag = ""
+    if ctx.file.controller_verilog:
+        ctrl_export = "CTRL_ABS=\"$(pwd)/%s\"" % ctx.file.controller_verilog.path
+        ctrl_flag = "--controller-verilog \"$CTRL_ABS\""
+        inputs.append(ctx.file.controller_verilog)
+
     cmd_parts = [
         "set -euo pipefail",
         "OUT_DIR=\"$(pwd)/%s\"" % out_dir,
@@ -103,9 +111,13 @@ def _factorilog_synth_impl(ctx):
         "mkdir -p \"$WORK_DIR\"",
         "DUMP_ABS=\"$(pwd)/%s\"" % ctx.file.dump.path,
         "NETBUILD_ABS=\"$(pwd)/%s\"" % script.path,
+    ]
+    if ctrl_export:
+        cmd_parts.append(ctrl_export)
+    cmd_parts.extend([
         "cd \"$WORK_DIR\"",
         "START_NS=$(date +%s%N)",
-        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" %s %s" % (target_str, flags_str),
+        "\"$NETBUILD_ABS\" \"$DUMP_ABS\" %s %s %s" % (target_str, flags_str, ctrl_flag),
         "END_NS=$(date +%s%N)",
         "ELAPSED_NS=$((END_NS - START_NS))",
         "ELAPSED_SEC=$(awk \"BEGIN {printf \\\"%.3f\\\", $ELAPSED_NS / 1000000000}\")",
@@ -114,7 +126,7 @@ def _factorilog_synth_impl(ctx):
         "cp -f \"$WORK_DIR/netlist.json\" \"$OUT_DIR/%s\"" % ctx.outputs.netlist_json.basename,
         "cp -f \"$WORK_DIR/tech.lef\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lef.basename,
         "cp -f \"$WORK_DIR/tech.lib\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lib.basename,
-    ]
+    ])
 
     if ctx.outputs.ranks_tcl:
         outputs.append(ctx.outputs.ranks_tcl)
@@ -129,7 +141,7 @@ def _factorilog_synth_impl(ctx):
     cmd_parts.append("echo \"factorilog [%s]: Synth completed in ${ELAPSED_SEC}s\"" % ctx.attr.name)
 
     ctx.actions.run_shell(
-        inputs = [ctx.file.dump],
+        inputs = inputs,
         outputs = outputs,
         command = "\n".join(cmd_parts),
         mnemonic = "FactorilogSynth",
@@ -153,6 +165,7 @@ factorilog_synth = rule(
         "enable_circuit_readouts": attr.bool(default = False, doc = "Enable arithmetic combinator readouts"),
         "enable_compound_cells": attr.bool(default = False, doc = "Enable compound macro-cell clustering"),
         "synthesize_splitters": attr.bool(default = True, doc = "Synthesize binary trees of splitters for multi-consumer nets"),
+        "controller_verilog": attr.label(allow_single_file = [".v"], doc = "Optional Verilog controller file"),
         "cells_v": attr.output(mandatory = True),
         "netlist_v": attr.output(mandatory = True),
         "netlist_json": attr.output(mandatory = True),
@@ -636,6 +649,7 @@ def factorilog_science_factory(
         enable_compound_cells = False,
         synthesize_splitters = True,
         telemetry_taps = "none",
+        controller_verilog = None,
         strict_drc = True,
         test_expected_item = None,
         test_min_produced = 20,
@@ -670,6 +684,7 @@ def factorilog_science_factory(
         enable_compound_cells = enable_compound_cells,
         synthesize_splitters = synthesize_splitters,
         telemetry_taps = telemetry_taps,
+        controller_verilog = controller_verilog,
         tags = merged_tags,
     )
 

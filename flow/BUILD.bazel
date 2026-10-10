@@ -9,6 +9,7 @@ exports_files([
     "2_place.tcl",
     "3_route.tcl",
     "4_sta.tcl",
+    "controllers/power_sequencer.v",
     "factorilog.tcl",
     "orfs.sh",
     "verify_def.tcl",
@@ -20,6 +21,11 @@ filegroup(
         "*.tcl",
         "*.sh",
     ]),
+)
+
+filegroup(
+    name = "controller_verilog",
+    srcs = glob(["controllers/*.v"]),
 )
 
 py_library(
@@ -170,6 +176,26 @@ factorilog_science_factory(
         "manual",
         "science",
         "automation_science",
+    ],
+)
+
+factorilog_science_factory(
+    name = "automation_controlled_science",
+    block_fill = "0.05",
+    cell_pad_sites = 4,
+    controller_verilog = "//flow:controllers/power_sequencer.v",
+    core_margin = 8,
+    demand = "automation-science-pack 60.0",
+    density = "0.15",
+    enable_circuit_readouts = True,
+    enable_display_readouts = True,
+    routability_driven = True,
+    telemetry_taps = "io",
+    use_row_placement = True,
+    tags = [
+        "manual",
+        "science",
+        "automation_controlled_science",
     ],
 )
 

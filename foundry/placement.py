@@ -133,16 +133,15 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
         elif macro == "arithmetic_combinator" or cell_id == "arithmetic_combinator":
             cw, ch = 1, 2
             center_x, center_y = gx + 0.5, gy + 1.0
-            extra = {
-                "control_behavior": {
-                    "arithmetic_conditions": {
-                        "first_signal": {"type": "virtual", "name": "signal-each"},
-                        "operation": "+",
-                        "second_constant": 0,
-                        "output_signal": {"type": "virtual", "name": "signal-each"},
-                    }
+            cb = inst.get("control_behavior") or {
+                "arithmetic_conditions": {
+                    "first_signal": {"type": "virtual", "name": "signal-each"},
+                    "operation": "+",
+                    "second_constant": 0,
+                    "output_signal": {"type": "virtual", "name": "signal-each"},
                 }
             }
+            extra = {"control_behavior": cb}
             ent = add_entity(
                 "arithmetic-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
             )
@@ -153,17 +152,16 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
         elif macro == "decider_combinator" or cell_id == "decider_combinator":
             cw, ch = 1, 2
             center_x, center_y = gx + 0.5, gy + 1.0
-            extra = {
-                "control_behavior": {
-                    "decider_conditions": {
-                        "first_signal": {"type": "virtual", "name": "signal-each"},
-                        "comparator": ">",
-                        "constant": 0,
-                        "output_signal": {"type": "virtual", "name": "signal-each"},
-                        "copy_count_from_input": True,
-                    }
+            cb = inst.get("control_behavior") or {
+                "decider_conditions": {
+                    "first_signal": {"type": "virtual", "name": "signal-each"},
+                    "comparator": ">",
+                    "constant": 0,
+                    "output_signal": {"type": "virtual", "name": "signal-each"},
+                    "copy_count_from_input": True,
                 }
             }
+            extra = {"control_behavior": cb}
             ent = add_entity(
                 "decider-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
             )
@@ -173,25 +171,29 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                     occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
         elif macro == "constant_combinator" or cell_id == "constant_combinator":
             center_x, center_y = gx + 0.5, gy + 0.5
-            ent = add_entity("constant-combinator", center_x, center_y, direction=DIRECTION_NORTH)
+            cb = inst.get("control_behavior")
+            extra = {"control_behavior": cb} if cb else None
+            ent = add_entity(
+                "constant-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra
+            )
             inst_to_entity[cname] = ent
             occupied_positions.add((round(gx + 0.5, 2), round(gy + 0.5, 2)))
         elif macro == "power_switch" or cell_id == "power_switch":
             cw, ch = 2, 2
             center_x, center_y = gx + 1.0, gy + 1.0
-            cond = inst.get(
-                "circuit_condition",
-                {
-                    "first_signal": {"type": "virtual", "name": "signal-T"},
-                    "comparator": "<",
-                    "constant": 30,
-                },
-            )
+            cb = inst.get("control_behavior") or {
+                "circuit_enabled": True,
+                "circuit_condition": inst.get(
+                    "circuit_condition",
+                    {
+                        "first_signal": {"type": "virtual", "name": "signal-T"},
+                        "comparator": "<",
+                        "constant": 30,
+                    },
+                ),
+            }
             extra = {
-                "control_behavior": {
-                    "circuit_enabled": True,
-                    "circuit_condition": cond,
-                },
+                "control_behavior": cb,
                 "switch_state": False,
             }
             ent = add_entity(

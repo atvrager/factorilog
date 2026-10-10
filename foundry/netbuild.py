@@ -19,8 +19,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import circuit_synth
 import lef
 import liberty
 import netlist
@@ -57,6 +59,7 @@ def build_all(
     enable_circuit: bool = False,
     enable_compound_cells: bool = True,
     synthesize_splitters: bool = True,
+    controller_verilog: Path | str | None = None,
 ) -> int:
     """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
     out = Path(out_dir)
@@ -69,6 +72,25 @@ def build_all(
     telemetry_records = netlist.insert_telemetry(
         nl, tap_scope, enable_display, enable_circuit, plans
     )
+
+    circuit_conns: list[dict[str, Any]] = []
+    if controller_verilog:
+        c_path = Path(controller_verilog)
+        if c_path.is_file():
+            synth_result = circuit_synth.synthesize_verilog(c_path)
+            max_rank = max((inst.rank for inst in nl.instances), default=0)
+            circuit_synth.fuse_controller_into_netlist(nl, synth_result, base_rank=max_rank + 1)
+            circuit_conns = [
+                {
+                    "source": c.source,
+                    "target": c.target,
+                    "color": c.color,
+                    "source_port": c.source_port,
+                    "target_port": c.target_port,
+                }
+                for c in synth_result.connections
+            ]
+
     balancer_plans = netlist.balancer_plans_of(nl)
     text = netlist.emit_verilog(nl, plans, split_plans, balancer_plans)
     (out / "netlist.v").write_text(text)
@@ -102,6 +124,7 @@ def build_all(
             netlist.BALANCER_CELL: netlist.balancer_cell(),
         },
         "telemetry": telemetry_records,
+        "circuit_connections": circuit_conns,
         "instances": [
             {
                 "name": i.name,
@@ -110,6 +133,11 @@ def build_all(
                 "plan_rate_per_min": i.plan_rate,
                 "rated_per_min": i.rated,
                 "rank": i.rank,
+                **(
+                    {"control_behavior": i.control_behavior}
+                    if hasattr(i, "control_behavior")
+                    else {}
+                ),
             }
             for i in nl.instances
         ],
@@ -165,6 +193,11 @@ def main() -> int:
         default=True,
         help="synthesize binary trees of splitters for multi-consumer nets",
     )
+    parser.add_argument(
+        "--controller-verilog",
+        default=None,
+        help="Path to Verilog controller to synthesize and fuse into factory netlist",
+    )
     args = parser.parse_args()
 
     if args.spc is not None:
@@ -181,6 +214,7 @@ def main() -> int:
         enable_circuit=args.enable_circuit_readouts,
         enable_compound_cells=args.enable_compound_cells,
         synthesize_splitters=args.synthesize_splitters,
+        controller_verilog=args.controller_verilog,
     )
 
 

@@ -466,15 +466,14 @@ foreach inst [$block getInsts] {
         break
     }
 }
-if {$has_circuit} {
-    set_routing_layers -signal M1-M6
-} else {
-    set_routing_layers -signal M1-M2
+set tech [ord::get_db_tech]
+foreach layer [$tech getLayers] {
+    if {[$layer getType] == "ROUTING"} {
+        set lname [$layer getName]
+        ::drt::detailed_route_set_unidirectional_layer $lname
+    }
 }
-::drt::detailed_route_set_unidirectional_layer M1
-::drt::detailed_route_set_unidirectional_layer M2
-::drt::detailed_route_set_unidirectional_layer M3
-::drt::detailed_route_set_unidirectional_layer M4
+set_routing_layers -signal M1-M2
 
 if {[info exists DO_UNTANGLE] && $DO_UNTANGLE == "1"} {
     puts "factorilog: running do_untangle"

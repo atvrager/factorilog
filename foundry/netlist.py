@@ -147,6 +147,7 @@ class Instance:
         plan_rate: float,
         rated: float,
         rank: int = 0,
+        control_behavior: dict[str, Any] | None = None,
     ) -> None:
         self.name = name
         self.cell_key = cell_key
@@ -154,6 +155,7 @@ class Instance:
         self.plan_rate = plan_rate
         self.rated = rated
         self.rank = rank
+        self.control_behavior = control_behavior
 
 
 class Net:
@@ -691,7 +693,7 @@ def emit_verilog(
         if m not in nl.inputs and m not in nl.outputs and not nl.nets[m].bus_inputs
     ]
     out.extend(f"  wire {sanitize(m)};  // {nl.nets[m].rate_per_min:.2f} per min" for m in internal)
-    declared: set[str] = set(input_wires)
+    declared: set[str] = set(input_wires) | {sanitize(m) for m in internal}
     for material, plan in sorted(merge_plans.items()):
         bare = sanitize(material)
         for _name, a_wire, b_wire, y_wire in plan:
@@ -757,7 +759,7 @@ def emit_verilog(
             out.append(f"  // telemetry display monitor for {inst.recipe}")
             out.append(f"  {pdk.DISPLAY_PANEL_CELL} {inst.name} (.a({conn_wire}));")
             continue
-        if inst.cell_key == pdk.ARITHMETIC_COMBINATOR_CELL:
+        if inst.cell_key == pdk.ARITHMETIC_COMBINATOR_CELL and inst.name.startswith("u_acc_"):
             mat_wire = sanitize(inst.recipe)
             c_out_wire = f"c_out_{mat_wire}"
             c_in_wire = f"c_in_{mat_wire}"
@@ -767,6 +769,31 @@ def emit_verilog(
             )
             continue
         cell = nl.cells[inst.cell_key]
+        if cell.get("circuit_cell"):
+            module = sanitize(inst.cell_key)
+            conns = []
+            if "a" in cell.get("inputs", []):
+                in_wire = next(
+                    (sanitize(n) for n, net in nl.nets.items() if inst.name in net.sinks),
+                    f"c_{inst.name}_in",
+                )
+                if in_wire not in declared:
+                    declared.add(in_wire)
+                    out.insert(len(ports) + 2, f"  wire {in_wire};")
+                conns.append(f".a({in_wire})")
+            if "y" in cell.get("outputs", []):
+                out_wire = next(
+                    (sanitize(n) for n, net in nl.nets.items() if inst.name in net.drivers),
+                    f"c_{inst.name}_out",
+                )
+                if out_wire not in declared:
+                    declared.add(out_wire)
+                    out.insert(len(ports) + 2, f"  wire {out_wire};")
+                conns.append(f".y({out_wire})")
+            out.append(f"  {module} {inst.name} (")
+            out.append(",\n".join(f"    {c}" for c in conns))
+            out.append("  );")
+            continue
         module = sanitize(inst.cell_key)
         conns = []
         for p in cell["inputs"]:
@@ -833,6 +860,8 @@ def insert_telemetry(
         nl.cells[acc_cell["cell"]] = acc_cell
 
     records: list[dict[str, Any]] = []
+    max_rank = max((inst.rank for inst in nl.instances), default=0)
+    telemetry_rank = max_rank + 1
     for mat in sorted(tapped_materials):
         if mat not in nl.nets:
             continue
@@ -840,7 +869,7 @@ def insert_telemetry(
         disp_name = None
         circ_name = None
 
-        rank = max(0, nl.material_depths.get(mat, 0))
+        rank = telemetry_rank
         if enable_circuit:
             circ_name = f"u_acc_{bare}"
             c_in_name = f"c_in_{bare}"

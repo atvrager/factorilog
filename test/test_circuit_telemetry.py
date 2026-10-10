@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import tempfile
 import unittest
@@ -33,9 +34,9 @@ class TestCircuitTelemetry(unittest.TestCase):
         cls.allowed = cls.data.allowed_recipes(["nauvis"])
 
     def test_pdk_and_lef_circuit_layers(self) -> None:
-        """Verify circuit layers and combinator macros in LEF and Liberty."""
-        self.assertEqual(pdk.LAYER_CIRCUIT_RED, "M5")
-        self.assertEqual(pdk.LAYER_CIRCUIT_GREEN, "M6")
+        red_layer, green_layer = self.pdk.circuit_layers()
+        self.assertEqual(red_layer, "M9")
+        self.assertEqual(green_layer, "M10")
 
         comb_cells = [
             pdk.display_panel_cell(),
@@ -50,8 +51,8 @@ class TestCircuitTelemetry(unittest.TestCase):
             lib_text = liberty.write_liberty(comb_cells, str(lib_path))
 
             # Verify layers and vias exist in LEF
-            self.assertIn("LAYER M5", lef_text)
-            self.assertIn("LAYER M6", lef_text)
+            self.assertIn(f"LAYER {red_layer}", lef_text)
+            self.assertIn(f"LAYER {green_layer}", lef_text)
             self.assertIn("VIA CIRCUIT_DROP_VIA", lef_text)
             self.assertIn("VIA CIRCUIT_TURN_VIA", lef_text)
 
@@ -169,6 +170,83 @@ END DESIGN
                 self.assertEqual(results.get("RESULT_MATCHED"), results.get("RESULT_TOTAL"))
         except FileNotFoundError:
             pass
+
+    def test_long_distance_circuit_bus_on_pole_mst(self) -> None:
+        """Verify long distance circuit telemetry routes via the electric pole MST network."""
+        # Sensor belt is at (25, 5), readout display panel is at (1, 1). Distance > 24 tiles.
+        def_text = """VERSION 5.8 ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 3 ;
+- u_disp_iron_plate display_panel + PLACED ( 1000 1000 ) N ;
+- u_acc_near arithmetic_combinator + PLACED ( 1000 3000 ) N ;
+- u_acc_far arithmetic_combinator + PLACED ( 25000 5000 ) N ;
+END COMPONENTS
+NETS 1 ;
+- iron_plate ( * )
+  + ROUTED M1 ( 25000 5000 ) ( 26000 5000 ) ;
+END NETS
+END DESIGN
+"""
+        netlist_data = {
+            "fluids": [],
+            "cells": {
+                pdk.DISPLAY_PANEL_CELL: pdk.display_panel_cell(),
+                pdk.ARITHMETIC_COMBINATOR_CELL: pdk.arithmetic_combinator_cell(),
+            },
+            "instances": [
+                {
+                    "name": "u_disp_iron_plate",
+                    "cell": pdk.DISPLAY_PANEL_CELL,
+                    "recipe": "iron-plate",
+                },
+                {
+                    "name": "u_acc_near",
+                    "cell": pdk.ARITHMETIC_COMBINATOR_CELL,
+                    "recipe": "iron-plate",
+                },
+                {
+                    "name": "u_acc_far",
+                    "cell": pdk.ARITHMETIC_COMBINATOR_CELL,
+                    "recipe": "iron-plate",
+                },
+            ],
+            "telemetry": [
+                {
+                    "material": "iron-plate",
+                    "display_instance": "u_disp_iron_plate",
+                }
+            ],
+        }
+
+        def_data = def2bp.parse_def(def_text)
+        entities, wires = def2bp.build_entities(def_data, netlist_data, strict_drc=False)
+
+        # 1. Verify pole MST connections carry both copper and circuit bus (red and green)
+        copper_wires = [w for w in wires if w[1] == 5 and w[3] == 5]
+        red_bus_wires = [w for w in wires if w[1] == 1 and w[3] == 1]
+        green_bus_wires = [w for w in wires if w[1] == 2 and w[3] == 2]
+
+        self.assertGreater(len(copper_wires), 0, "Copper MST connections must exist")
+        self.assertEqual(len(copper_wires), len(red_bus_wires), "Red circuit bus must match copper MST edges")
+        self.assertEqual(len(copper_wires), len(green_bus_wires), "Green circuit bus must match copper MST edges")
+
+        # 2. Verify all entity connections are within maximum wire reach (<= 9.0 tiles)
+        ent_by_num = {e["entity_number"]: e for e in entities}
+        for ent in entities:
+            pos_a = (ent["position"]["x"], ent["position"]["y"])
+            for conn_port in ent.get("connections", {}).values():
+                for color, links in conn_port.items():
+                    for link in links:
+                        target_id = link.get("entity_id")
+                        if target_id and target_id in ent_by_num:
+                            target_ent = ent_by_num[target_id]
+                            pos_b = (target_ent["position"]["x"], target_ent["position"]["y"])
+                            wire_len = math.hypot(pos_a[0] - pos_b[0], pos_a[1] - pos_b[1])
+                            self.assertLessEqual(
+                                wire_len,
+                                9.0,
+                                f"Direct wire length {wire_len:.2f} between {ent['name']} and {target_ent['name']} exceeds 9.0 tiles limit",
+                            )
 
 
 if __name__ == "__main__":

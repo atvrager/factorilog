@@ -171,3 +171,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "circuit_synth_test",
+    size = "small",
+    srcs = ["test_circuit_synth.py"],
+    data = [
+        "data/dump-fixture.json",
+        "//flow:controller_verilog",
+    ],
+    main = "test_circuit_synth.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+

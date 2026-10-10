@@ -37,6 +37,7 @@ py_library(
         "blueprint.py",
         "bp2save.py",
         "circuit.py",
+        "circuit_synth.py",
         "def2bp.py",
         "def_parser.py",
         "def_untangle.py",

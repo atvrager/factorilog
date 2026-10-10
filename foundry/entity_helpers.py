@@ -303,6 +303,8 @@ def prune_dead_end_belts(
         if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
             continue
         cell = netlist_data.get("cells", {}).get(cell_id, {})
+        if cell.get("circuit_cell"):
+            continue
         inputs = cell.get("inputs", [])
         outputs = cell.get("outputs", [])
         w = float(cell.get("width", 3))

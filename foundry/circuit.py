@@ -21,6 +21,22 @@ WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER = 5
 WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER = 6
 
 
+def find_nearest_pole(
+    pos: tuple[float, float],
+    pole_entities: dict[tuple[float, float], dict[str, Any]],
+    max_reach: float = 9.0,
+) -> dict[str, Any] | None:
+    """Find the closest electric pole within maximum wire reach distance."""
+    best_pole = None
+    best_dist = 1e9
+    for p_pos, pole in pole_entities.items():
+        d = math.hypot(p_pos[0] - pos[0], p_pos[1] - pos[1])
+        if d <= max_reach and d < best_dist:
+            best_dist = d
+            best_pole = pole
+    return best_pole
+
+
 def wire_telemetry(
     entities: list[dict[str, Any]],
     netlist_data: dict[str, Any],
@@ -91,15 +107,61 @@ def wire_telemetry(
             best_ent.setdefault("control_behavior", {})["circuit_read_hand_contents"] = True
             best_ent["control_behavior"]["circuit_contents_read_mode"] = 0
 
-            if disp_ent and not circ_ent:
-                connect_wire(best_ent, 1, disp_ent, 1, "red")
-            elif circ_ent and not disp_ent:
-                connect_wire(best_ent, 1, circ_ent, 1, "red")
+            cand_dist = math.hypot(
+                best_ent["position"]["x"] - ref_pos[0],
+                best_ent["position"]["y"] - ref_pos[1],
+            )
+            target_ent = circ_ent if circ_ent else disp_ent
+
+            # Use pole MST network for long distances (> 9 tiles)
+            if cand_dist > 9.0 and pole_entities:
+                src_pos = (best_ent["position"]["x"], best_ent["position"]["y"])
+                pole_src = find_nearest_pole(src_pos, pole_entities)
+                pole_dst = find_nearest_pole(ref_pos, pole_entities)
+                if pole_src and pole_dst:
+                    connect_wire(best_ent, 1, pole_src, 1, "red")
+                    if target_ent:
+                        connect_wire(target_ent, 1, pole_dst, 1, "red")
+                elif target_ent:
+                    connect_wire(best_ent, 1, target_ent, 1, "red")
+            elif target_ent:
+                connect_wire(best_ent, 1, target_ent, 1, "red")
+
+            if circ_ent:
+                # Accumulator self-feedback loop
                 connect_wire(circ_ent, 2, circ_ent, 1, "green")
-            elif disp_ent and circ_ent:
-                connect_wire(best_ent, 1, circ_ent, 1, "red")
-                connect_wire(circ_ent, 2, circ_ent, 1, "green")
-                connect_wire(circ_ent, 2, disp_ent, 1, "red")
+                if disp_ent:
+                    connect_wire(circ_ent, 2, disp_ent, 1, "red")
+
+    # Wire synthesized controller circuit connections
+    for c_conn in netlist_data.get("circuit_connections", []):
+        src_name = c_conn.get("source")
+        tgt_name = c_conn.get("target")
+        color = c_conn.get("color", "red")
+        src_port = c_conn.get("source_port", 1)
+        tgt_port = c_conn.get("target_port", 1)
+        ent_src = inst_to_entity.get(src_name)
+        ent_tgt = inst_to_entity.get(tgt_name)
+        if not ent_src or not ent_tgt:
+            continue
+        dist = math.hypot(
+            ent_src["position"]["x"] - ent_tgt["position"]["x"],
+            ent_src["position"]["y"] - ent_tgt["position"]["y"],
+        )
+        if dist > 9.0 and pole_entities:
+            p_src = find_nearest_pole(
+                (ent_src["position"]["x"], ent_src["position"]["y"]), pole_entities
+            )
+            p_tgt = find_nearest_pole(
+                (ent_tgt["position"]["x"], ent_tgt["position"]["y"]), pole_entities
+            )
+            if p_src and p_tgt:
+                connect_wire(ent_src, src_port, p_src, 1, color)
+                connect_wire(ent_tgt, tgt_port, p_tgt, 1, color)
+            else:
+                connect_wire(ent_src, src_port, ent_tgt, tgt_port, color)
+        else:
+            connect_wire(ent_src, src_port, ent_tgt, tgt_port, color)
 
     # Assign 1-based sequential entity numbers
     for idx, ent in enumerate(entities, 1):
@@ -126,12 +188,31 @@ def wire_telemetry(
         ent1 = pole_entities.get(p1)
         ent2 = pole_entities.get(p2)
         if ent1 and ent2 and "entity_number" in ent1 and "entity_number" in ent2:
+            # 1. Copper power connection
             wires.append(
                 [
                     ent1["entity_number"],
                     WIRE_CONNECTOR_POLE_COPPER,
                     ent2["entity_number"],
                     WIRE_CONNECTOR_POLE_COPPER,
+                ]
+            )
+            # 2. Red circuit bus connection
+            wires.append(
+                [
+                    ent1["entity_number"],
+                    WIRE_CONNECTOR_CIRCUIT_RED,
+                    ent2["entity_number"],
+                    WIRE_CONNECTOR_CIRCUIT_RED,
+                ]
+            )
+            # 3. Green circuit bus connection
+            wires.append(
+                [
+                    ent1["entity_number"],
+                    WIRE_CONNECTOR_CIRCUIT_GREEN,
+                    ent2["entity_number"],
+                    WIRE_CONNECTOR_CIRCUIT_GREEN,
                 ]
             )
 

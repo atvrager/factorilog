@@ -68,8 +68,15 @@ LAYER_SURFACE_V = "M2"
 LAYER_TUNNEL = "M3"
 LAYER_TUNNEL_V = "M4"
 LAYER_FLUID = "M3"
-LAYER_CIRCUIT_RED = "M5"
-LAYER_CIRCUIT_GREEN = "M6"
+LAYER_CIRCUIT_RED = "M9"
+LAYER_CIRCUIT_GREEN = "M10"
+
+
+def circuit_layers(num_tiers: int = 3) -> tuple[str, str]:
+    """Derive horizontal red and vertical green layers after all active underground tiers."""
+    t = max(1, num_tiers)
+    return f"M{2 * t + 3}", f"M{2 * t + 4}"
+
 
 DISPLAY_PANEL_CELL = "display_panel"
 ARITHMETIC_COMBINATOR_CELL = "arithmetic_combinator"
@@ -321,6 +328,10 @@ class Pdk:
             if tier.get("underground")
         }
 
+    def circuit_layers(self) -> tuple[str, str]:
+        """Derive horizontal red and vertical green layers after all active underground tiers."""
+        return circuit_layers(len(self.belt_tiers()))
+
     def layer_stack(self) -> dict[str, Any]:
         """Calculate the dynamic routing layer stack for all detected belt tiers."""
         tiers = self.belt_tiers()
@@ -336,46 +347,12 @@ class Pdk:
                 "entity": "transport-belt",
             },
         }
-        base_tier = (
-            tiers[0]
-            if tiers
-            else {
-                "belt": "transport-belt",
-                "underground": "underground-belt",
-                "span": 5,
-            }
-        )
-        layers[LAYER_TUNNEL] = {
-            "direction": "HORIZONTAL",
-            "level": "underground",
-            "entity": base_tier["underground"],
-            "span": base_tier["span"],
-            "tier_belt": base_tier["belt"],
-        }
-        layers[LAYER_TUNNEL_V] = {
-            "direction": "VERTICAL",
-            "level": "underground",
-            "entity": base_tier["underground"],
-            "span": base_tier["span"],
-            "tier_belt": base_tier["belt"],
-        }
-        layers[LAYER_CIRCUIT_RED] = {
-            "direction": "HORIZONTAL",
-            "level": "circuit",
-            "wire": "red",
-        }
-        layers[LAYER_CIRCUIT_GREEN] = {
-            "direction": "VERTICAL",
-            "level": "circuit",
-            "wire": "green",
-        }
-
-        for idx, tier in enumerate(tiers[1:], start=1):
-            h_layer = f"M{2 * idx + 5}"
-            v_layer = f"M{2 * idx + 6}"
-            ug_name = tier.get("underground", "")
+        for idx, tier in enumerate(tiers):
+            h_layer = f"M{2 * idx + 3}"
+            v_layer = f"M{2 * idx + 4}"
+            ug_name = tier.get("underground", "underground-belt")
             span = int(tier.get("span", 5))
-            belt_name = tier.get("belt", "")
+            belt_name = tier.get("belt", "transport-belt")
             layers[h_layer] = {
                 "direction": "HORIZONTAL",
                 "level": "underground",
@@ -390,25 +367,44 @@ class Pdk:
                 "span": span,
                 "tier_belt": belt_name,
             }
+
+        red_layer, green_layer = self.circuit_layers()
+        layers[red_layer] = {
+            "direction": "HORIZONTAL",
+            "level": "circuit",
+            "wire": "red",
+        }
+        layers[green_layer] = {
+            "direction": "VERTICAL",
+            "level": "circuit",
+            "wire": "green",
+        }
         return layers
 
     def tech_json(self) -> dict[str, Any]:
         """The tech layer as a JSON tree. The flow scripts read this."""
+        layers_dict: dict[str, dict[str, Any]] = {
+            LAYER_SURFACE: {"via": "none"},
+            LAYER_SURFACE_V: {"via": "surface-turn"},
+        }
+        for idx, tier in enumerate(self.belt_tiers()):
+            h_layer = f"M{2 * idx + 3}"
+            v_layer = f"M{2 * idx + 4}"
+            layers_dict[h_layer] = {
+                "via": "tunnel-pair",
+                "tiers": self.belt_tiers(),
+                "span": PIPE_TO_GROUND_SPAN if idx == 0 else tier.get("span", 5),
+            }
+            layers_dict[v_layer] = {"via": "tunnel-turn"}
+        red_layer, green_layer = self.circuit_layers()
+        layers_dict[red_layer] = {"via": "circuit-drop"}
+        layers_dict[green_layer] = {"via": "circuit-turn"}
+
         return {
-            "layers": {
-                LAYER_SURFACE: {"via": "none"},
-                LAYER_SURFACE_V: {"via": "surface-turn"},
-                LAYER_TUNNEL: {
-                    "via": "tunnel-pair",
-                    "tiers": self.belt_tiers(),
-                    "span": PIPE_TO_GROUND_SPAN,
-                },
-                LAYER_TUNNEL_V: {"via": "tunnel-turn"},
-                LAYER_CIRCUIT_RED: {"via": "circuit-drop"},
-                LAYER_CIRCUIT_GREEN: {"via": "circuit-turn"},
-            },
+            "layers": layers_dict,
             "layer_stack": self.layer_stack(),
             "underground_spans": self.underground_tier_spans(),
+            "circuit_layers": list(self.circuit_layers()),
             "belts": {name: items_per_second(proto["speed"]) for name, proto in self.belts.items()},
             "inserters": {name: inserter_spec(proto) for name, proto in self.inserters.items()},
             "poles": {

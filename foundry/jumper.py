@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
+    from foundry import pdk
     from foundry.entity_helpers import (
         DIR_STEPS,
         DIRECTION_EAST,
@@ -25,6 +26,7 @@ try:
     from foundry.lef import get_macro_port_geometry
     from foundry.placement import PlacementResult
 except ImportError:
+    import pdk
     from entity_helpers import (
         DIR_STEPS,
         DIRECTION_EAST,
@@ -42,7 +44,16 @@ DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
     "express-underground-belt": 9,
 }
 
-ALL_UG_LAYERS: frozenset[str] = frozenset({"M3", "M4", "M7", "M8", "M9", "M10"})
+
+def get_layer_roles(num_tiers: int = 3) -> tuple[frozenset[str], frozenset[str]]:
+    red, green = pdk.circuit_layers(num_tiers)
+    max_ug = 2 * max(1, num_tiers) + 2
+    ug_layers = frozenset(f"M{i}" for i in range(3, max_ug + 1))
+    circuit_layers = frozenset({red, green})
+    return ug_layers, circuit_layers
+
+
+ALL_UG_LAYERS, CIRCUIT_LAYERS = get_layer_roles(3)
 
 
 @dataclass
@@ -317,7 +328,7 @@ def route_and_resolve_jumpers(
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         for w in net.get("wires", []):
-            if w.get("layer") in ("M5", "M6"):
+            if w.get("layer") in CIRCUIT_LAYERS:
                 continue
             p1 = (
                 round(math.floor(w["x1"] * scale) + 0.5, 2),
@@ -367,7 +378,7 @@ def route_and_resolve_jumpers(
             else:
                 d = DIRECTION_EAST if to_p[0] >= from_p[0] else DIRECTION_WEST
 
-            if layer in ("M5", "M6"):
+            if layer in CIRCUIT_LAYERS:
                 continue
 
             is_fluid = is_fluid_wire(net, layer)
