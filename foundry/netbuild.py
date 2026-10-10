@@ -55,15 +55,17 @@ def build_all(
     tap_scope: str = "none",
     enable_display: bool = True,
     enable_circuit: bool = False,
+    enable_compound_cells: bool = True,
+    synthesize_splitters: bool = True,
 ) -> int:
     """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
     out = Path(out_dir)
     data = solve.Data(str(dump_path))
     tech = pdk.Pdk(data)
     allowed = data.allowed_recipes(["nauvis"])
-    nl = netlist.build(data, demand, allowed)
+    nl = netlist.build(data, demand, allowed, enable_compound_cells=enable_compound_cells)
     plans = netlist.merge_plans_of(nl)
-    split_plans = netlist.split_plans_of(nl)
+    split_plans = netlist.split_plans_of(nl, synthesize_trees=synthesize_splitters)
     telemetry_records = netlist.insert_telemetry(
         nl, tap_scope, enable_display, enable_circuit, plans
     )
@@ -107,11 +109,13 @@ def build_all(
                 "recipe": i.recipe,
                 "plan_rate_per_min": i.plan_rate,
                 "rated_per_min": i.rated,
+                "rank": i.rank,
             }
             for i in nl.instances
         ],
     }
     (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
+    (out / "ranks.tcl").write_text(netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans))
     counts: dict[str, int] = {}
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1
@@ -149,6 +153,18 @@ def main() -> int:
         default=False,
         help="instantiate arithmetic combinator accumulator cells for telemetry taps",
     )
+    parser.add_argument(
+        "--enable-compound-cells",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="cluster dedicated 1:1 producer-consumer pairs into compound macro-cells",
+    )
+    parser.add_argument(
+        "--synthesize-splitters",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="synthesize binary trees of splitters for multi-consumer nets",
+    )
     args = parser.parse_args()
 
     if args.spc is not None:
@@ -163,6 +179,8 @@ def main() -> int:
         tap_scope=args.telemetry_taps,
         enable_display=args.enable_display_readouts,
         enable_circuit=args.enable_circuit_readouts,
+        enable_compound_cells=args.enable_compound_cells,
+        synthesize_splitters=args.synthesize_splitters,
     )
 
 

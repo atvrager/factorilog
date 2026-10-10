@@ -84,24 +84,32 @@ script.on_init(function()
     local surface = game.surfaces[1]
 
     -- Request chunks around factory
-    for cx = -6, 6 do
-        for cy = -6, 6 do
+    for cx = -10, 10 do
+        for cy = -10, 10 do
             surface.request_to_generate_chunks({{cx * 32, cy * 32}}, 1)
         end
     end
     surface.force_generate_chunk_requests()
 
-    -- Pave floor with concrete
-    local tiles = {{}}
-    for x = -120, 120 do
-        for y = -120, 120 do
-            tiles[#tiles + 1] = {{name = "concrete", position = {{x, y}}}}
+    -- Fill water with landfill, then pave floor with concrete
+    local landfill_tiles = {{}}
+    for x = -250, 250 do
+        for y = -250, 250 do
+            landfill_tiles[#landfill_tiles + 1] = {{name = "landfill", position = {{x, y}}}}
         end
     end
-    surface.set_tiles(tiles)
+    surface.set_tiles(landfill_tiles)
+
+    local concrete_tiles = {{}}
+    for x = -250, 250 do
+        for y = -250, 250 do
+            concrete_tiles[#concrete_tiles + 1] = {{name = "concrete", position = {{x, y}}}}
+        end
+    end
+    surface.set_tiles(concrete_tiles)
 
     -- Clear natural debris
-    for _, entity in pairs(surface.find_entities_filtered{{area = {{{{-120, -120}}, {{120, 120}}}}}}) do
+    for _, entity in pairs(surface.find_entities_filtered{{area = {{{{-250, -250}}, {{250, 250}}}}}}) do
         if entity.name ~= "character" then
             entity.destroy()
         end
@@ -124,6 +132,11 @@ script.on_init(function()
 
     local ghosts = surface.find_entities_filtered{{name = "entity-ghost"}}
     local bp_entities = stack.get_blueprint_entities() or {{}}
+    log("SAVE_GEN_GHOSTS: " .. tostring(#ghosts) .. ", BP_ENTITIES: " .. tostring(#bp_entities))
+
+    if #ghosts == 0 then
+        error(string.format("build_blueprint failed: 0 ghosts placed (import_res=%%s, bp_entities=%%d)", tostring(import_res), #bp_entities))
+    end
 
     local min_gx, min_bx = 1e9, 1e9
     local min_gy, min_by = 1e9, 1e9

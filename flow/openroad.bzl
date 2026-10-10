@@ -84,6 +84,14 @@ def _factorilog_synth_impl(ctx):
         extra_flags.append("--enable-circuit-readouts")
     else:
         extra_flags.append("--no-enable-circuit-readouts")
+    if ctx.attr.enable_compound_cells:
+        extra_flags.append("--enable-compound-cells")
+    else:
+        extra_flags.append("--no-enable-compound-cells")
+    if ctx.attr.synthesize_splitters:
+        extra_flags.append("--synthesize-splitters")
+    else:
+        extra_flags.append("--no-synthesize-splitters")
 
     flags_str = " ".join(extra_flags)
     target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
@@ -106,8 +114,13 @@ def _factorilog_synth_impl(ctx):
         "cp -f \"$WORK_DIR/netlist.json\" \"$OUT_DIR/%s\"" % ctx.outputs.netlist_json.basename,
         "cp -f \"$WORK_DIR/tech.lef\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lef.basename,
         "cp -f \"$WORK_DIR/tech.lib\" \"$OUT_DIR/%s\"" % ctx.outputs.tech_lib.basename,
-        "rm -rf \"$WORK_DIR\"",
     ]
+
+    if ctx.outputs.ranks_tcl:
+        outputs.append(ctx.outputs.ranks_tcl)
+        cmd_parts.append("if [ -f \"$WORK_DIR/ranks.tcl\" ]; then cp -f \"$WORK_DIR/ranks.tcl\" \"$OUT_DIR/%s\"; fi" % ctx.outputs.ranks_tcl.basename)
+
+    cmd_parts.append("rm -rf \"$WORK_DIR\"")
 
     if ctx.outputs.time_json:
         outputs.append(ctx.outputs.time_json)
@@ -138,11 +151,14 @@ factorilog_synth = rule(
         "telemetry_taps": attr.string(default = "none", doc = "Telemetry tap scope: none, io, merges, io,merges, all"),
         "enable_display_readouts": attr.bool(default = True, doc = "Enable display panel readouts"),
         "enable_circuit_readouts": attr.bool(default = False, doc = "Enable arithmetic combinator readouts"),
+        "enable_compound_cells": attr.bool(default = True, doc = "Enable compound macro-cell clustering"),
+        "synthesize_splitters": attr.bool(default = True, doc = "Synthesize binary trees of splitters for multi-consumer nets"),
         "cells_v": attr.output(mandatory = True),
         "netlist_v": attr.output(mandatory = True),
         "netlist_json": attr.output(mandatory = True),
         "tech_lef": attr.output(mandatory = True),
         "tech_lib": attr.output(mandatory = True),
+        "ranks_tcl": attr.output(doc = "Optional output TCL script containing instance ranks"),
         "time_json": attr.output(doc = "Optional output synthesis timing JSON file"),
         "_netbuild": attr.label(
             default = Label("//foundry:netbuild"),
@@ -162,6 +178,8 @@ def _factorilog_pnr_impl(ctx):
     out_log = ctx.outputs.log_file
 
     inputs = [ctx.file.netlist_v, ctx.file.tech_lef, ctx.file.tech_lib, ctx.file.script]
+    if ctx.file.ranks_tcl:
+        inputs.append(ctx.file.ranks_tcl)
     outputs = [out_def, out_time]
     if out_drc:
         outputs.append(out_drc)
@@ -180,6 +198,10 @@ def _factorilog_pnr_impl(ctx):
         "cp -f '%s' \"$WORK_DIR/tech.lef\"" % ctx.file.tech_lef.path,
         "cp -f '%s' \"$WORK_DIR/tech.lib\"" % ctx.file.tech_lib.path,
         "cp -f '%s' \"$WORK_DIR/factorilog.tcl\"" % ctx.file.script.path,
+    ]
+    if ctx.file.ranks_tcl:
+        cmd_parts.append("cp -f '%s' \"$WORK_DIR/ranks.tcl\"" % ctx.file.ranks_tcl.path)
+    cmd_parts.extend([
         "cat << 'EOF' > \"$WORK_DIR/run_pnr.tcl\"",
         "set BLOCK_FILL %s" % ctx.attr.block_fill,
         "set CELL_PAD_SITES %d" % ctx.attr.cell_pad_sites,
@@ -188,6 +210,7 @@ def _factorilog_pnr_impl(ctx):
         "set density %s" % ctx.attr.density,
         "set ROUTABILITY_DRIVEN %s" % ("1" if ctx.attr.routability_driven else "0"),
         "set LAYER_ADJUSTMENT \"%s\"" % ctx.attr.layer_adjustment,
+        "set USE_ROW_PLACEMENT %s" % ("1" if ctx.attr.use_row_placement else "0"),
         "source [file join [file dirname [info script]] factorilog.tcl]",
         "EOF",
         "START_NS=$(date +%s%N)",
@@ -201,7 +224,7 @@ def _factorilog_pnr_impl(ctx):
         "ELAPSED_NS=$((END_NS - START_NS))",
         "ELAPSED_SEC=$(awk \"BEGIN {printf \\\"%.3f\\\", $ELAPSED_NS / 1000000000}\")",
         "cp -f \"$WORK_DIR/factory.def\" '%s'" % out_def.path,
-    ]
+    ])
 
     if out_drc:
         cmd_parts.append(
@@ -256,6 +279,8 @@ factorilog_pnr = rule(
         "split_pad_sites": attr.int(default = 5, doc = "Splitter and merger padding sites"),
         "routability_driven": attr.bool(default = True, doc = "Enable routability-driven placement"),
         "layer_adjustment": attr.string(default = "", doc = "Global routing layer adjustment factor"),
+        "use_row_placement": attr.bool(default = False, doc = "Enable structured linear row placement"),
+        "ranks_tcl": attr.label(allow_single_file = [".tcl"], doc = "Optional TCL script containing instance ranks"),
         "def_file": attr.output(mandatory = True, doc = "Routed DEF output file"),
         "route_drc": attr.output(doc = "DRC report output file"),
         "timing_rpt": attr.output(doc = "Timing STA report output file"),
@@ -596,8 +621,11 @@ def factorilog_science_factory(
         split_pad_sites = 5,
         routability_driven = True,
         layer_adjustment = "",
+        use_row_placement = False,
         enable_display_readouts = False,
         enable_circuit_readouts = False,
+        enable_compound_cells = True,
+        synthesize_splitters = True,
         telemetry_taps = "none",
         test_expected_item = None,
         test_min_produced = 20,
@@ -623,11 +651,14 @@ def factorilog_science_factory(
         netlist_json = name + "_netlist.json",
         tech_lef = name + "_tech.lef",
         tech_lib = name + "_tech.lib",
+        ranks_tcl = name + "_ranks.tcl",
         time_json = name + "_synth_time.json",
         dump = dump,
         demand = demand,
         enable_display_readouts = enable_display_readouts,
         enable_circuit_readouts = enable_circuit_readouts,
+        enable_compound_cells = enable_compound_cells,
+        synthesize_splitters = synthesize_splitters,
         telemetry_taps = telemetry_taps,
         tags = merged_tags,
     )
@@ -637,6 +668,7 @@ def factorilog_science_factory(
         netlist_v = ":" + name + "_netlist.v",
         tech_lef = ":" + name + "_tech.lef",
         tech_lib = ":" + name + "_tech.lib",
+        ranks_tcl = ":" + name + "_ranks.tcl",
         def_file = name + ".def",
         route_drc = name + "_route_drc.rpt",
         timing_rpt = name + "_sta.rpt",
@@ -649,6 +681,7 @@ def factorilog_science_factory(
         core_margin = core_margin,
         routability_driven = routability_driven,
         layer_adjustment = layer_adjustment,
+        use_row_placement = use_row_placement,
         tags = merged_tags,
     )
 

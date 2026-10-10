@@ -225,11 +225,59 @@ class Pdk:
             )
         return tiers
 
+    def compound_cell(self, machine: str, combo_name: str) -> dict[str, Any] | None:
+        """Composite PDK macro cell for coupled 1:1 producer-consumer pairs."""
+        proto = self.machines.get(machine)
+        if proto is None:
+            return None
+        speed = float(proto.get("crafting_speed", 1.0))
+        watts = watts_of(proto.get("energy_usage", 0)) * 2.0
+
+        if combo_name == "gear_belt_combo":
+            belt_recipe = self.data.recipes.get("transport-belt", {})
+            seconds = solve.Data.craft_seconds(belt_recipe) if belt_recipe else 0.5
+            cpm = 60.0 * speed / seconds
+            return {
+                "cell": f"{machine}.gear_belt_combo",
+                "machine": machine,
+                "recipe": "gear_belt_combo",
+                "width": 6,
+                "height": 7,
+                "machine_width": 3,
+                "machine_height": 3,
+                "watts": watts,
+                "crafts_per_minute": cpm,
+                "inputs": ["iron-plate"],
+                "outputs": ["transport-belt"],
+                "compound": True,
+            }
+        if combo_name == "gear_inserter_combo":
+            ins_recipe = self.data.recipes.get("inserter", {})
+            seconds = solve.Data.craft_seconds(ins_recipe) if ins_recipe else 0.5
+            cpm = 60.0 * speed / seconds
+            return {
+                "cell": f"{machine}.gear_inserter_combo",
+                "machine": machine,
+                "recipe": "gear_inserter_combo",
+                "width": 6,
+                "height": 7,
+                "machine_width": 3,
+                "machine_height": 3,
+                "watts": watts,
+                "crafts_per_minute": cpm,
+                "inputs": ["iron-plate", "electronic-circuit"],
+                "outputs": ["inserter"],
+                "compound": True,
+            }
+        return None
+
     def cell(self, machine: str, recipe: str) -> dict[str, Any] | None:
         """One MACRO: (building, recipe) with footprint, ports, power.
 
         None when the building does not exist or cannot hold the recipe.
         """
+        if recipe in ("gear_belt_combo", "gear_inserter_combo"):
+            return self.compound_cell(machine, recipe)
         proto = self.machines.get(machine)
         if proto is None:
             return None

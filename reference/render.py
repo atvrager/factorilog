@@ -38,10 +38,13 @@ COLOURS = {
     "steel-chest": (200, 200, 60),
     "infinity-chest": (200, 60, 200),
 }
-BELTS = ("turbo-transport-belt", "express-transport-belt", "fast-transport-belt",
-         "transport-belt")
-TUNNELS = ("turbo-underground-belt", "express-underground-belt",
-           "fast-underground-belt", "underground-belt")
+BELTS = ("turbo-transport-belt", "express-transport-belt", "fast-transport-belt", "transport-belt")
+TUNNELS = (
+    "turbo-underground-belt",
+    "express-underground-belt",
+    "fast-underground-belt",
+    "underground-belt",
+)
 INSERTERS = ("bulk-inserter", "fast-inserter", "long-handed-inserter", "inserter")
 
 
@@ -97,7 +100,8 @@ def entities_of(args):
     nodes, rates, raw, surplus = base_planner.plan(data, args.demand, args.belt, args.inserter)
     lane_index, lanes = base_planner.assign_lanes(nodes)
     entities, block_x, height, vias = base_planner.build(
-        data, nodes, lane_index, args.demand, args.belt, args.inserter)
+        data, nodes, lane_index, args.demand, args.belt, args.inserter
+    )
     return entities
 
 

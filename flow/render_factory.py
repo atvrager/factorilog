@@ -8,7 +8,6 @@ import json
 import math
 import zlib
 from pathlib import Path
-from typing import Any
 
 from PIL import Image, ImageDraw
 

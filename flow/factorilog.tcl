@@ -51,24 +51,179 @@ foreach inst [$block getInsts] {
     set block_area [expr {$block_area + $w * $h}]
 }
 
-set core_side [expr {int(ceil(sqrt($block_area / $BLOCK_FILL)))}]
-set die_side [expr {$core_side + 2 * $CORE_MARGIN}]
-set core_lo $CORE_MARGIN
-set core_hi [expr {$die_side - $CORE_MARGIN}]
-set core_area [expr {($core_hi - $core_lo) * ($core_hi - $core_lo)}]
-puts "factorilog: [llength [$block getInsts]] instances, $block_area block tiles,\
+# Check for ranks.tcl sidecar (Structured Linear Row Placement)
+set has_ranks 0
+if {[file exists "ranks.tcl"]} {
+    source "ranks.tcl"
+    if {[info exists num_ranks] && $num_ranks > 0} {
+        set has_ranks 1
+    }
+}
+
+if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} {
+    # Structured Linear Row Placement:
+    # Arrange machines in horizontal rows by recipe topological depth.
+    set pad_between [expr {max(4, $CELL_PAD_SITES)}]
+    set channel_h 12
+
+    # Offset intermediate stages to the East so outputs flow forward without U-turns
+    set rank_offset_x(0) 0
+    set rank_offset_x(1) 0
+    set rank_offset_x(2) 0
+    set rank_offset_x(3) 20
+    set rank_offset_x(4) 25
+    set rank_offset_x(5) 70
+
+    set max_row_w 0
+    for {set r 0} {$r < $num_ranks} {incr r} {
+        set roff 0
+        if {[info exists rank_offset_x($r)]} { set roff $rank_offset_x($r) }
+        set row_w $roff
+        set rank_max_h 3
+        if {[info exists rank_instances($r)]} {
+            foreach iname $rank_instances($r) {
+                set dinst [$block findInst $iname]
+                if {$dinst != "NULL" && $dinst != ""} {
+                    set dmaster [$dinst getMaster]
+                    set dw [expr {[$dmaster getWidth] / $dbu}]
+                    set dh [expr {[$dmaster getHeight] / $dbu}]
+                    set pad $pad_between
+                    if {[string match "*merge*" $iname]} {
+                        set pad 10
+                    } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
+                        set pad 6
+                    }
+                    set row_w [expr {$row_w + $dw + $pad}]
+                    if {$dh > $rank_max_h} {
+                        set rank_max_h $dh
+                    }
+                }
+            }
+        }
+        set rank_h($r) $rank_max_h
+        if {$row_w > $max_row_w} {
+            set max_row_w $row_w
+        }
+    }
+
+    set core_w [expr {max(30, $max_row_w + 4)}]
+    set total_h $channel_h
+    for {set r 0} {$r < $num_ranks} {incr r} {
+        set row_start_y($r) [expr {$CORE_MARGIN + $total_h}]
+        set total_h [expr {$total_h + $rank_h($r) + $channel_h}]
+    }
+    set core_h $total_h
+    set die_w [expr {$core_w + 2 * $CORE_MARGIN}]
+    set die_h [expr {$core_h + 2 * $CORE_MARGIN}]
+    set core_lo_x $CORE_MARGIN
+    set core_lo_y $CORE_MARGIN
+    set core_hi_x [expr {$die_w - $CORE_MARGIN}]
+    set core_hi_y [expr {$die_h - $CORE_MARGIN}]
+
+    puts "factorilog: structured linear row floorplan ($num_ranks ranks): die ${die_w}x${die_h}, core ${core_w}x${core_h}"
+
+    initialize_floorplan -die_area "0 0 $die_w $die_h" \
+        -core_area "$core_lo_x $core_lo_y $core_hi_x $core_hi_y" \
+        -site tile
+
+    make_tracks
+
+    # Assign positions to instances in each rank row
+    for {set r 0} {$r < $num_ranks} {incr r} {
+        set ry $row_start_y($r)
+        set roff 0
+        if {[info exists rank_offset_x($r)]} { set roff $rank_offset_x($r) }
+        set rx [expr {$core_lo_x + 2 + $roff}]
+        if {[info exists rank_instances($r)]} {
+            foreach iname $rank_instances($r) {
+                set dinst [$block findInst $iname]
+                if {$dinst != "NULL" && $dinst != ""} {
+                    set dmaster [$dinst getMaster]
+                    set dw [expr {[$dmaster getWidth] / $dbu}]
+                    $dinst setLocation [expr {int($rx * $dbu)}] [expr {int($ry * $dbu)}]
+                    $dinst setPlacementStatus PLACED
+                    set pad $pad_between
+                    if {[string match "*merge*" $iname]} {
+                        set pad 10
+                    } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
+                        set pad 6
+                    }
+                    set rx [expr {$rx + $dw + $pad}]
+                }
+            }
+        }
+    }
+
+    # Place any unranked instances at top of core
+    set unranked_x [expr {$core_lo_x + 2}]
+    set unranked_y [expr {$core_hi_y - 4}]
+    foreach inst [$block getInsts] {
+        if {[$inst getPlacementStatus] != "PLACED"} {
+            set master [$inst getMaster]
+            set dw [expr {[$master getWidth] / $dbu}]
+            $inst setLocation [expr {int($unranked_x * $dbu)}] [expr {int($unranked_y * $dbu)}]
+            $inst setPlacementStatus PLACED
+            set unranked_x [expr {$unranked_x + $dw + $pad_between}]
+        }
+    }
+
+    # Place pins on the die edge: inputs on left, outputs on right
+    set_io_pin_constraint -direction input -region left:*
+    set_io_pin_constraint -direction output -region right:*
+    place_pins -hor_layers M1 -ver_layers M2
+
+    detailed_placement
+    if {[catch {check_placement} problem]} {
+        error "factorilog: placement check failed: $problem"
+    }
+
+} else {
+    set core_side [expr {int(ceil(sqrt($block_area / $BLOCK_FILL)))}]
+    set die_side [expr {$core_side + 2 * $CORE_MARGIN}]
+    set core_lo $CORE_MARGIN
+    set core_hi [expr {$die_side - $CORE_MARGIN}]
+    set core_area [expr {($core_hi - $core_lo) * ($core_hi - $core_lo)}]
+    puts "factorilog: [llength [$block getInsts]] instances, $block_area block tiles,\
  die $die_side x $die_side tiles, fill [format %.1f \
 [expr {100.0 * $block_area / $core_area}]] percent"
 
-initialize_floorplan -die_area "0 0 $die_side $die_side" \
-    -core_area "$core_lo $core_lo $core_hi $core_hi" \
-    -site tile
+    initialize_floorplan -die_area "0 0 $die_side $die_side" \
+        -core_area "$core_lo $core_lo $core_hi $core_hi" \
+        -site tile
 
-puts "factorilog: [llength [$block getRows]] rows"
+    make_tracks
 
-# Routing tracks come from the LEF pitches: one track per tile on each
-# layer. M1 and M2 carry surface tracks, M3 and M4 carry underground tunnels.
-make_tracks
+    # Place pins on the die edge: inputs on the left (West), outputs on the right (East).
+    set_io_pin_constraint -direction input -region left:*
+    set_io_pin_constraint -direction output -region right:*
+    place_pins -hor_layers M1 -ver_layers M2
+
+    puts "factorilog: placement density [format %.3f $density]"
+    if {![info exists SPLIT_PAD_SITES]} {
+        set SPLIT_PAD_SITES 5
+    }
+    set split_pad [expr {max($CELL_PAD_SITES, $SPLIT_PAD_SITES)}]
+    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $split_pad -right $split_pad
+
+    if {[info exists ROUTABILITY_DRIVEN] && $ROUTABILITY_DRIVEN == "1"} {
+        global_placement -density $density \
+            -pad_left $CELL_PAD_SITES \
+            -pad_right $CELL_PAD_SITES \
+            -routability_driven
+    } else {
+        global_placement -density $density \
+            -pad_left $CELL_PAD_SITES \
+            -pad_right $CELL_PAD_SITES
+    }
+
+    place_pins -hor_layers M1 -ver_layers M2
+    detailed_placement
+
+    if {[catch {check_placement} problem]} {
+        error "factorilog: placement check failed: $problem"
+    }
+}
 
 # Non-default spacing rule for fluid nets to prevent adjacent surface pipe clashes:
 create_ndr -name fluid_ndr -spacing 1.25
@@ -82,44 +237,6 @@ foreach net [$block getNets] {
 }
 if {$fluid_count > 0} {
     puts "factorilog: assigned non-default spacing rule (1.25) to $fluid_count fluid nets"
-}
-
-# --- io -------------------------------------------------------------
-# Place pins on the die edge: inputs on the left (West), outputs on the right (East).
-set_io_pin_constraint -direction input -region left:*
-set_io_pin_constraint -direction output -region right:*
-place_pins -hor_layers M1 -ver_layers M2
-
-# --- place ----------------------------------------------------------
-# The placer target is its own uniform density floor: the tightest
-# packing the pad allows. The space left over from BLOCK_FILL stays
-# free as the belt channel. Global placement spreads the blocks,
-# legalization snaps them to tile rows, and the check proves every
-# block sits on the grid with no overlap and no site misalignment.
-puts "factorilog: placement density [format %.3f $density]"
-if {![info exists SPLIT_PAD_SITES]} {
-    set SPLIT_PAD_SITES 5
-}
-set split_pad [expr {max($CELL_PAD_SITES, $SPLIT_PAD_SITES)}]
-set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
-set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $split_pad -right $split_pad
-
-if {[info exists ROUTABILITY_DRIVEN] && $ROUTABILITY_DRIVEN == "1"} {
-    global_placement -density $density \
-        -pad_left $CELL_PAD_SITES \
-        -pad_right $CELL_PAD_SITES \
-        -routability_driven
-} else {
-    global_placement -density $density \
-        -pad_left $CELL_PAD_SITES \
-        -pad_right $CELL_PAD_SITES
-}
-
-place_pins -hor_layers M1 -ver_layers M2
-detailed_placement
-
-if {[catch {check_placement} problem]} {
-    error "factorilog: placement check failed: $problem"
 }
 
 report_design_area
@@ -269,7 +386,7 @@ if {$has_circuit} {
 ::drt::detailed_route_set_unidirectional_layer M3
 ::drt::detailed_route_set_unidirectional_layer M4
 
-do_untangle $block $dbu
+# do_untangle $block $dbu
 
 if {[info exists LAYER_ADJUSTMENT] && $LAYER_ADJUSTMENT != ""} {
     set_global_routing_layer_adjustment M1 $LAYER_ADJUSTMENT

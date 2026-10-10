@@ -138,15 +138,15 @@ def serialize_lua(obj: Any) -> str:
     """Serialize a Python data structure into valid Lua literal code."""
     if obj is None:
         return "nil"
-    elif isinstance(obj, bool):
+    if isinstance(obj, bool):
         return "true" if obj else "false"
-    elif isinstance(obj, (int, float)):
+    if isinstance(obj, (int, float)):
         return str(obj)
-    elif isinstance(obj, str):
+    if isinstance(obj, str):
         return json.dumps(obj)
-    elif isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple)):
         return "{" + ", ".join(serialize_lua(x) for x in obj) + "}"
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         return (
             "{" + ", ".join(f"[{json.dumps(k)}] = {serialize_lua(v)}" for k, v in obj.items()) + "}"
         )

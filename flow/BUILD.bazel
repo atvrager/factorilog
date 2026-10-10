@@ -163,6 +163,7 @@ factorilog_science_factory(
     demand = "automation-science-pack 60.0",
     density = "0.15",
     routability_driven = True,
+    use_row_placement = True,
     test_min_active_ratio = "0.60",
     test_ticks = 10800,
     tags = [
@@ -181,9 +182,11 @@ factorilog_science_factory(
     density = "0.02",
     layer_adjustment = "0.5",
     routability_driven = True,
+    use_row_placement = True,
+    synthesize_splitters = True,
     test_expected_item = "logistic-science-pack",
     test_min_active_ratio = "0.50",
-    test_ticks = 25200,
+    test_ticks = 45000,
     tags = [
         "manual",
         "science",

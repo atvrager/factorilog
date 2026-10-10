@@ -34,6 +34,13 @@ OPPOSITE_DIR: dict[int, int] = {
     DIRECTION_WEST: DIRECTION_EAST,
 }
 
+INSERTER_OFFSETS: dict[int, tuple[tuple[int, int], tuple[int, int]]] = {
+    DIRECTION_NORTH: ((0, -1), (0, 1)),
+    DIRECTION_EAST: ((1, 0), (-1, 0)),
+    DIRECTION_SOUTH: ((0, 1), (0, -1)),
+    DIRECTION_WEST: ((-1, 0), (1, 0)),
+}
+
 
 def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
     """Determine Factorio 2.0 cardinal direction from endpoint coordinates."""
@@ -259,6 +266,19 @@ def prune_dead_end_belts(
                 + 0.5
             )
             protected_inserter_tiles.add((round(gx + w + 0.5, 1), round(gy + cy, 1)))
+
+    for e in entities:
+        if "inserter" in e.get("name", ""):
+            d = e.get("direction", DIRECTION_NORTH)
+            mult = 2 if "long-handed" in e.get("name", "") else 1
+            offsets = INSERTER_OFFSETS.get(d, ((-1, 0), (1, 0)))
+            p_dx = offsets[0][0] * mult
+            p_dy = offsets[0][1] * mult
+            pos = e.get("position", {})
+            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            pu_pos = (round(cx + p_dx, 1), round(cy + p_dy, 1))
+            protected_inserter_tiles.add(pu_pos)
 
     if not (output_pins or protected_inserter_tiles or splitter_entry_targets or ug_entry_targets):
         return entities

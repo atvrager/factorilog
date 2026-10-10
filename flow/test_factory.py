@@ -153,6 +153,9 @@ script.on_event(defines.events.on_tick, function(event)
         local surface = game.surfaces[1]
         local stats = game.forces.player.get_item_production_statistics(surface)
         local produced = stats.get_input_count("{expected_item}")
+        for iname, icount in pairs(stats.input_counts) do
+            log(string.format("PRODUCTION_STAT: %s = %d", iname, icount))
+        end
 
         local asms = surface.find_entities_filtered{{type = "assembling-machine"}}
         local active_asms = 0
@@ -161,20 +164,30 @@ script.on_event(defines.events.on_tick, function(event)
         for _, a in ipairs(asms) do
             if a.is_crafting() then active_asms = active_asms + 1 end
             local pf = a.products_finished or 0
+            local rec = a.get_recipe()
+            local sname = tostring(a.status)
+            for k, v in pairs(defines.entity_status) do
+                if v == a.status then sname = k break end
+            end
+            log(string.format("ASM_INFO: at (%.1f,%.1f) recipe=%s status=%s finished=%d crafting=%s",
+                a.position.x, a.position.y,
+                tostring(rec and rec.name),
+                sname,
+                pf,
+                tostring(a.is_crafting())
+            ))
             if pf > 0 then
                 productive_asms = productive_asms + 1
             else
-                local rec = a.get_recipe()
-                local sname = tostring(a.status)
-                for k, v in pairs(defines.entity_status) do
-                    if v == a.status then sname = k break end
-                end
+                table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", a.name, a.position.x, a.position.y))
                 log(string.format("ZERO_PROD_ASM: at (%.1f,%.1f) recipe=%s status=%s energy=%.1f",
                     a.position.x, a.position.y,
                     tostring(rec and rec.name),
                     sname,
                     a.energy
                 ))
+            end
+            if (sname == "item_ingredient_shortage") or (pf == 0) then
                 local inserters = surface.find_entities_filtered{{type = "inserter"}}
                 for _, ins in ipairs(inserters) do
                     if math.abs(ins.drop_position.x - a.position.x) <= 2.0 and math.abs(ins.drop_position.y - a.position.y) <= 2.0 then
@@ -188,6 +201,10 @@ script.on_event(defines.events.on_tick, function(event)
                                 local c1 = be.get_transport_line(1).get_item_count()
                                 local c2 = be.get_transport_line(2).get_item_count()
                                 b_info = string.format("belt dir=%s items=%d+%d", tostring(be.direction), c1, c2)
+                            elseif be.type == "underground-belt" then
+                                local c1 = be.get_transport_line(1).get_item_count()
+                                local c2 = be.get_transport_line(2).get_item_count()
+                                b_info = string.format("ug_belt dir=%s type=%s items=%d+%d", tostring(be.direction), be.belt_to_ground_type, c1, c2)
                             end
                         end
                         log(string.format("  INSERTER at (%.1f,%.1f) dir=%s held=%s pickup=(%.1f,%.1f) %s",
@@ -218,7 +235,6 @@ script.on_event(defines.events.on_tick, function(event)
                     end
                 end
                 log(string.format("BELTS_WITH_ITEMS (%d total): %s", #belts_with_items, table.concat(belts_with_items, " ")))
-                table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", a.name, a.position.x, a.position.y))
             end
         end
 
@@ -290,7 +306,14 @@ end)
 
     log_text = log_file.read_text(encoding="utf-8")
     for line in log_text.splitlines():
-        if "ZERO_PROD_ASM:" in line or "INSERTER at" in line or "SPLITTER at" in line:
+        if (
+            "ASM_INFO:" in line
+            or "ZERO_PROD_ASM:" in line
+            or "INSERTER at" in line
+            or "SPLITTER at" in line
+            or "PRODUCTION_STAT:" in line
+            or "BELTS_WITH_ITEMS" in line
+        ):
             print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:
             result_line = line

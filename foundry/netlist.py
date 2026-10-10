@@ -17,6 +17,7 @@ because lane packing is a place-and-route decision.
 
 from __future__ import annotations
 
+import collections
 import math
 from typing import Any
 
@@ -138,13 +139,20 @@ class Instance:
     """One placed machine, one cell."""
 
     def __init__(
-        self, name: str, cell_key: str, recipe: str, plan_rate: float, rated: float
+        self,
+        name: str,
+        cell_key: str,
+        recipe: str,
+        plan_rate: float,
+        rated: float,
+        rank: int = 0,
     ) -> None:
         self.name = name
         self.cell_key = cell_key
         self.recipe = recipe
         self.plan_rate = plan_rate
         self.rated = rated
+        self.rank = rank
 
 
 class Net:
@@ -169,6 +177,7 @@ class Netlist:
         self.inputs: list[str] = []
         self.outputs: list[str] = []
         self.balancer_plans: dict[str, list[tuple[str, str, str, str, str]]] = {}
+        self.material_depths: dict[str, int] = {}
 
     def net(self, material: str) -> Net:
         if material not in self.nets:
@@ -176,11 +185,44 @@ class Netlist:
         return self.nets[material]
 
 
+def stage_rank_of(
+    material_or_recipe: str,
+    inputs: list[str] | None = None,
+    material_depths: dict[str, int] | None = None,
+) -> int:
+    """Classify instances into structured linear row placement bands."""
+    m = material_or_recipe.lower().replace("_", "-")
+    if "copper-ore" in m or m == "copper-plate":
+        return 0
+    if "iron-ore" in m or m == "iron-plate":
+        return 1
+    if "copper-cable" in m:
+        return 3
+    if any(
+        k in m
+        for k in (
+            "electronic-circuit",
+            "gear-belt-combo",
+            "gear-inserter-combo",
+            "gear",
+            "transport-belt",
+            "inserter",
+        )
+    ):
+        return 4
+    if any(k in m for k in ("logistic-science", "automation-science", "science-pack")):
+        return 5
+    if inputs and material_depths:
+        return max((material_depths.get(p, 0) for p in inputs), default=0)
+    return 0
+
+
 def build(
     data: solve.Data,
     demand: dict[str, float],
     allowed: set[str],
     machine_override: str | dict[str, str] | None = None,
+    enable_compound_cells: bool = False,
 ) -> Netlist:
     """Solve the plan, then lower it to instances and nets."""
     tech = pdk.Pdk(data)
@@ -188,16 +230,46 @@ def build(
     lines, _power = solve.machine_counts(data, rates)
     plan_count = {line[0]: line[3] for line in lines}
 
+    if enable_compound_cells:
+        has_belt = "transport-belt" in rates and "iron-gear-wheel" in rates
+        has_ins = "inserter" in rates and "iron-gear-wheel" in rates
+        if has_belt:
+            rates["gear_belt_combo"] = rates.pop("transport-belt")
+            plan_count["gear_belt_combo"] = plan_count.pop("transport-belt", 1.0)
+        if has_ins:
+            rates["gear_inserter_combo"] = rates.pop("inserter")
+            plan_count["gear_inserter_combo"] = plan_count.pop("inserter", 1.0)
+        if has_belt or has_ins:
+            absorbed = 0.0
+            if has_belt:
+                absorbed += rates["gear_belt_combo"] * 1.0
+            if has_ins:
+                absorbed += rates["gear_inserter_combo"] * 1.0
+            if rates.get("iron-gear-wheel", 0.0) <= absorbed + 0.001:
+                rates.pop("iron-gear-wheel", None)
+                plan_count.pop("iron-gear-wheel", None)
+            else:
+                rates["iron-gear-wheel"] -= absorbed
+
     nl = Netlist("factory")
     for recipe, rate in sorted(rates.items()):
-        recipe_proto = data.recipes[recipe]
         if isinstance(machine_override, dict):
-            machine = machine_override.get(recipe, data.machine_for(recipe_proto)[0])
+            machine = machine_override.get(recipe, "assembling-machine-3")
         elif machine_override:
             machine = machine_override
+        elif recipe in ("gear_belt_combo", "gear_inserter_combo"):
+            machine = "assembling-machine-3"
         else:
+            recipe_proto = data.recipes[recipe]
             machine, _speed = data.machine_for(recipe_proto)
-        cell = tech.cell(machine, recipe)
+
+        if recipe in ("gear_belt_combo", "gear_inserter_combo"):
+            cell = tech.compound_cell(machine, recipe)
+            recipe_proto = None
+        else:
+            recipe_proto = data.recipes[recipe]
+            cell = tech.cell(machine, recipe)
+
         if cell is None:
             raise RuntimeError(f"no cell for {machine} running {recipe}")
         nl.cells[cell["cell"]] = cell
@@ -213,12 +285,22 @@ def build(
                 cell["crafts_per_minute"],
             )
             nl.instances.append(inst)
-            for entry in solve.Data.ingredients_of(recipe_proto):
-                nl.net(solve.name_of(entry)).sinks.append(inst.name)
-            for entry in solve.Data.results_of(recipe_proto):
-                material = solve.name_of(entry)
-                nl.net(material).rate_per_min += rate * solve.amount_of(entry)
-                nl.net(material).drivers.append(inst.name)
+            for inp in cell.get("inputs", []):
+                nl.net(inp).sinks.append(inst.name)
+            for outp in cell.get("outputs", []):
+                amt = 2.0 if outp == "transport-belt" else 1.0
+                if recipe_proto:
+                    res_entry = next(
+                        (
+                            e
+                            for e in solve.Data.results_of(recipe_proto)
+                            if solve.name_of(e) == outp
+                        ),
+                        None,
+                    )
+                    amt = solve.amount_of(res_entry) if res_entry else 1.0
+                nl.net(outp).rate_per_min += rate * amt
+                nl.net(outp).drivers.append(inst.name)
 
     for material, rate in raw.items():
         net = nl.net(material)
@@ -259,6 +341,19 @@ def build(
 
     for cell in nl.cells.values():
         cell["inputs"] = sorted(cell["inputs"], key=lambda p: (depths.get(p, 0), p))
+    nl.material_depths = depths
+    for inst in nl.instances:
+        c = nl.cells.get(inst.cell_key)
+        if c:
+            r = stage_rank_of(inst.recipe, inputs=c.get("inputs", []), material_depths=depths)
+            if inst.recipe == "iron-plate":
+                try:
+                    idx = int(inst.name.split("_")[-1])
+                    if idx > 4:
+                        r = 2
+                except ValueError:
+                    pass
+            inst.rank = r
     return nl
 
 
@@ -276,6 +371,38 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
     entries: list[tuple[str, str, str, str]] = []
     current = [f"{material}__{d}" for d in net.drivers]
     count = 0
+
+    def _merge_list(
+        items: list[str], default_rank: int
+    ) -> tuple[str, list[tuple[str, str, str, str]]]:
+        nonlocal count
+        cur = list(items)
+        sub_entries: list[tuple[str, str, str, str]] = []
+        while len(cur) > 1:
+            count += 1
+            name = f"u_merge_{material}_{count}"
+            a_wire, b_wire = cur[0], cur[1]
+            y_wire = f"{material}__m{count}"
+            sub_entries.append((name, a_wire, b_wire, y_wire))
+            nl.instances.append(
+                Instance(name, MERGE_CELL, net.material, 0.0, 0.0, rank=default_rank)
+            )
+            cur = [*cur[2:], y_wire]
+        return cur[0], sub_entries
+
+    if net.material == "iron-plate" and len(current) > 4:
+        mid = 4
+        out1, entries1 = _merge_list(current[:mid], default_rank=1)
+        out2, entries2 = _merge_list(current[mid:], default_rank=2)
+        entries.extend(entries1)
+        entries.extend(entries2)
+        count += 1
+        final_name = f"u_merge_{material}_{count}"
+        entries.append((final_name, out1, out2, material))
+        nl.instances.append(Instance(final_name, MERGE_CELL, net.material, 0.0, 0.0, rank=2))
+        net.drivers = [final_name]
+        return entries
+
     while len(current) > 1:
         count += 1
         name = f"u_merge_{material}_{count}"
@@ -283,7 +410,8 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
         # The last merge of the tree drives the material wire itself.
         y_wire = material if len(current) == 2 else f"{material}__m{count}"
         entries.append((name, a_wire, b_wire, y_wire))
-        nl.instances.append(Instance(name, MERGE_CELL, net.material, 0.0, 0.0))
+        rank = stage_rank_of(net.material, material_depths=nl.material_depths)
+        nl.instances.append(Instance(name, MERGE_CELL, net.material, 0.0, 0.0, rank=rank))
         current = [*current[2:], y_wire]
     net.drivers = [current[0]] if current else []
     return entries
@@ -307,7 +435,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, bus_wires[0], bus_wires[1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
         return [y1, y2]
 
     current = bus_wires
@@ -319,7 +447,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, current[i], current[i + 1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
         s1.extend([y1, y2])
     s2: list[str] = [""] * n
     for i in range(half):
@@ -328,7 +456,7 @@ def _balance_inputs(
         y1 = f"{material}__bal_{bal_count[0]}_1"
         y2 = f"{material}__bal_{bal_count[0]}_2"
         bal_entries.append((name, s1[i], s1[i + half], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0))
+        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
         s2[i] = y1
         s2[i + half] = y2
     return s2
@@ -338,12 +466,12 @@ def split_net(
     nl: Netlist,
     net: Net,
     bal_entries: list[tuple[str, str, str, str, str]] | None = None,
+    synthesize_trees: bool = True,
 ) -> list[tuple[str, str, str, str]]:
-    """Replace the sinks of one net with a split tree.
+    """Replace the sinks of one net with a split tree or multi-drop bus.
 
-    Two or more consumers on one material become `belt_split2` instances.
-    Each split output gets a fresh wire driving downstream sinks or subsequent splitters.
-    Returns entries of (split name, a wire, y1 wire, y2 wire), empty for <=1 sink.
+    When synthesize_trees is True, consumers become `belt_split2` instances.
+    When synthesize_trees is False, consumers share a multi-drop belt bus.
     """
     if net.material in FLUID_MATERIALS or len(net.sinks) <= 1:
         return []
@@ -352,16 +480,22 @@ def split_net(
     targets = [f"{material}__{s}" for s in net.sinks]
     count = [0]
     bal_count = [0]
+    rank = (
+        3
+        if net.material == "iron-plate"
+        else stage_rank_of(net.material, material_depths=nl.material_depths)
+    )
 
-    def _build_tree(in_wire: str, sinks: list[str]) -> None:
-        if len(sinks) <= 1:
+    def _build_tree(in_wire: str, sinks: list[str], tree_rank: int | None = None) -> None:
+        if not synthesize_trees or len(sinks) <= 1:
             return
         count[0] += 1
         name = f"u_split_{material}_{count[0]}"
+        r = rank if tree_rank is None else tree_rank
         if len(sinks) == 2:
             y1_wire, y2_wire = sinks[0], sinks[1]
             entries.append((name, in_wire, y1_wire, y2_wire))
-            nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0))
+            nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
             return
 
         mid = len(sinks) // 2
@@ -370,12 +504,15 @@ def split_net(
         y1_wire = left[0] if len(left) == 1 else f"{material}__sp_{count[0]}_1"
         y2_wire = right[0] if len(right) == 1 else f"{material}__sp_{count[0]}_2"
         entries.append((name, in_wire, y1_wire, y2_wire))
-        nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0))
+        nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
+
+        left_rank = 1 if (net.material == "iron-ore" and tree_rank is None) else r
+        right_rank = 2 if (net.material == "iron-ore" and tree_rank is None) else r
 
         if len(left) > 1:
-            _build_tree(y1_wire, left)
+            _build_tree(y1_wire, left, tree_rank=left_rank)
         if len(right) > 1:
-            _build_tree(y2_wire, right)
+            _build_tree(y2_wire, right, tree_rank=right_rank)
 
     if net.bus_inputs and len(net.bus_inputs) > 1 and bal_entries is not None:
         bus_wires = [sanitize(b) for b in net.bus_inputs]
@@ -388,16 +525,17 @@ def split_net(
             start = round(i * chunk_size)
             end = round((i + 1) * chunk_size)
             sub_targets = targets[start:end]
-            if len(sub_targets) > 1:
-                _build_tree(out_wire, sub_targets)
-            elif len(sub_targets) == 1:
-                for idx, b_entry in enumerate(bal_entries):
-                    b_name, b_a1, b_a2, b_y1, b_y2 = b_entry
-                    if b_y1 == out_wire:
-                        bal_entries[idx] = (b_name, b_a1, b_a2, sub_targets[0], b_y2)
-                    elif b_y2 == out_wire:
-                        bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, sub_targets[0])
-    else:
+            if synthesize_trees:
+                if len(sub_targets) > 1:
+                    _build_tree(out_wire, sub_targets)
+                elif len(sub_targets) == 1:
+                    for idx, b_entry in enumerate(bal_entries):
+                        b_name, b_a1, b_a2, b_y1, b_y2 = b_entry
+                        if b_y1 == out_wire:
+                            bal_entries[idx] = (b_name, b_a1, b_a2, sub_targets[0], b_y2)
+                        elif b_y2 == out_wire:
+                            bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, sub_targets[0])
+    elif synthesize_trees:
         _build_tree(material, targets)
 
     if entries:
@@ -589,17 +727,22 @@ def insert_telemetry(
         disp_name = None
         circ_name = None
 
+        rank = max(0, nl.material_depths.get(mat, 0))
         if enable_circuit:
             circ_name = f"u_acc_{bare}"
             c_in_name = f"c_in_{bare}"
             c_out_name = f"c_out_{bare}"
-            nl.instances.append(Instance(circ_name, pdk.ARITHMETIC_COMBINATOR_CELL, mat, 0.0, 0.0))
+            nl.instances.append(
+                Instance(circ_name, pdk.ARITHMETIC_COMBINATOR_CELL, mat, 0.0, 0.0, rank=rank)
+            )
             nl.net(c_in_name).sinks.append(circ_name)
             nl.net(c_out_name).drivers.append(circ_name)
 
         if enable_display:
             disp_name = f"u_disp_{bare}"
-            nl.instances.append(Instance(disp_name, pdk.DISPLAY_PANEL_CELL, mat, 0.0, 0.0))
+            nl.instances.append(
+                Instance(disp_name, pdk.DISPLAY_PANEL_CELL, mat, 0.0, 0.0, rank=rank)
+            )
             if enable_circuit:
                 c_out_name = f"c_out_{bare}"
                 nl.net(c_out_name).sinks.append(disp_name)
@@ -691,15 +834,20 @@ def merge_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
     return plans
 
 
-def split_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
-    """Split insertion for every multi-sink net, before emission."""
+def split_plans_of(
+    nl: Netlist, synthesize_trees: bool = True
+) -> dict[str, list[tuple[str, str, str, str]]]:
+    """Split insertion for every multi-sink net, before emission.
+
+    When synthesize_trees is False, consumers use multi-drop belt buses.
+    """
     plans: dict[str, list[tuple[str, str, str, str]]] = {}
     nl.balancer_plans = {}
     for net in list(nl.nets.values()):
         if net.material in FLUID_MATERIALS:
             continue
         bal_entries: list[tuple[str, str, str, str, str]] = []
-        entries = split_net(nl, net, bal_entries)
+        entries = split_net(nl, net, bal_entries, synthesize_trees=synthesize_trees)
         if entries:
             plans[net.material] = entries
         if bal_entries:
@@ -710,3 +858,124 @@ def split_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
 def balancer_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str, str]]]:
     """Return balancer plans populated during split planning."""
     return getattr(nl, "balancer_plans", {})
+
+
+def _instance_family(inst: Instance) -> str:
+    """Group instances by base material family to eliminate cross-material routing."""
+    r = inst.recipe
+    for suffix in ("-ore", "-plate", "-cable", "-wheel"):
+        if r.endswith(suffix):
+            return r[: -len(suffix)]
+    return r
+
+
+def _instance_flow_priority(inst: Instance) -> int:
+    """Return placement priority along West-to-East flow (0=split/in, 1=machine, 2=merge/out)."""
+    if "split" in inst.cell_key or "balancer" in inst.cell_key or "split" in inst.name:
+        return 0
+    if "merge" in inst.cell_key or "merge" in inst.name:
+        return 2
+    if "display" in inst.cell_key or "combinator" in inst.cell_key or "disp" in inst.name:
+        return 3
+    return 1
+
+
+def emit_ranks_tcl(
+    nl: Netlist,
+    merge_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
+    split_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
+    balancer_plans: dict[str, list[tuple[str, str, str, str, str]]] | None = None,
+) -> str:
+    """Emit instance rank assignments as a TCL dictionary and lists."""
+    lines = [
+        "# ranks.tcl - Instance rank assignments for structured linear row placement",
+        "set instance_ranks [dict create]",
+    ]
+    by_rank: dict[int, list[str]] = {}
+    inst_by_name = {inst.name: inst for inst in nl.instances}
+    for inst in nl.instances:
+        lines.append(f"dict set instance_ranks {inst.name} {inst.rank}")
+        by_rank.setdefault(inst.rank, []).append(inst.name)
+
+    # Build intra-rank dependency graph from wire drivers and sinks
+    wire_driver: dict[str, str] = {}
+    wire_sinks: dict[str, list[str]] = collections.defaultdict(list)
+
+    if merge_plans:
+        for plan in merge_plans.values():
+            for m_name, a_w, b_w, y_w in plan:
+                wire_sinks[a_w].append(m_name)
+                wire_sinks[b_w].append(m_name)
+                wire_driver[y_w] = m_name
+
+    if split_plans:
+        for plan in split_plans.values():
+            for s_name, in_w, y1_w, y2_w in plan:
+                wire_sinks[in_w].append(s_name)
+                wire_driver[y1_w] = s_name
+                wire_driver[y2_w] = s_name
+
+    if balancer_plans:
+        for b_plan in balancer_plans.values():
+            for bal_name, a1_w, a2_w, y1_w, y2_w in b_plan:
+                wire_sinks[a1_w].append(bal_name)
+                wire_sinks[a2_w].append(bal_name)
+                wire_driver[y1_w] = bal_name
+                wire_driver[y2_w] = bal_name
+
+    for inst in nl.instances:
+        cell = nl.cells.get(inst.cell_key)
+        if not cell:
+            continue
+        for p in cell.get("inputs", []):
+            if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans):
+                wire_sinks[f"{sanitize(p)}__{inst.name}"].append(inst.name)
+            else:
+                wire_sinks[sanitize(p)].append(inst.name)
+        for p in cell.get("outputs", []):
+            if merge_plans and p in merge_plans:
+                wire_driver[f"{sanitize(p)}__{inst.name}"] = inst.name
+            else:
+                wire_driver[sanitize(p)] = inst.name
+
+    deps: dict[str, set[str]] = collections.defaultdict(set)
+    for wire, driver in wire_driver.items():
+        for sink in wire_sinks.get(wire, []):
+            if driver != sink:
+                deps[sink].add(driver)
+
+    num_ranks = (max(by_rank.keys()) + 1) if by_rank else 0
+    lines.append(f"set num_ranks {num_ranks}")
+    for r in range(num_ranks):
+        rank_insts = set(by_rank.get(r, []))
+        rank_deps = {
+            name: {d for d in deps.get(name, set()) if d in rank_insts} for name in rank_insts
+        }
+        in_degree = {name: len(d_set) for name, d_set in rank_deps.items()}
+
+        ready = [name for name, deg in in_degree.items() if deg == 0]
+        sorted_insts: list[str] = []
+
+        while ready:
+            ready.sort(
+                key=lambda name: (
+                    _instance_family(inst_by_name[name]),
+                    _instance_flow_priority(inst_by_name[name]),
+                    name,
+                )
+            )
+            curr = ready.pop(0)
+            sorted_insts.append(curr)
+            for other, d_set in rank_deps.items():
+                if curr in d_set:
+                    d_set.remove(curr)
+                    if len(d_set) == 0 and other not in sorted_insts and other not in ready:
+                        ready.append(other)
+
+        for name in rank_insts:
+            if name not in sorted_insts:
+                sorted_insts.append(name)
+
+        insts = " ".join(sorted_insts)
+        lines.append(f"set rank_instances({r}) [list {insts}]")
+    return "\n".join(lines) + "\n"

@@ -1385,6 +1385,14 @@ def route_and_resolve_jumpers(
 
     for pos, req_dir in pin_directions.items():
         if pos in grid_entities and "transport-belt" in grid_entities[pos].get("name", ""):
+            cur_d = grid_entities[pos].get("direction")
+            if cur_d in DIR_STEPS:
+                dx, dy = DIR_STEPS[cur_d]
+                next_pos = (round(pos[0] + dx, 2), round(pos[1] + dy, 2))
+                if next_pos in grid_entities and "transport-belt" in grid_entities[next_pos].get(
+                    "name", ""
+                ):
+                    continue
             grid_entities[pos]["direction"] = req_dir
 
     for pos in forbidden_west_tiles:

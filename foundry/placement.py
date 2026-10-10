@@ -201,6 +201,66 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             for tx in range(cw):
                 for ty in range(ch):
                     occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+        elif (
+            cell.get("compound") or "gear_belt_combo" in cell_id or "gear_inserter_combo" in cell_id
+        ):
+            machine = cell.get("machine", "assembling-machine-3")
+            # 1. Machine 1: iron-gear-wheel at (gx + 3.5, gy + 1.5)
+            ent1 = add_entity(
+                machine,
+                gx + 3.5,
+                gy + 1.5,
+                direction=DIRECTION_NORTH,
+                extra={"recipe": "iron-gear-wheel"},
+            )
+            inst_to_entity[f"{cname}__m1"] = ent1
+            for tx in range(3):
+                for ty in range(3):
+                    occupied_positions.add((round(gx + 2.0 + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+
+            # 2. Machine 2: transport-belt or inserter at (gx + 3.5, gy + 5.5)
+            m2_recipe = "transport-belt" if "belt" in cell_id else "inserter"
+            ent2 = add_entity(
+                machine,
+                gx + 3.5,
+                gy + 5.5,
+                direction=DIRECTION_NORTH,
+                extra={"recipe": m2_recipe},
+            )
+            inst_to_entity[cname] = ent2
+            for tx in range(3):
+                for ty in range(3):
+                    occupied_positions.add(
+                        (round(gx + 2.0 + tx + 0.5, 2), round(gy + 4.0 + ty + 0.5, 2))
+                    )
+
+            # 3. Direct handoff inserter from Machine 1 to Machine 2 at (gx + 3.5, gy + 3.5)
+            add_entity("fast-inserter", gx + 3.5, gy + 3.5, direction=DIRECTION_NORTH)
+            occupied_positions.add((round(gx + 3.5, 2), round(gy + 3.5, 2)))
+
+            # 4. Internal transport belt for iron-plate from y = 1.5 to y = 5.5 at x = gx + 0.5
+            for ty in (1, 2, 3, 4, 5):
+                add_entity("transport-belt", gx + 0.5, gy + ty + 0.5, direction=DIRECTION_SOUTH)
+                occupied_positions.add((round(gx + 0.5, 2), round(gy + ty + 0.5, 2)))
+
+            # 5. Feed inserter for Machine 1 (iron-plate) at (gx + 1.5, gy + 1.5)
+            add_entity("fast-inserter", gx + 1.5, gy + 1.5, direction=DIRECTION_WEST)
+            occupied_positions.add((round(gx + 1.5, 2), round(gy + 1.5, 2)))
+
+            # 6. Feed inserter for Machine 2 (iron-plate) at (gx + 1.5, gy + 5.5)
+            add_entity("fast-inserter", gx + 1.5, gy + 5.5, direction=DIRECTION_WEST)
+            occupied_positions.add((round(gx + 1.5, 2), round(gy + 5.5, 2)))
+
+            # 7. Feed inserter for electronic-circuit at (gx + 1.5, gy + 6.5) if inserter combo
+            if "inserter" in cell_id:
+                add_entity("transport-belt", gx + 0.5, gy + 6.5, direction=DIRECTION_EAST)
+                occupied_positions.add((round(gx + 0.5, 2), round(gy + 6.5, 2)))
+                add_entity("fast-inserter", gx + 1.5, gy + 6.5, direction=DIRECTION_WEST)
+                occupied_positions.add((round(gx + 1.5, 2), round(gy + 6.5, 2)))
+
+            # 8. Output inserter for Machine 2 at (gx + 5.5, gy + 5.5)
+            add_entity("fast-inserter", gx + 5.5, gy + 5.5, direction=DIRECTION_WEST)
+            occupied_positions.add((round(gx + 5.5, 2), round(gy + 5.5, 2)))
         else:
             cw = int(cell.get("width", 3))
             ch = int(cell.get("height", 3))

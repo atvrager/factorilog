@@ -1,6 +1,7 @@
 # Dev tooling: the ASD-STE100 prose linter, its rule regression tests, and
 # the Python lint and type checks.
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -35,6 +36,15 @@ py_binary(
     name = "inspect_def",
     srcs = ["inspect_def.py"],
     main = "inspect_def.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_binary(
+    name = "inspect_bp",
+    srcs = ["inspect_bp.py"],
+    main = "inspect_bp.py",
     deps = [
         "//foundry:pdk_lib",
     ],
@@ -80,6 +90,22 @@ sh_test(
     name = "ruff_test",
     size = "small",
     srcs = ["run_ruff.sh"],
+    args = [
+        "$(location @ruff//:bin)",
+        "$(location //:ruff.toml)",
+    ],
+    data = [
+        "@ruff//:bin",
+        "//:ruff.toml",
+        "//foundry:py_srcs",
+        "//reference:py_srcs",
+        "//tools:py_srcs",
+    ],
+)
+
+sh_binary(
+    name = "ruff_format",
+    srcs = ["format_ruff.sh"],
     args = [
         "$(location @ruff//:bin)",
         "$(location //:ruff.toml)",
