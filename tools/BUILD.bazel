@@ -86,6 +86,25 @@ py_test(
     main = "test_check_flow_tcl.py",
 )
 
+py_binary(
+    name = "check_no_recipe_heuristics",
+    srcs = ["check_no_recipe_heuristics.py"],
+    main = "check_no_recipe_heuristics.py",
+)
+
+py_test(
+    name = "no_recipe_heuristics_test",
+    size = "small",
+    srcs = [
+        "check_no_recipe_heuristics.py",
+        "test_check_no_recipe_heuristics.py",
+    ],
+    data = [
+        "//foundry:py_srcs",
+    ],
+    main = "test_check_no_recipe_heuristics.py",
+)
+
 sh_test(
     name = "ruff_test",
     size = "small",

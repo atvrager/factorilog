@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
+try:
+    from foundry.lef import get_macro_port_slots
+except ImportError:
+    from lef import get_macro_port_slots
+
 
 def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
     """Untangle symmetric splitter outputs whose initial routing segments cross.
@@ -419,6 +424,7 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
     eliminates the crossing before jumper synthesis.
     """
     scale = 1.0 / float(def_data.get("units", 1000))
+    units = int(def_data.get("units", 1000))
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
     cell_map = netlist_data.get("cells", {})
     fluids = set(netlist_data.get("fluids", []))
@@ -434,86 +440,103 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
         inputs = [p.replace("-", "_") for p in cell.get("inputs", []) if p not in fluids]
         if len(inputs) < 2:
             continue
-        gx = round(c.get("x", 0) * scale * 1000)
-        gy = round(c.get("y", 0) * scale * 1000)
+        gx = round(c.get("x", 0) * scale * units)
+        gy = round(c.get("y", 0) * scale * units)
 
-        p0, p1 = inputs[0], inputs[1]
-        py0 = gy + 500
-        py1 = gy + 1500
+        in_slots, _ = get_macro_port_slots(cell)
+        port_to_net: dict[str, dict[str, Any]] = {}
+        for n in def_data.get("nets", []):
+            for iname, pin in n.get("connections", []):
+                if iname == cname and pin in inputs:
+                    port_to_net[pin] = n
 
-        n0 = next(
-            (
-                n
-                for n in def_data.get("nets", [])
-                if any(conn[0] == cname and conn[1] == p0 for conn in n.get("connections", []))
-            ),
-            None,
-        )
-        n1 = next(
-            (
-                n
-                for n in def_data.get("nets", [])
-                if any(conn[0] == cname and conn[1] == p1 for conn in n.get("connections", []))
-            ),
-            None,
-        )
-        if not n0 or not n1:
-            continue
+        pickup_x = gx - int(0.5 * units)
 
-        pickup_x = gx - 500
-        w_m2_cross = next(
-            (
-                w
-                for w in n1.get("wires", [])
-                if w.get("layer") == "M2"
-                and abs(w.get("x1", 0) - pickup_x) <= 500
-                and min(w["y1"], w["y2"]) <= py0 <= max(w["y1"], w["y2"])
-            ),
-            None,
-        )
-        w_m1_1 = next(
-            (
-                w
-                for w in n1.get("wires", [])
-                if w.get("layer") == "M1"
-                and abs(w.get("x2", 0) - gx) <= 500
-                and (w["y1"] == py1 or w["y2"] == py1)
-            ),
-            None,
-        )
+        for i in range(len(inputs)):
+            for j in range(i + 1, len(inputs)):
+                p0, p1 = inputs[i], inputs[j]
+                slot0 = in_slots.get(p0, i)
+                slot1 = in_slots.get(p1, j)
+                if slot0 > slot1:
+                    p0, p1 = p1, p0
+                    slot0, slot1 = slot1, slot0
 
-        needs_swap = (w_m2_cross is not None) or (
-            w_m1_1 is not None
-            and any(
-                w.get("layer") == "M2"
-                and abs(w.get("x1", 0) - pickup_x) <= 500
-                and max(w["y1"], w["y2"]) == py1
-                and min(w["y1"], w["y2"]) <= py0
-                for w in n1.get("wires", [])
-            )
-        )
+                py0 = gy + int((slot0 + 0.5) * units)
+                py1 = gy + int((slot1 + 0.5) * units)
 
-        if not needs_swap:
-            continue
+                n0 = port_to_net.get(p0)
+                n1 = port_to_net.get(p1)
+                if not n0 or not n1 or n0 is n1:
+                    continue
 
-        conns0 = [conn for conn in n0.get("connections", []) if conn[0] != cname]
-        conns1 = [conn for conn in n1.get("connections", []) if conn[0] != cname]
-        n0["connections"] = [(cname, p1), *conns0]
-        n1["connections"] = [(cname, p0), *conns1]
+                w_m2_cross = next(
+                    (
+                        w
+                        for w in n1.get("wires", [])
+                        if w.get("layer") == "M2"
+                        and abs(w.get("x1", 0) - pickup_x) <= 250
+                        and min(w["y1"], w["y2"]) <= py0
+                        and max(w["y1"], w["y2"]) == py1
+                    ),
+                    None,
+                )
+                w_m1_term1 = next(
+                    (
+                        w
+                        for w in n1.get("wires", [])
+                        if w.get("layer") == "M1"
+                        and (w["y1"] == py1 or w["y2"] == py1)
+                        and min(w["x1"], w["x2"]) <= pickup_x <= max(w["x1"], w["x2"])
+                    ),
+                    None,
+                )
+                w_m2_app0 = next(
+                    (
+                        w
+                        for w in n0.get("wires", [])
+                        if w.get("layer") == "M2"
+                        and w.get("x1", 0) < pickup_x
+                        and (w["y1"] == py0 or w["y2"] == py0)
+                    ),
+                    None,
+                )
+                w_m1_term0_list = [
+                    w
+                    for w in n0.get("wires", [])
+                    if w.get("layer") == "M1"
+                    and (w["y1"] == py0 and w["y2"] == py0)
+                    and max(w["x1"], w["x2"]) >= pickup_x
+                ]
 
-        for w in n1.get("wires", []):
-            if w.get("layer") in ("M1", "M2"):
-                if w["y1"] == py1:
-                    w["y1"] = py0
-                if w["y2"] == py1:
-                    w["y2"] = py0
+                if w_m2_cross and w_m1_term1 and w_m2_app0 and w_m1_term0_list:
+                    conns0 = [conn for conn in n0.get("connections", []) if conn[0] != cname]
+                    conns1 = [conn for conn in n1.get("connections", []) if conn[0] != cname]
+                    n0["connections"] = [(cname, p1), *conns0]
+                    n1["connections"] = [(cname, p0), *conns1]
+                    port_to_net[p0] = n1
+                    port_to_net[p1] = n0
 
-        for w in n0.get("wires", []):
-            if w.get("layer") in ("M1", "M2"):
-                if w["y1"] == py0:
-                    w["y1"] = py1
-                if w["y2"] == py0:
-                    w["y2"] = py1
+                    if w_m2_cross["y1"] == py1:
+                        w_m2_cross["y1"] = py0
+                    if w_m2_cross["y2"] == py1:
+                        w_m2_cross["y2"] = py0
+                    w_m1_term1["y1"] = py0
+                    w_m1_term1["y2"] = py0
+
+                    if w_m2_app0["y1"] == py0:
+                        w_m2_app0["y1"] = py1
+                    if w_m2_app0["y2"] == py0:
+                        w_m2_app0["y2"] = py1
+                    for w in w_m1_term0_list:
+                        w["y1"] = py1
+                        w["y2"] = py1
+
+                    for via in n1.get("vias", []):
+                        if via.get("y") == py1:
+                            via["y"] = py0
+                    for via in n0.get("vias", []):
+                        if via.get("y") == py0:
+                            via["y"] = py1
 
 
 def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
@@ -657,3 +680,329 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
             else:
                 new_conns.append((inst, pin))
         net_a["connections"] = new_conns
+
+
+def untangle_merge_tree_sinks(
+    def_data: dict[str, Any], _netlist_data: dict[str, Any] | None = None
+) -> None:
+    """Untangle commutative merge tree sink nets whose physical routes cross.
+
+    In a binary merge tree, all mergers are associative and commutative.
+    When an upstream merger M1 feeds a downstream merger M2, their input nets
+    carry identical materials. If OpenROAD routes an input net of M1 across
+    an input net of M2 (either due to track swapping or source/feeder overlap),
+    swapping the sink connections and rerouting the segments along the open
+    planar channels eliminates the crossing before jumper synthesis.
+    """
+    units = int(def_data.get("units", 1000))
+
+    mergers = {
+        c["name"]: c for c in def_data.get("components", []) if c.get("macro") == "belt_merge2"
+    }
+    if not mergers:
+        return
+
+    # Find parent-child merger relationships: M1.y -> M2.(a or b)
+    # Map: m1_name -> (m2_name, sink_pin, net_mid)
+    m_parent: dict[str, tuple[str, str, dict[str, Any]]] = {}
+    for n in def_data.get("nets", []):
+        conns = n.get("connections", [])
+        src = next((inst for inst, pin in conns if pin == "y" and inst in mergers), None)
+        dst = next((inst for inst, pin in conns if pin in ("a", "b") and inst in mergers), None)
+        if src and dst:
+            dst_pin = next(pin for inst, pin in conns if inst == dst and pin in ("a", "b"))
+            m_parent[src] = (dst, dst_pin, n)
+
+    import sys
+
+    for m1_name, (m2_name, pin_in, net_mid) in list(m_parent.items()):
+        m1 = mergers[m1_name]
+        m2 = mergers[m2_name]
+        pin2 = "b" if pin_in == "a" else "a"
+
+        net2 = next(
+            (
+                n
+                for n in def_data.get("nets", [])
+                if any(inst == m2_name and pin == pin2 for inst, pin in n.get("connections", []))
+            ),
+            None,
+        )
+        if not net2:
+            continue
+
+        for pin1 in ("a", "b"):
+            net1 = next(
+                (
+                    n
+                    for n in def_data.get("nets", [])
+                    if any(
+                        inst == m1_name and pin == pin1 for inst, pin in n.get("connections", [])
+                    )
+                ),
+                None,
+            )
+            if not net1 or net1 is net2 or net1 is net_mid:
+                continue
+
+            # Case A: Track swap crossing
+            # Look for a jog in net1 from y_outer to y_inner at x_jog
+            # and a feeder in net2 crossing y_inner to y_outer at x_feeder (x_feeder > x_jog)
+            case_a_matched = False
+            for w_jog in net1.get("wires", []):
+                if w_jog.get("layer") != "M2":
+                    continue
+                x_jog = w_jog["x1"]
+                y_a = w_jog["y1"]
+                y_b = w_jog["y2"]
+                # Find M1 wire connected to w_jog at x <= x_jog
+                w_h1_prev = next(
+                    (
+                        w
+                        for w in net1.get("wires", [])
+                        if w.get("layer") == "M1"
+                        and max(w["x1"], w["x2"]) == x_jog
+                        and (w["y1"] == y_a or w["y1"] == y_b)
+                    ),
+                    None,
+                )
+                # Find M1 wire connected to w_jog at x >= x_jog
+                w_h1_inner = next(
+                    (
+                        w
+                        for w in net1.get("wires", [])
+                        if w.get("layer") == "M1"
+                        and min(w["x1"], w["x2"]) == x_jog
+                        and (w["y1"] == y_a or w["y1"] == y_b)
+                        and w is not w_h1_prev
+                    ),
+                    None,
+                )
+                if not (w_h1_prev and w_h1_inner):
+                    continue
+                y_outer = w_h1_prev["y1"]
+                y_inner = w_h1_inner["y1"]
+
+                # Look for net2 feeder that strictly crosses y_inner at x_feeder
+                w_feeder2 = next(
+                    (
+                        w
+                        for w in net2.get("wires", [])
+                        if w.get("layer") == "M2"
+                        and min(w_h1_inner["x1"], w_h1_inner["x2"])
+                        < w["x1"]
+                        < max(w_h1_inner["x1"], w_h1_inner["x2"])
+                        and min(w["y1"], w["y2"]) < y_inner < max(w["y1"], w["y2"])
+                        and min(w["y1"], w["y2"]) <= min(y_inner, y_outer)
+                        and max(w["y1"], w["y2"]) >= max(y_inner, y_outer)
+                    ),
+                    None,
+                )
+                if not w_feeder2:
+                    continue
+
+                m2_x_min = m2["x"] - 2 * units
+                w_h2_outer = next(
+                    (
+                        w
+                        for w in net2.get("wires", [])
+                        if w.get("layer") == "M1"
+                        and w["y1"] == y_outer
+                        and min(w["x1"], w["x2"]) == w_feeder2["x1"]
+                        and max(w["x1"], w["x2"]) >= m2_x_min
+                    ),
+                    None,
+                )
+                if not w_h2_outer:
+                    continue
+
+                # Case A: Untangle track swap!
+                sys.stderr.write(f"CASE_A_MATCHED: {net1['name']} and {net2['name']}\n")
+                x_feeder = w_feeder2["x1"]
+                max_x_outer = max(w_h2_outer["x1"], w_h2_outer["x2"])
+                max_x_inner = max(w_h1_inner["x1"], w_h1_inner["x2"])
+
+                # 1. Net1 stays on y_outer all the way to M2
+                if w_h1_prev["x1"] == x_jog:
+                    w_h1_prev["x1"] = max_x_outer
+                else:
+                    w_h1_prev["x2"] = max_x_outer
+
+                net1["wires"] = [w for w in net1["wires"] if w is not w_jog and w is not w_h1_inner]
+
+                # Move terminal wires of net2 (at M2) into net1
+                term_wires_net2 = [
+                    w
+                    for w in net2["wires"]
+                    if w is not w_h2_outer
+                    and w is not w_feeder2
+                    and (
+                        abs(w.get("x1", 0) - max_x_outer) <= 1000
+                        or abs(w.get("x2", 0) - max_x_outer) <= 1000
+                    )
+                ]
+                for w in term_wires_net2:
+                    net2["wires"].remove(w)
+                    net1["wires"].append(w)
+
+                # Move terminal wires of net1 (at M1) into net2
+                term_wires_net1 = [
+                    w
+                    for w in net1["wires"]
+                    if w is not w_h1_prev
+                    and w is not w_jog
+                    and w is not w_h1_inner
+                    and (
+                        abs(w.get("x1", 0) - max_x_inner) <= 1000
+                        or abs(w.get("x2", 0) - max_x_inner) <= 1000
+                    )
+                ]
+                for w in term_wires_net1:
+                    net1["wires"].remove(w)
+                    net2["wires"].append(w)
+
+                net2["wires"] = [w for w in net2["wires"] if w is not w_h2_outer]
+
+                # 2. Net2 drops only to y_inner and runs on y_inner to M1
+                if w_feeder2["y1"] == y_outer:
+                    w_feeder2["y1"] = y_inner
+                elif w_feeder2["y2"] == y_outer:
+                    w_feeder2["y2"] = y_inner
+
+                if w_h1_inner["x1"] == x_jog:
+                    w_h1_inner["x1"] = x_feeder
+                elif w_h1_inner["x2"] == x_jog:
+                    w_h1_inner["x2"] = x_feeder
+                net2["wires"].append(w_h1_inner)
+
+                # Swap connections
+                conns1 = [c for c in net1.get("connections", []) if c[0] != m1_name]
+                conns2 = [c for c in net2.get("connections", []) if c[0] != m2_name]
+                net1["connections"] = [(m2_name, pin2), *conns1]
+                net2["connections"] = [(m1_name, pin1), *conns2]
+                case_a_matched = True
+                break
+
+            if case_a_matched:
+                break
+
+            # Case B: Source of net2 aligns with pin1 of M1, net1 drops across it
+            pin1_y = round(m1["y"] + (0.5 if pin1 == "a" else 1.5) * units)
+            pin1_x = round(m1["x"] + 0.25 * units)
+            x_feeder1 = round(m1["x"] - 0.5 * units)
+
+            # Feeder of net1 into M1 pin1
+            w_v1 = next(
+                (
+                    w
+                    for w in net1.get("wires", [])
+                    if w.get("layer") == "M2"
+                    and (w["y1"] == pin1_y or w["y2"] == pin1_y)
+                    and abs(w["x1"] - x_feeder1) <= 250
+                ),
+                None,
+            )
+
+            # Source of net2: first horizontal segment on row pin1_y with x < x_feeder1
+            w_src2 = next(
+                (
+                    w
+                    for w in net2.get("wires", [])
+                    if w.get("layer") == "M1"
+                    and w["y1"] == pin1_y
+                    and w["y2"] == pin1_y
+                    and max(w["x1"], w["x2"]) <= pin1_x
+                    and min(w["x1"], w["x2"]) < x_feeder1
+                ),
+                None,
+            )
+
+            if w_v1 and w_src2:
+                # Check that net2 has a bypass wire crossing w_v1
+                w_bypass = next(
+                    (
+                        w
+                        for w in net2.get("wires", [])
+                        if w.get("layer") == "M1"
+                        and min(w["x1"], w["x2"]) <= x_feeder1 <= max(w["x1"], w["x2"])
+                        and min(w_v1["y1"], w_v1["y2"]) <= w["y1"] <= max(w_v1["y1"], w_v1["y2"])
+                    ),
+                    None,
+                )
+
+                if w_bypass:
+                    # Case B: Connect net2 straight into M1 pin1, extend net1 to M2 pin2
+                    sys.stderr.write(f"CASE_B_MATCHED: {net1['name']} and {net2['name']}\n")
+                    w_pin1 = next(
+                        (
+                            w
+                            for w in net1.get("wires", [])
+                            if w.get("layer") == "M1"
+                            and w["y1"] == pin1_y
+                            and max(w["x1"], w["x2"]) >= pin1_x
+                        ),
+                        None,
+                    )
+                    pin_in_x = max(w_pin1["x1"], w_pin1["x2"]) if w_pin1 else pin1_x
+                    if w_src2["x1"] < w_src2["x2"]:
+                        w_src2["x2"] = pin_in_x
+                    else:
+                        w_src2["x1"] = pin_in_x
+
+                    bypass_wires = [w for w in net2.get("wires", []) if w is not w_src2]
+                    net2["wires"] = [w_src2]
+
+                    pin2_y = round(m2["y"] + (0.5 if pin2 == "a" else 1.5) * units)
+                    pin2_x = round(m2["x"] + 0.25 * units)
+                    x_feeder2 = round(m2["x"] - 0.5 * units)
+
+                    w_term_m2 = [
+                        w
+                        for w in bypass_wires
+                        if (
+                            (
+                                w["y1"] == pin2_y
+                                and w["y2"] == pin2_y
+                                and max(w["x1"], w["x2"]) >= pin2_x
+                            )
+                            or (
+                                w.get("layer") == "M2"
+                                and (w["y1"] == pin2_y or w["y2"] == pin2_y)
+                                and abs(w["x1"] - x_feeder2) <= 250
+                            )
+                        )
+                    ]
+                    w_v2_dest = next((w for w in w_term_m2 if w.get("layer") == "M2"), None)
+                    dest_x = w_v2_dest["x1"] if w_v2_dest else x_feeder2
+
+                    y_outer_1 = w_v1["y2"] if w_v1["y1"] == pin1_y else w_v1["y1"]
+                    w_h1_outer = next(
+                        (
+                            w
+                            for w in net1.get("wires", [])
+                            if w.get("layer") == "M1"
+                            and w["y1"] == y_outer_1
+                            and (w["x1"] == w_v1["x1"] or w["x2"] == w_v1["x1"])
+                        ),
+                        None,
+                    )
+                    if w_h1_outer:
+                        if w_h1_outer["x1"] == w_v1["x1"]:
+                            w_h1_outer["x1"] = dest_x
+                        else:
+                            w_h1_outer["x2"] = dest_x
+
+                    net1["wires"] = [w for w in net1["wires"] if w is not w_v1 and w is not w_pin1]
+
+                    if w_v2_dest:
+                        if w_v2_dest["y1"] == pin2_y:
+                            w_v2_dest["y2"] = y_outer_1
+                        else:
+                            w_v2_dest["y1"] = y_outer_1
+                        net1["wires"].extend(w_term_m2)
+
+                    conns1 = [c for c in net1.get("connections", []) if c[0] != m1_name]
+                    conns2 = [c for c in net2.get("connections", []) if c[0] != m2_name]
+                    net1["connections"] = [(m2_name, pin2), *conns1]
+                    net2["connections"] = [(m1_name, pin1), *conns2]
+                    break

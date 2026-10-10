@@ -85,6 +85,18 @@ def parse_def(text: str) -> dict[str, Any]:
     if m_units:
         units = int(m_units.group(1))
 
+    die_area = [0, 0, 0, 0]
+    m_die = re.search(
+        r"DIEAREA\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;", text
+    )
+    if m_die:
+        die_area = [
+            int(m_die.group(1)),
+            int(m_die.group(2)),
+            int(m_die.group(3)),
+            int(m_die.group(4)),
+        ]
+
     comp_pat = re.compile(
         r"^\s*-\s+(\S+)\s+(\S+)\s+\+\s+(?:PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+(\S+)",
         re.MULTILINE,
@@ -187,6 +199,7 @@ def parse_def(text: str) -> dict[str, Any]:
 
     return {
         "units": units,
+        "die_area": die_area,
         "components": components,
         "pins": pins,
         "nets": nets,

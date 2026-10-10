@@ -433,6 +433,77 @@ class TestRoutingPrimitives(unittest.TestCase):
             f"Expected h_count=1 v_count=1, got {results}",
         )
 
+    def test_splitter_output_perpendicular_turn(self) -> None:
+        """East-facing splitter outputs onto North and South belts."""
+        init_lua = """
+        local sp = surface.create_entity{name = "splitter", position = {0.5, 1.0}, direction = 4, force = "player"}
+        local bn = surface.create_entity{name = "transport-belt", position = {1.5, 0.5}, direction = 0, force = "player"}
+        local bs = surface.create_entity{name = "transport-belt", position = {1.5, 1.5}, direction = 8, force = "player"}
+        local b_east_n = surface.create_entity{name = "transport-belt", position = {1.5, -0.5}, direction = 4, force = "player"}
+        local b_east_s = surface.create_entity{name = "transport-belt", position = {1.5, 2.5}, direction = 4, force = "player"}
+        local in_b = surface.create_entity{name = "transport-belt", position = {-0.5, 0.5}, direction = 4, force = "player"}
+        storage.bn = bn
+        storage.bs = bs
+        storage.b_east_n = b_east_n
+        storage.b_east_s = b_east_s
+        storage.sp = sp
+        storage.in_b = in_b
+        """
+        tick_lua = """
+        if event.tick < 20 and event.tick % 4 == 0 then
+            storage.in_b.get_transport_line(1).insert_at_back({name = "iron-plate"})
+            storage.in_b.get_transport_line(2).insert_at_back({name = "copper-plate"})
+        end
+        if event.tick == 120 then
+            local in_cnt = storage.in_b.get_transport_line(1).get_item_count() + storage.in_b.get_transport_line(2).get_item_count()
+            local n_cnt = storage.bn.get_transport_line(1).get_item_count() + storage.bn.get_transport_line(2).get_item_count()
+            local s_cnt = storage.bs.get_transport_line(1).get_item_count() + storage.bs.get_transport_line(2).get_item_count()
+            local en_cnt = storage.b_east_n.get_transport_line(1).get_item_count() + storage.b_east_n.get_transport_line(2).get_item_count()
+            local es_cnt = storage.b_east_s.get_transport_line(1).get_item_count() + storage.b_east_s.get_transport_line(2).get_item_count()
+            local sp_cnt = 0
+            for li = 1, 8 do
+                sp_cnt = sp_cnt + storage.sp.get_transport_line(li).get_item_count()
+            end
+            log(string.format("TEST_RESULT: sp_turn in=%d n=%d s=%d en=%d es=%d sp=%d", in_cnt, n_cnt, s_cnt, en_cnt, es_cnt, sp_cnt))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
+        self.assertTrue(
+            any("TEST_RESULT: sp_turn" in r and "en=2 es=4" in r for r in results),
+            f"Expected items to reach en and es, got {results}",
+        )
+
+    def test_underground_belt_output_perpendicular_turn(self) -> None:
+        """South-facing underground belt output feeds directly into East-facing belt."""
+        init_lua = """
+        local u_in = surface.create_entity{name = "underground-belt", position = {0.5, 0.5}, direction = 8, type = "input", force = "player"}
+        local u_out = surface.create_entity{name = "underground-belt", position = {0.5, 2.5}, direction = 8, type = "output", force = "player"}
+        local b_perp = surface.create_entity{name = "transport-belt", position = {0.5, 3.5}, direction = 4, force = "player"}
+        local b_east = surface.create_entity{name = "transport-belt", position = {1.5, 3.5}, direction = 4, force = "player"}
+        storage.u_in = u_in
+        storage.u_out = u_out
+        storage.b_perp = b_perp
+        storage.b_east = b_east
+        """
+        tick_lua = """
+        if event.tick < 20 and event.tick % 4 == 0 then
+            storage.u_in.get_transport_line(1).insert_at_back({name = "iron-plate"})
+            storage.u_in.get_transport_line(2).insert_at_back({name = "copper-plate"})
+        end
+        if event.tick == 120 then
+            local in_cnt = storage.u_in.get_transport_line(1).get_item_count() + storage.u_in.get_transport_line(2).get_item_count()
+            local out_cnt = storage.u_out.get_transport_line(1).get_item_count() + storage.u_out.get_transport_line(2).get_item_count()
+            local perp_cnt = storage.b_perp.get_transport_line(1).get_item_count() + storage.b_perp.get_transport_line(2).get_item_count()
+            local east_cnt = storage.b_east.get_transport_line(1).get_item_count() + storage.b_east.get_transport_line(2).get_item_count()
+            log(string.format("TEST_RESULT: ug_perp in=%d out=%d perp=%d east=%d", in_cnt, out_cnt, perp_cnt, east_cnt))
+        end
+        """
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=130)
+        self.assertTrue(
+            any("TEST_RESULT: ug_perp" in r and "east=2" in r for r in results),
+            f"Expected items to reach east belt, got {results}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

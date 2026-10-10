@@ -63,7 +63,7 @@ if {[file exists "ranks.tcl"]} {
 if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} {
     # Structured Linear Row Placement:
     # Arrange machines in horizontal rows by recipe topological depth.
-    set pad_between [expr {max(4, $CELL_PAD_SITES)}]
+    set pad_between [expr {max(8, $CELL_PAD_SITES)}]
     set channel_h 12
     if {[info exists CHANNEL_H] && $CHANNEL_H != ""} {
         set channel_h $CHANNEL_H
@@ -88,7 +88,7 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                     if {[string match "*merge*" $iname]} {
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
-                        set pad 6
+                        set pad 10
                     }
                     set row_w [expr {$row_w + $dw + $pad}]
                     if {$dh > $rank_max_h} {
@@ -148,7 +148,7 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                     if {[string match "*merge*" $iname]} {
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
-                        set pad 6
+                        set pad 10
                     }
                     set rx [expr {$rx + $dw + $pad}]
                 }
@@ -257,7 +257,7 @@ proc get_net_sink_center_y {net dbu} {
     set sum_y 0.0
     set count 0
     foreach iterm [$net getITerms] {
-        if {[$iterm getIoType] == "INPUT"} {
+        if {[[$iterm getMTerm] getIoType] == "INPUT"} {
             set inst [$iterm getInst]
             lassign [$inst getLocation] ix iy
             set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
@@ -286,7 +286,7 @@ proc get_net_sink_center_x {net dbu} {
     set sum_x 0.0
     set count 0
     foreach iterm [$net getITerms] {
-        if {[$iterm getIoType] == "INPUT"} {
+        if {[[$iterm getMTerm] getIoType] == "INPUT"} {
             set inst [$iterm getInst]
             lassign [$inst getLocation] ix iy
             set w [expr {[[$inst getMaster] getWidth] / double($dbu)}]
@@ -315,7 +315,7 @@ proc get_net_driver_center_y {net dbu} {
     set sum_y 0.0
     set count 0
     foreach iterm [$net getITerms] {
-        if {[$iterm getIoType] == "OUTPUT"} {
+        if {[[$iterm getMTerm] getIoType] == "OUTPUT"} {
             set inst [$iterm getInst]
             lassign [$inst getLocation] ix iy
             set h [expr {[[$inst getMaster] getHeight] / double($dbu)}]
@@ -344,7 +344,7 @@ proc get_net_driver_center_x {net dbu} {
     set sum_x 0.0
     set count 0
     foreach iterm [$net getITerms] {
-        if {[$iterm getIoType] == "OUTPUT"} {
+        if {[[$iterm getMTerm] getIoType] == "OUTPUT"} {
             set inst [$iterm getInst]
             lassign [$inst getLocation] ix iy
             set w [expr {[[$inst getMaster] getWidth] / double($dbu)}]
@@ -379,7 +379,7 @@ proc get_iterm_pin_rel_y {iterm dbu} {
     return 0.0
 }
 
-proc compare_driver_positions {a b} {
+proc compare_machine_input_drivers {my a b} {
     set ya [lindex $a 1]
     set yb [lindex $b 1]
     if {[expr {abs($ya - $yb)}] >= 0.5} {
@@ -390,11 +390,20 @@ proc compare_driver_positions {a b} {
     }
     set xa [lindex $a 2]
     set xb [lindex $b 2]
-    if {$xa < $xb} {
-        return 1
-    }
-    if {$xa > $xb} {
-        return -1
+    if {$ya >= ($my - 0.6)} {
+        if {$xa < $xb} {
+            return 1
+        }
+        if {$xa > $xb} {
+            return -1
+        }
+    } else {
+        if {$xa < $xb} {
+            return -1
+        }
+        if {$xa > $xb} {
+            return 1
+        }
     }
     return 0
 }
@@ -410,10 +419,18 @@ proc do_untangle {block dbu} {
                     set n1 [$it1 getNet]
                     set n2 [$it2 getNet]
                     if {$n1 != "NULL" && $n2 != "NULL" && $n1 != $n2} {
+                        lassign [$inst getLocation] sx_dbu sy_dbu
+                        set sy [expr {$sy_dbu / double($dbu)}]
                         set y1 [get_net_sink_center_y $n1 $dbu]
                         set y2 [get_net_sink_center_y $n2 $dbu]
                         if {[expr {abs($y1 - $y2)}] >= 0.5} {
-                            if {$y1 > $y2} {
+                            set should_swap 0
+                            if {$y1 > ($sy + 5.0) && $y2 > ($sy + 5.0)} {
+                                if {$y1 < $y2} { set should_swap 1 }
+                            } else {
+                                if {$y1 > $y2} { set should_swap 1 }
+                            }
+                            if {$should_swap} {
                                 odb::dbITerm_disconnect $it1
                                 odb::dbITerm_disconnect $it2
                                 odb::dbITerm_connect $it1 $n2
@@ -422,7 +439,7 @@ proc do_untangle {block dbu} {
                         } else {
                             set x1 [get_net_sink_center_x $n1 $dbu]
                             set x2 [get_net_sink_center_x $n2 $dbu]
-                            if {$x1 < $x2} {
+                            if {$x1 > $x2} {
                                 odb::dbITerm_disconnect $it1
                                 odb::dbITerm_disconnect $it2
                                 odb::dbITerm_connect $it1 $n2
@@ -446,7 +463,7 @@ proc do_untangle {block dbu} {
                         if {[expr {abs($ya - $yb)}] < 0.5} {
                             set xa [get_net_driver_center_x $na $dbu]
                             set xb [get_net_driver_center_x $nb $dbu]
-                            if {$xa < $xb} {
+                            if {$xa > $xb} {
                                 odb::dbITerm_disconnect $ita
                                 odb::dbITerm_disconnect $itb
                                 odb::dbITerm_connect $ita $nb
@@ -473,7 +490,7 @@ proc do_untangle {block dbu} {
             if {[string match "*assembling_machine*" $mname]} {
                 set pin_list {}
                 foreach iterm [$inst getITerms] {
-                    if {[$iterm getIoType] == "INPUT"} {
+                    if {[[$iterm getMTerm] getIoType] == "INPUT"} {
                         set net [$iterm getNet]
                         if {$net != "NULL" && $net != ""} {
                             set py [get_iterm_pin_rel_y $iterm $dbu]
@@ -483,6 +500,8 @@ proc do_untangle {block dbu} {
                 }
                 if {[llength $pin_list] >= 2} {
                     set pin_list [lsort -real -index 1 $pin_list]
+                    lassign [$inst getLocation] ix_dbu iy_dbu
+                    set inst_my [expr {$iy_dbu / double($dbu) + 1.5}]
                     set net_data {}
                     foreach item $pin_list {
                         set net [lindex $item 2]
@@ -490,7 +509,7 @@ proc do_untangle {block dbu} {
                         set dx [get_net_driver_center_x $net $dbu]
                         lappend net_data [list $net $dy $dx]
                     }
-                    set sorted_net_data [lsort -command compare_driver_positions $net_data]
+                    set sorted_net_data [lsort -command [list compare_machine_input_drivers $inst_my] $net_data]
                     set needs_update 0
                     for {set i 0} {$i < [llength $pin_list]} {incr i} {
                         set curr_net [lindex [lindex $pin_list $i] 2]

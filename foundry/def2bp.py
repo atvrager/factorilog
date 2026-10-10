@@ -22,6 +22,7 @@ try:
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
         untangle_machine_inputs,
+        untangle_merge_tree_sinks,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -49,6 +50,7 @@ except ImportError:
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
         untangle_machine_inputs,
+        untangle_merge_tree_sinks,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -87,6 +89,7 @@ __all__ = [
     "parse_def",
     "prune_dead_end_belts",
     "untangle_machine_inputs",
+    "untangle_merge_tree_sinks",
     "untangle_merger_inputs",
     "untangle_splitter_outputs",
 ]
@@ -103,7 +106,6 @@ def build_entities(
     untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
-    # untangle_machine_inputs(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 

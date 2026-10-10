@@ -68,13 +68,6 @@ def get_macro_port_slots(
     in_slots: dict[str, int] = {}
     out_slots: dict[str, int] = {}
 
-    recipe = cell.get("recipe", "")
-    cell_id = cell.get("cell", "")
-    if "gear_belt_combo" in cell_id or recipe == "gear_belt_combo":
-        return {"iron-plate": 1}, {"transport-belt": 5}
-    if "gear_inserter_combo" in cell_id or recipe == "gear_inserter_combo":
-        return {"iron-plate": 1, "electronic-circuit": 6}, {"inserter": 5}
-
     if machine == "chemical-plant":
         # Chemical plant rotated CCW (dir=12):
         # Fluid connection slots: tile 0 (cy=0.5) and tile 2 (cy=2.5).
