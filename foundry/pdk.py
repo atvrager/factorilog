@@ -193,7 +193,7 @@ CORE_MACHINES: frozenset[str] = frozenset(
 class Pdk:
     """The tech layer, read from one prototype dump."""
 
-    def __init__(self, data: solve.Data, core_only: bool = True) -> None:
+    def __init__(self, data: solve.Data, core_only: bool = False) -> None:
         self.data = data
         self.belts = data.prototypes.get(BELT_TABLE, {})
         self.undergrounds = data.prototypes.get(UNDERGROUND_TABLE, {})
@@ -204,13 +204,17 @@ class Pdk:
             for name, proto in data.prototypes.get(table, {}).items():
                 if not core_only or name in CORE_MACHINES:
                     self.machines[name] = proto
+        try:
+            from foundry.entity_helpers import register_prototype_boxes
+        except ImportError:
+            from entity_helpers import register_prototype_boxes
+
+        register_prototype_boxes(data.prototypes)
 
     def belt_tiers(self) -> list[dict[str, Any]]:
         """Belt tiers, slowest first: name, items/s per lane, tunnel span."""
         tiers = []
         for name, proto in sorted(self.belts.items(), key=lambda kv: float(kv[1]["speed"])):
-            if "turbo" in name:
-                continue
             underground = proto.get("related_underground_belt", "")
             span = 0
             if underground in self.undergrounds:

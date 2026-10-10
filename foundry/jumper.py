@@ -22,7 +22,7 @@ try:
         DIRECTION_WEST,
         OPPOSITE_DIR,
     )
-    from foundry.lef import get_macro_port_slots
+    from foundry.lef import get_macro_port_geometry
     from foundry.placement import PlacementResult
 except ImportError:
     from entity_helpers import (
@@ -33,7 +33,7 @@ except ImportError:
         DIRECTION_WEST,
         OPPOSITE_DIR,
     )
-    from lef import get_macro_port_slots
+    from lef import get_macro_port_geometry
     from placement import PlacementResult
 
 DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
@@ -187,23 +187,14 @@ def route_and_resolve_jumpers(
         height = float(c.get("height", 3))
         outputs = [o.replace("-", "_") for o in c.get("outputs", [])]
         if pin in outputs:
-            _, out_slots = get_macro_port_slots(c)
             orig_outputs = c.get("outputs", [])
             idx = outputs.index(pin)
             orig_name = orig_outputs[idx] if idx < len(orig_outputs) else ""
-            if orig_name in out_slots:
-                return (width - 0.25, out_slots[orig_name] + 0.5)
-            total = len(outputs)
-            if total <= height:
-                offset = (height - total) // 2
-                return (width - 0.25, offset + idx + 0.5)
-            if idx < height:
-                return (width - 0.25, idx + 0.5)
-            if idx < height + width:
-                return (idx - height + 0.5, 0.25)
-            if idx < 2 * height + width:
-                return (0.25, idx - height - width + 0.5)
-            return ((idx - 2 * height - width) % width + 0.5, height - 0.25)
+            if orig_name:
+                geom = get_macro_port_geometry(c, orig_name, is_output=True)
+                r = geom["rect"]
+                return ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0)
+            return (width - 0.25, height / 2.0)
         return (width / 2.0, height / 2.0)
 
     comp_map = {c["name"]: c for c in def_data.get("components", [])}
@@ -253,25 +244,20 @@ def route_and_resolve_jumpers(
             pin_tiles.add((round(gx + 0.5, 2), round(gy - 0.5, 2)))
             pin_tiles.add((round(gx + 0.5, 2), round(gy + 2.5, 2)))
         else:
-            w = float(cell.get("width", 3))
-            h = float(cell.get("height", 3))
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            in_slots, out_slots = get_macro_port_slots(cell)
-            for idx, port in enumerate(inputs):
-                cy = (
-                    in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx)
-                    + 0.5
-                )
-                pin_tiles.add((round(gx + 0.5, 2), round(gy + cy, 2)))
-                pin_tiles.add((round(gx - 0.5, 2), round(gy + cy, 2)))
-            for idx, port in enumerate(outputs):
-                cy = (
-                    out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
-                    + 0.5
-                )
-                pin_tiles.add((round(gx + w - 0.5, 2), round(gy + cy, 2)))
-                pin_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+            for port in inputs:
+                geom = get_macro_port_geometry(cell, port, is_output=False)
+                ix, iy = geom["inserter_pos"]
+                ax, ay = geom["approach_pos"]
+                pin_tiles.add((round(gx + ix, 2), round(gy + iy, 2)))
+                pin_tiles.add((round(gx + ax, 2), round(gy + ay, 2)))
+            for port in outputs:
+                geom = get_macro_port_geometry(cell, port, is_output=True)
+                ix, iy = geom["inserter_pos"]
+                ax, ay = geom["approach_pos"]
+                pin_tiles.add((round(gx + ix, 2), round(gy + iy, 2)))
+                pin_tiles.add((round(gx + ax, 2), round(gy + ay, 2)))
 
     net_dists: dict[str, dict[tuple[float, float], float]] = {}
     for net in def_data.get("nets", []):
@@ -715,36 +701,19 @@ def route_and_resolve_jumpers(
             valid_fluid_input_pins.add((round(gx + 0.5, 2), round(gy - 0.5, 2)))
             valid_fluid_output_pins.add((round(gx + 0.5, 2), round(gy + 2.5, 2)))
         else:
-            in_slots, out_slots = get_macro_port_slots(cell)
-            w = float(cell.get("width", 3))
-            h = float(cell.get("height", 3))
-            for idx, port in enumerate(cell.get("inputs", [])):
-                cy = (
-                    in_slots.get(
-                        port,
-                        (h - len(cell.get("inputs", []))) // 2 + idx
-                        if len(cell.get("inputs", [])) <= h
-                        else idx,
-                    )
-                    + 0.5
-                )
-                pt = (round(gx - 0.5, 2), round(gy + cy, 2))
+            for port in cell.get("inputs", []):
+                geom = get_macro_port_geometry(cell, port, is_output=False)
+                ax, ay = geom["approach_pos"]
+                pt = (round(gx + ax, 2), round(gy + ay, 2))
                 if port in fluids:
                     valid_fluid_input_pins.add(pt)
                 else:
                     valid_input_pins.add(pt)
                     machine_input_pins.add(pt)
-            for idx, port in enumerate(cell.get("outputs", [])):
-                cy = (
-                    out_slots.get(
-                        port,
-                        (h - len(cell.get("outputs", []))) // 2 + idx
-                        if len(cell.get("outputs", [])) <= h
-                        else idx,
-                    )
-                    + 0.5
-                )
-                pt = (round(gx + w + 0.5, 2), round(gy + cy, 2))
+            for port in cell.get("outputs", []):
+                geom = get_macro_port_geometry(cell, port, is_output=True)
+                ax, ay = geom["approach_pos"]
+                pt = (round(gx + ax, 2), round(gy + ay, 2))
                 if port in fluids:
                     valid_fluid_output_pins.add(pt)
                 else:
@@ -1016,9 +985,42 @@ def route_and_resolve_jumpers(
                                         bypass_tile,
                                     )
                                 else:
-                                    fail_out.append(
-                                        f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
-                                    )
+                                    detour_reasons = []
+                                    if exit_tile in occupied_positions:
+                                        detour_reasons.append(f"exit_occ({exit_tile})")
+                                    if exit_tile in pin_tiles and not (
+                                        exit_tile in valid_input_pins
+                                        and (
+                                            turn_dir == DIRECTION_EAST
+                                            or exit_tile in machine_input_pins
+                                        )
+                                    ):
+                                        detour_reasons.append(f"exit_pin({exit_tile})")
+                                    if exit_tile in used_underground_endpoints:
+                                        detour_reasons.append(f"exit_ug({exit_tile})")
+                                    if not (tile_to_nets.get(exit_tile, set()) <= {candidate}):
+                                        detour_reasons.append(
+                                            f"exit_net({tile_to_nets.get(exit_tile)})"
+                                        )
+                                    if corner_tile in occupied_positions:
+                                        detour_reasons.append(f"corner_occ({corner_tile})")
+                                    if corner_tile in pin_tiles and not (
+                                        corner_tile in valid_input_pins
+                                        and (
+                                            target_corner_d == DIRECTION_EAST
+                                            or corner_tile in machine_input_pins
+                                        )
+                                    ):
+                                        detour_reasons.append(f"corner_pin({corner_tile})")
+                                    if corner_tile in used_underground_endpoints:
+                                        detour_reasons.append(f"corner_ug({corner_tile})")
+                                    if not (tile_to_nets.get(corner_tile, set()) <= {candidate}):
+                                        detour_reasons.append(
+                                            f"corner_net({tile_to_nets.get(corner_tile)})"
+                                        )
+                                    if not downstream_ok:
+                                        detour_reasons.append("downstream_not_ok")
+                                    fail_out.append(f"detour_fail:{','.join(detour_reasons)}")
                             else:
                                 fail_out.append(
                                     f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
@@ -1341,23 +1343,17 @@ def route_and_resolve_jumpers(
             pin_directions[(round(gx + 0.5, 2), round(gy + 2.5, 2))] = DIRECTION_NORTH
         else:
             cell = cell_map.get(cell_id, {})
-            w = float(cell.get("width", 3))
-            h = float(cell.get("height", 3))
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            in_slots, out_slots = get_macro_port_slots(cell)
-            for idx, port in enumerate(inputs):
-                cy = (
-                    in_slots.get(port, (h - len(inputs)) // 2 + idx if len(inputs) <= h else idx)
-                    + 0.5
-                )
-                pin_directions[(round(gx - 0.5, 2), round(gy + cy, 2))] = DIRECTION_EAST
-            for idx, port in enumerate(outputs):
-                cy = (
-                    out_slots.get(port, (h - len(outputs)) // 2 + idx if len(outputs) <= h else idx)
-                    + 0.5
-                )
-                forbidden_west_tiles.add((round(gx + w + 0.5, 2), round(gy + cy, 2)))
+            for port in inputs:
+                geom = get_macro_port_geometry(cell, port, is_output=False)
+                ax, ay = geom["approach_pos"]
+                adir = geom["approach_dir"]
+                pin_directions[(round(gx + ax, 2), round(gy + ay, 2))] = adir
+            for port in outputs:
+                geom = get_macro_port_geometry(cell, port, is_output=True)
+                ax, ay = geom["approach_pos"]
+                forbidden_west_tiles.add((round(gx + ax, 2), round(gy + ay, 2)))
 
             machine = cell.get("machine", "")
             if machine == "rocket-silo" or "rocket-silo" in cell_id or "rocket_silo" in macro:

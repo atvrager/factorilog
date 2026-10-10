@@ -6,6 +6,7 @@ symmetric pin connections when initial wire tracks cross.
 
 from __future__ import annotations
 
+import collections
 from typing import Any
 
 try:
@@ -1006,3 +1007,348 @@ def untangle_merge_tree_sinks(
                     net1["connections"] = [(m2_name, pin2), *conns1]
                     net2["connections"] = [(m1_name, pin1), *conns2]
                     break
+
+
+def straighten_collinear_routes(def_data: dict[str, Any]) -> None:
+    """Straighten unblocked collinear connections that router detoured with U-jogs.
+
+    When two connected pins lie on the same coordinate axis (e.g. horizontal track),
+    and the direct planar track between them is clear of components and other net wires,
+    collapse any U-shaped detours into a direct straight wire.
+    """
+    for net in def_data.get("nets", []):
+        wires = net.get("wires", [])
+        if not wires or len(wires) <= 1:
+            continue
+        if any(v.get("via") != "SURFACE_TURN_VIA" for v in net.get("vias", [])):
+            continue
+        if any(w.get("layer") not in ("M1", "M2") for w in wires):
+            continue
+
+        # Count occurrences of wire endpoints to find the terminal endpoints
+        pt_counts: dict[tuple[int, int], int] = collections.defaultdict(int)
+        for w in wires:
+            pt_counts[(w["x1"], w["y1"])] += 1
+            pt_counts[(w["x2"], w["y2"])] += 1
+
+        degree_one = [pt for pt, count in pt_counts.items() if count == 1]
+        if len(degree_one) != 2:
+            continue
+
+        pt1, pt2 = degree_one[0], degree_one[1]
+        connected_insts = {inst for inst, _pin in net.get("connections", [])}
+
+        # Case 1: Collinear horizontally
+        if pt1[1] == pt2[1] and pt1[0] != pt2[0]:
+            if all(w["y1"] == w["y2"] for w in wires):
+                continue
+            y_track = pt1[1]
+            min_x = min(pt1[0], pt2[0])
+            max_x = max(pt1[0], pt2[0])
+
+            # Check if another object blocks the direct horizontal M1 path
+            blocked = False
+
+            # Check components (excluding the components this net connects to)
+            for c in def_data.get("components", []):
+                if c.get("name") in connected_insts:
+                    continue
+                macro = c.get("macro", "")
+                orient = c.get("orient", "N")
+                if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                    cw, ch = (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                else:
+                    cw, ch = 5000, 5000
+                cx = c.get("x", 0)
+                cy = c.get("y", 0)
+                if cy <= y_track <= cy + ch and not (cx + cw <= min_x or cx >= max_x):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            # Check other nets
+            for other_net in def_data.get("nets", []):
+                if other_net is net:
+                    continue
+                for ow in other_net.get("wires", []):
+                    layer = ow.get("layer")
+                    if layer == "M1":
+                        if ow["y1"] == y_track and ow["y2"] == y_track:
+                            ow_min = min(ow["x1"], ow["x2"])
+                            ow_max = max(ow["x1"], ow["x2"])
+                            if max(ow_min, min_x) < min(ow_max, max_x):
+                                blocked = True
+                                break
+                    elif layer == "M2":
+                        ow_x = ow["x1"]
+                        if ow["x1"] == ow["x2"] and min_x < ow_x < max_x:
+                            ow_min_y = min(ow["y1"], ow["y2"])
+                            ow_max_y = max(ow["y1"], ow["y2"])
+                            if ow_min_y == y_track or ow_max_y == y_track:
+                                blocked = True
+                                break
+                if blocked:
+                    break
+                for ov in other_net.get("vias", []):
+                    if ov.get("y") == y_track and min_x < ov.get("x", 0) < max_x:
+                        blocked = True
+                        break
+                if blocked:
+                    break
+
+            if not blocked:
+                net["wires"] = [
+                    {"layer": "M1", "x1": min_x, "y1": y_track, "x2": max_x, "y2": y_track}
+                ]
+                net["vias"] = []
+                continue
+
+        # Case 2: Collinear vertically
+        if pt1[0] == pt2[0] and pt1[1] != pt2[1]:
+            if all(w["x1"] == w["x2"] for w in wires):
+                continue
+            x_track = pt1[0]
+            min_y = min(pt1[1], pt2[1])
+            max_y = max(pt1[1], pt2[1])
+
+            # Check if another object blocks the direct vertical M2 path
+            blocked = False
+
+            # Check components (excluding the components this net connects to)
+            for c in def_data.get("components", []):
+                if c.get("name") in connected_insts:
+                    continue
+                macro = c.get("macro", "")
+                orient = c.get("orient", "N")
+                if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                    cw, ch = (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                else:
+                    cw, ch = 5000, 5000
+                cx = c.get("x", 0)
+                cy = c.get("y", 0)
+                if cx <= x_track <= cx + cw and not (cy + ch <= min_y or cy >= max_y):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            # Check other nets
+            for other_net in def_data.get("nets", []):
+                if other_net is net:
+                    continue
+                for ow in other_net.get("wires", []):
+                    layer = ow.get("layer")
+                    if layer == "M2":
+                        if ow["x1"] == x_track and ow["x2"] == x_track:
+                            ow_min = min(ow["y1"], ow["y2"])
+                            ow_max = max(ow["y1"], ow["y2"])
+                            if max(ow_min, min_y) < min(ow_max, max_y):
+                                blocked = True
+                                break
+                    elif layer == "M1":
+                        ow_y = ow["y1"]
+                        if ow["y1"] == ow["y2"] and min_y < ow_y < max_y:
+                            ow_min_x = min(ow["x1"], ow["x2"])
+                            ow_max_x = max(ow["x1"], ow["x2"])
+                            if ow_min_x == x_track or ow_max_x == x_track:
+                                blocked = True
+                                break
+                if blocked:
+                    break
+                for ov in other_net.get("vias", []):
+                    if ov.get("x") == x_track and min_y < ov.get("y", 0) < max_y:
+                        blocked = True
+                        break
+                if blocked:
+                    break
+
+            if not blocked:
+                net["wires"] = [
+                    {"layer": "M2", "x1": x_track, "y1": min_y, "x2": x_track, "y2": max_y}
+                ]
+                net["vias"] = []
+
+
+def untangle_interlocking_corners(def_data: dict[str, Any]) -> None:
+    """Untangle 2x2 interlocking net loops where two nets cross each other twice.
+
+    When two nets turn at adjacent coordinates (X1, Y1) and (X2, Y2) such that
+    net1 crosses net2 at (X1, Y2) and net2 crosses net1 at (X2, Y1), shifting
+    one net's corner away from the collision to an unblocked parallel track
+    eliminates both crossings.
+    """
+    units = int(def_data.get("units", 1000))
+    nets = def_data.get("nets", [])
+
+    for i, n1 in enumerate(nets):
+        for w1_m1 in n1.get("wires", []):
+            if w1_m1.get("layer") != "M1":
+                continue
+            y1 = w1_m1["y1"]
+            if w1_m1["y2"] != y1:
+                continue
+
+            for w1_m2 in n1.get("wires", []):
+                if w1_m2.get("layer") != "M2":
+                    continue
+                x1 = w1_m2["x1"]
+                if w1_m2["x2"] != x1:
+                    continue
+
+                m1_has_x1 = w1_m1["x1"] == x1 or w1_m1["x2"] == x1
+                m2_has_y1 = w1_m2["y1"] == y1 or w1_m2["y2"] == y1
+                if not (m1_has_x1 and m2_has_y1):
+                    continue
+
+                for j, n2 in enumerate(nets):
+                    if j <= i:
+                        continue
+                    for w2_m1 in n2.get("wires", []):
+                        if w2_m1.get("layer") != "M1":
+                            continue
+                        y2 = w2_m1["y1"]
+                        if w2_m1["y2"] != y2:
+                            continue
+
+                        for w2_m2 in n2.get("wires", []):
+                            if w2_m2.get("layer") != "M2":
+                                continue
+                            x2 = w2_m2["x1"]
+                            if w2_m2["x2"] != x2:
+                                continue
+
+                            m1_has_x2 = w2_m1["x1"] == x2 or w2_m1["x2"] == x2
+                            m2_has_y2 = w2_m2["y1"] == y2 or w2_m2["y2"] == y2
+                            if not (m1_has_x2 and m2_has_y2):
+                                continue
+
+                            if abs(x1 - x2) != units or abs(y1 - y2) != units:
+                                continue
+
+                            n1_cross_m2 = (
+                                min(w1_m2["y1"], w1_m2["y2"]) <= y2 <= max(w1_m2["y1"], w1_m2["y2"])
+                            )
+                            n1_cross_m1 = (
+                                min(w1_m1["x1"], w1_m1["x2"]) <= x2 <= max(w1_m1["x1"], w1_m1["x2"])
+                            )
+                            n2_cross_m1 = (
+                                min(w2_m1["x1"], w2_m1["x2"]) <= x1 <= max(w2_m1["x1"], w2_m1["x2"])
+                            )
+                            n2_cross_m2 = (
+                                min(w2_m2["y1"], w2_m2["y2"]) <= y1 <= max(w2_m2["y1"], w2_m2["y2"])
+                            )
+
+                            if not (n1_cross_m2 and n1_cross_m1 and n2_cross_m1 and n2_cross_m2):
+                                continue
+
+                            other_x_n2 = w2_m1["x1"] if w2_m1["x2"] == x2 else w2_m1["x2"]
+                            step_x = -units if other_x_n2 < x1 else units
+
+                            shifted = False
+                            for k in range(1, 6):
+                                x_new = x1 + k * step_x
+                                if step_x < 0 and x_new < min(other_x_n2, x2):
+                                    break
+                                if step_x > 0 and x_new > max(other_x_n2, x2):
+                                    break
+
+                                y_m2_start = min(w2_m2["y1"], w2_m2["y2"])
+                                y_m2_end = max(w2_m2["y1"], w2_m2["y2"])
+                                y_other = w2_m2["y1"] if w2_m2["y2"] == y2 else w2_m2["y2"]
+
+                                blocked = False
+                                for c in def_data.get("components", []):
+                                    cx = c.get("x", 0)
+                                    cy = c.get("y", 0)
+                                    orient = c.get("orient", "N")
+                                    macro = c.get("macro", "")
+                                    if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                                        cw, ch = (
+                                            (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                                        )
+                                    else:
+                                        cw, ch = 5000, 5000
+                                    if (cx <= x_new <= cx + cw) and not (
+                                        cy + ch <= y_m2_start or cy >= y_m2_end
+                                    ):
+                                        blocked = True
+                                        break
+                                if blocked:
+                                    continue
+
+                                for on in nets:
+                                    if on is n2:
+                                        continue
+                                    for ow in on.get("wires", []):
+                                        if (
+                                            ow.get("layer") == "M2"
+                                            and ow["x1"] == x_new
+                                            and ow["x2"] == x_new
+                                            and not (
+                                                max(ow["y1"], ow["y2"]) <= y_m2_start
+                                                or min(ow["y1"], ow["y2"]) >= y_m2_end
+                                            )
+                                        ):
+                                            blocked = True
+                                            break
+                                    if blocked:
+                                        break
+                                if blocked:
+                                    continue
+
+                                w2_other_m1 = next(
+                                    (
+                                        w
+                                        for w in n2.get("wires", [])
+                                        if w.get("layer") == "M1"
+                                        and w["y1"] == y_other
+                                        and w["y2"] == y_other
+                                        and (w["x1"] == x2 or w["x2"] == x2)
+                                    ),
+                                    None,
+                                )
+                                if not w2_other_m1:
+                                    continue
+
+                                ext_min_x = min(x2, x_new)
+                                ext_max_x = max(x2, x_new)
+                                for on in nets:
+                                    if on is n2:
+                                        continue
+                                    for ow in on.get("wires", []):
+                                        if (
+                                            ow.get("layer") == "M1"
+                                            and ow["y1"] == y_other
+                                            and ow["y2"] == y_other
+                                            and max(min(ow["x1"], ow["x2"]), ext_min_x)
+                                            < min(max(ow["x1"], ow["x2"]), ext_max_x)
+                                        ):
+                                            blocked = True
+                                            break
+                                    if blocked:
+                                        break
+                                if blocked:
+                                    continue
+
+                                w2_m2["x1"] = x_new
+                                w2_m2["x2"] = x_new
+
+                                if w2_m1["x1"] == x2:
+                                    w2_m1["x1"] = x_new
+                                else:
+                                    w2_m1["x2"] = x_new
+
+                                if w2_other_m1["x1"] == x2:
+                                    w2_other_m1["x1"] = x_new
+                                else:
+                                    w2_other_m1["x2"] = x_new
+
+                                for v in n2.get("vias", []):
+                                    if v.get("x") == x2 and v.get("y") in (y2, y_other):
+                                        v["x"] = x_new
+                                shifted = True
+                                break
+
+                            if shifted:
+                                return

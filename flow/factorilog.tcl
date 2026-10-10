@@ -369,44 +369,6 @@ proc get_net_driver_center_x {net dbu} {
     return 0.0
 }
 
-proc get_iterm_pin_rel_y {iterm dbu} {
-    set mterm [$iterm getMTerm]
-    foreach mpin [$mterm getMPins] {
-        foreach geom [$mpin getGeometry] {
-            return [expr {([$geom yMin] + [$geom yMax]) / 2.0 / double($dbu)}]
-        }
-    }
-    return 0.0
-}
-
-proc compare_machine_input_drivers {my a b} {
-    set ya [lindex $a 1]
-    set yb [lindex $b 1]
-    if {[expr {abs($ya - $yb)}] >= 0.5} {
-        if {$ya < $yb} {
-            return -1
-        }
-        return 1
-    }
-    set xa [lindex $a 2]
-    set xb [lindex $b 2]
-    if {$ya >= ($my - 0.6)} {
-        if {$xa < $xb} {
-            return 1
-        }
-        if {$xa > $xb} {
-            return -1
-        }
-    } else {
-        if {$xa < $xb} {
-            return -1
-        }
-        if {$xa > $xb} {
-            return 1
-        }
-    }
-    return 0
-}
 
 proc do_untangle {block dbu} {
     for {set pass 0} {$pass < 2} {incr pass} {
@@ -487,61 +449,7 @@ proc do_untangle {block dbu} {
                     }
                 }
             }
-            if {[string match "*assembling_machine*" $mname]} {
-                set pin_list {}
-                foreach iterm [$inst getITerms] {
-                    if {[[$iterm getMTerm] getIoType] == "INPUT"} {
-                        set net [$iterm getNet]
-                        if {$net != "NULL" && $net != ""} {
-                            set py [get_iterm_pin_rel_y $iterm $dbu]
-                            lappend pin_list [list $iterm $py $net]
-                        }
-                    }
-                }
-                if {[llength $pin_list] >= 2} {
-                    set pin_list [lsort -real -index 1 $pin_list]
-                    lassign [$inst getLocation] ix_dbu iy_dbu
-                    set inst_my [expr {$iy_dbu / double($dbu) + 1.5}]
-                    set net_data {}
-                    foreach item $pin_list {
-                        set net [lindex $item 2]
-                        set dy [get_net_driver_center_y $net $dbu]
-                        set dx [get_net_driver_center_x $net $dbu]
-                        lappend net_data [list $net $dy $dx]
-                    }
-                    set sorted_net_data [lsort -command [list compare_machine_input_drivers $inst_my] $net_data]
-                    set needs_update 0
-                    for {set i 0} {$i < [llength $pin_list]} {incr i} {
-                        set curr_net [lindex [lindex $pin_list $i] 2]
-                        set target_net [lindex [lindex $sorted_net_data $i] 0]
-                        if {$curr_net != $target_net} {
-                            set needs_update 1
-                            break
-                        }
-                    }
-                    if {$needs_update} {
-                        puts "factorilog: untangling $mname inputs"
-                        for {set i 0} {$i < [llength $pin_list]} {incr i} {
-                            set it [lindex [lindex $pin_list $i] 0]
-                            set py [lindex [lindex $pin_list $i] 1]
-                            set cnet [lindex [lindex $pin_list $i] 2]
-                            set tnet [lindex [lindex $sorted_net_data $i] 0]
-                            set tdy [lindex [lindex $sorted_net_data $i] 1]
-                            set tdx [lindex [lindex $sorted_net_data $i] 2]
-                            puts "  slot $i (py=$py, mterm=[[$it getMTerm] getName]): old=[$cnet getName] -> new=[$tnet getName] (driver at $tdx, $tdy)"
-                        }
-                        foreach item $pin_list {
-                            set it [lindex $item 0]
-                            odb::dbITerm_disconnect $it
-                        }
-                        for {set i 0} {$i < [llength $pin_list]} {incr i} {
-                            set it [lindex [lindex $pin_list $i] 0]
-                            set target_net [lindex [lindex $sorted_net_data $i] 0]
-                            odb::dbITerm_connect $it $target_net
-                        }
-                    }
-                }
-            }
+
         }
     }
 }

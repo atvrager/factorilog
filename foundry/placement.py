@@ -16,7 +16,7 @@ try:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
     )
-    from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
+    from foundry.lef import FLUID_MATERIALS, get_macro_port_geometry
 except ImportError:
     from entity_helpers import (
         DIRECTION_EAST,
@@ -24,7 +24,7 @@ except ImportError:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
     )
-    from lef import FLUID_MATERIALS, get_macro_port_slots
+    from lef import FLUID_MATERIALS, get_macro_port_geometry
 
 
 @dataclass
@@ -211,7 +211,8 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             extra = {"recipe": recipe} if recipe else None
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
-            in_offset = 1.0 if inputs else 0.0
+            in_offset = 1.0 if (cw > m_w) else 0.0
+            y_offset = 1.0 if (ch > m_h) else 0.0
 
             direction = DIRECTION_NORTH
             if machine == "chemical-plant":
@@ -221,32 +222,34 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             ent = add_entity(
                 machine,
                 gx + in_offset + m_w / 2.0,
-                gy + m_h / 2.0,
+                gy + y_offset + m_h / 2.0,
                 direction=direction,
                 extra=extra,
             )
             inst_to_entity[cname] = ent
 
-            in_slots, out_slots = get_macro_port_slots(cell)
-
             for port in sorted(inputs):
                 if port in fluids:
                     continue
-                cy = in_slots.get(port, 0) + 0.5
-                add_entity("fast-inserter", gx + 0.5, gy + cy, direction=DIRECTION_WEST)
-                occupied_positions.add((round(gx + 0.5, 2), round(gy + cy, 2)))
+                geom = get_macro_port_geometry(cell, port, is_output=False)
+                ix, iy = geom["inserter_pos"]
+                idir = geom["inserter_dir"]
+                add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
+                occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
             for port in sorted(outputs):
                 if port in fluids:
                     continue
-                cy = out_slots.get(port, 0) + 0.5
-                add_entity("fast-inserter", gx + cw - 0.5, gy + cy, direction=DIRECTION_WEST)
-                occupied_positions.add((round(gx + cw - 0.5, 2), round(gy + cy, 2)))
+                geom = get_macro_port_geometry(cell, port, is_output=True)
+                ix, iy = geom["inserter_pos"]
+                idir = geom["inserter_dir"]
+                add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
+                occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
             for tx in range(m_w):
                 for ty in range(m_h):
                     occupied_positions.add(
-                        (round(gx + in_offset + tx + 0.5, 2), round(gy + ty + 0.5, 2))
+                        (round(gx + in_offset + tx + 0.5, 2), round(gy + y_offset + ty + 0.5, 2))
                     )
 
     return PlacementResult(

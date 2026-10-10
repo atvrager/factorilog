@@ -318,6 +318,8 @@ def _factorilog_blueprint_impl(ctx):
     if out_time:
         args.extend(["--time-out", out_time.path])
         outputs.append(out_time)
+    if not ctx.attr.strict_drc:
+        args.append("--no-strict-drc")
 
     ctx.actions.run(
         inputs = [def_file, netlist_json],
@@ -339,6 +341,7 @@ factorilog_blueprint = rule(
         "blueprint": attr.output(mandatory = True, doc = "Output blueprint file"),
         "pins_json": attr.output(doc = "Optional output pins JSON metadata file"),
         "time_json": attr.output(doc = "Optional output blueprint timing JSON file"),
+        "strict_drc": attr.bool(default = True, doc = "Enforce strict zero physical DRC violations"),
         "_def2bp": attr.label(
             default = Label("//foundry:def2bp"),
             executable = True,
@@ -633,6 +636,7 @@ def factorilog_science_factory(
         enable_compound_cells = False,
         synthesize_splitters = True,
         telemetry_taps = "none",
+        strict_drc = True,
         test_expected_item = None,
         test_min_produced = 20,
         test_ticks = 7200,
@@ -701,6 +705,7 @@ def factorilog_science_factory(
         pins_json = name + "_pins.json",
         time_json = name + "_bp_time.json",
         label_text = name,
+        strict_drc = strict_drc,
         tags = merged_tags,
     )
 

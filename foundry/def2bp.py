@@ -21,8 +21,9 @@ try:
     from foundry.def_untangle import (
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
+        straighten_collinear_routes,
+        untangle_interlocking_corners,
         untangle_machine_inputs,
-        untangle_merge_tree_sinks,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -49,8 +50,9 @@ except ImportError:
     from def_untangle import (
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
+        straighten_collinear_routes,
+        untangle_interlocking_corners,
         untangle_machine_inputs,
-        untangle_merge_tree_sinks,
         untangle_merger_inputs,
         untangle_splitter_outputs,
     )
@@ -89,7 +91,6 @@ __all__ = [
     "parse_def",
     "prune_dead_end_belts",
     "untangle_machine_inputs",
-    "untangle_merge_tree_sinks",
     "untangle_merger_inputs",
     "untangle_splitter_outputs",
 ]
@@ -102,10 +103,12 @@ def build_entities(
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
     # 1. Untangle symmetric splitter outputs, inputs, and commutative machine inputs
+    straighten_collinear_routes(def_data)
     untangle_splitter_outputs(def_data)
     untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
+    untangle_interlocking_corners(def_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 
@@ -113,7 +116,8 @@ def build_entities(
     placement = place_components(def_data, netlist_data)
 
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
-    routes = route_and_resolve_jumpers(def_data, netlist_data, placement)
+    debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
+    routes = route_and_resolve_jumpers(def_data, netlist_data, placement, debug_trace=debug_trace)
 
     # 4. Generate power distribution network (PDN)
     pole_entities, mst_connections = generate_pdn(

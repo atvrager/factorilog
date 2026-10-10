@@ -201,6 +201,32 @@ def stage_rank_of(
     return 0
 
 
+def assign_gaa_pin_faces(
+    inputs: list[str],
+    feeder_coords: dict[str, tuple[float, float]] | None = None,
+    mach_y: float = 0.0,
+    depths: dict[str, int] | None = None,
+) -> dict[str, str]:
+    """Assign input ports to West, North, or South faces based on driver direction."""
+    face_map: dict[str, str] = {}
+    if feeder_coords:
+        for p in inputs:
+            drv_y = feeder_coords.get(p, (0.0, mach_y))[1]
+            if drv_y > mach_y + 1.0:
+                face_map[p] = "N"
+            elif drv_y < mach_y - 1.0:
+                face_map[p] = "S"
+            else:
+                face_map[p] = "W"
+        return face_map
+
+    faces_order = ["W", "N", "S"]
+    sorted_inputs = sorted(inputs, key=lambda p: (depths.get(p, 0) if depths else 0, p))
+    for idx, p in enumerate(sorted_inputs):
+        face_map[p] = faces_order[idx % len(faces_order)]
+    return face_map
+
+
 def build(
     data: solve.Data,
     demand: dict[str, float],
@@ -299,6 +325,15 @@ def build(
 
     for cell in nl.cells.values():
         cell["inputs"] = sorted(cell["inputs"], key=lambda p: (depths.get(p, 0), p))
+        inps = cell.get("inputs", [])
+        if inps and not cell.get("compound") and not cell.get("circuit_cell"):
+            faces = assign_gaa_pin_faces(inps, depths=depths)
+            cell["port_faces"] = faces
+            if any(f in ("N", "S") for f in faces.values()):
+                m_w = int(cell.get("machine_width", cell.get("width", 3)))
+                m_h = int(cell.get("machine_height", cell.get("height", 3)))
+                cell["width"] = m_w + 2
+                cell["height"] = m_h + 2
     nl.material_depths = depths
     instances_by_depth: dict[int, list[Instance]] = collections.defaultdict(list)
     for inst in nl.instances:
@@ -343,7 +378,7 @@ def build(
                         inst.rank = current_rank
                     current_rank += 1
     if higher_term:
-        by_recipe: dict[str, list[Instance]] = collections.defaultdict(list)
+        by_recipe = collections.defaultdict(list)
         for inst in higher_term:
             by_recipe[inst.recipe].append(inst)
         for r_insts in by_recipe.values():
@@ -384,7 +419,7 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
             )
             return y_wire
 
-        mid = len(items) // 2
+        mid = (len(items) + 1) // 2
         left_out = _build_planar_merge_tree(items[:mid], default_rank, is_root=False)
         right_out = _build_planar_merge_tree(items[mid:], default_rank, is_root=False)
 

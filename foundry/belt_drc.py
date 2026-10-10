@@ -32,6 +32,11 @@ except ImportError:
         OPPOSITE_DIR,
     )
 
+try:
+    from foundry.entity_helpers import entity_size
+except ImportError:
+    from entity_helpers import entity_size
+
 
 @dataclass(frozen=True)
 class DrcViolation:
@@ -358,35 +363,15 @@ class BeltDrcChecker:
         """Verify that every machine input inserter has reachable upstream supply."""
         violations: list[DrcViolation] = []
 
-        machine_sizes: dict[str, tuple[int, int]] = {
-            "stone-furnace": (2, 2),
-            "steel-furnace": (2, 2),
-            "electric-furnace": (3, 3),
-            "assembling-machine-1": (3, 3),
-            "assembling-machine-2": (3, 3),
-            "assembling-machine-3": (3, 3),
-            "chemical-plant": (3, 3),
-            "oil-refinery": (5, 5),
-            "centrifuge": (3, 3),
-            "lab": (3, 3),
-            "rocket-silo": (9, 9),
-            "boiler": (2, 3),
-            "steam-engine": (3, 5),
-            "steam-turbine": (3, 5),
-            "nuclear-reactor": (5, 5),
-        }
-
         # 1. Map all machine-occupied tiles
         machine_tiles: set[tuple[int, int]] = set()
         for ent in entities:
             name = ent.get("name", "")
-            if (
-                name in machine_sizes
-                or "furnace" in name
-                or "assembling-machine" in name
-                or "lab" in name
-            ):
-                w, h = machine_sizes.get(name, (3, 3))
+            if "switch" in name or "splitter" in name or "pole" in name:
+                continue
+            w_f, h_f = entity_size(name)
+            if w_f >= 2.0 or h_f >= 2.0:
+                w, h = int(w_f), int(h_f)
                 pos = ent.get("position", {})
                 cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
                 cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
@@ -583,35 +568,15 @@ class BeltDrcChecker:
         """Verify that every machine output inserter drops onto a valid receiver entity and reaches a sink."""
         violations: list[DrcViolation] = []
 
-        machine_sizes: dict[str, tuple[int, int]] = {
-            "stone-furnace": (2, 2),
-            "steel-furnace": (2, 2),
-            "electric-furnace": (3, 3),
-            "assembling-machine-1": (3, 3),
-            "assembling-machine-2": (3, 3),
-            "assembling-machine-3": (3, 3),
-            "chemical-plant": (3, 3),
-            "oil-refinery": (5, 5),
-            "centrifuge": (3, 3),
-            "lab": (3, 3),
-            "rocket-silo": (9, 9),
-            "boiler": (2, 3),
-            "steam-engine": (3, 5),
-            "steam-turbine": (3, 5),
-            "nuclear-reactor": (5, 5),
-        }
-
         # 1. Map all machine-occupied tiles
         machine_tiles: set[tuple[int, int]] = set()
         for ent in entities:
             name = ent.get("name", "")
-            if (
-                name in machine_sizes
-                or "furnace" in name
-                or "assembling-machine" in name
-                or "lab" in name
-            ):
-                w, h = machine_sizes.get(name, (3, 3))
+            if "switch" in name or "splitter" in name or "pole" in name:
+                continue
+            w_f, h_f = entity_size(name)
+            if w_f >= 2.0 or h_f >= 2.0:
+                w, h = int(w_f), int(h_f)
                 pos = ent.get("position", {})
                 cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
                 cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])

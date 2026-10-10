@@ -18,6 +18,8 @@ from foundry.def_parser import parse_def
 from foundry.def_untangle import (
     fix_reverse_splitter_inputs,
     relocate_blocked_splitter_inputs,
+    straighten_collinear_routes,
+    untangle_interlocking_corners,
     untangle_merger_inputs,
     untangle_splitter_outputs,
 )
@@ -109,10 +111,12 @@ def run_diagnostics(
     netlist_data = json.loads(netlist_path.read_text(encoding="utf-8"))
 
     # 1. Pre-routing untangling
+    straighten_collinear_routes(def_data)
     untangle_splitter_outputs(def_data)
     untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
+    untangle_interlocking_corners(def_data)
     # untangle_machine_inputs(def_data, netlist_data)
 
     # 2. Placement

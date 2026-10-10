@@ -197,7 +197,7 @@ factorilog_science_factory(
 factorilog_science_factory(
     name = "automation_logistic_science",
     block_fill = "0.01",
-    cell_pad_sites = 8,
+    cell_pad_sites = 10,
     channel_h = 48,
     core_margin = 8,
     demand = "automation-science-pack 60.0 logistic-science-pack 60.0",
@@ -228,6 +228,7 @@ factorilog_science_factory(
     use_row_placement = True,
     channel_h = 24,
     do_untangle = True,
+    strict_drc = True,
     synthesize_splitters = True,
     test_expected_item = "military-science-pack",
     test_min_active_ratio = "0.50",

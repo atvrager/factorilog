@@ -9,11 +9,6 @@ from __future__ import annotations
 import math
 from typing import Any
 
-try:
-    from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
-except ImportError:
-    from lef import FLUID_MATERIALS, get_macro_port_slots
-
 # Factorio 2.0 direction values: North=0, East=4, South=8, West=12.
 DIRECTION_NORTH = 0
 DIRECTION_EAST = 4
@@ -49,20 +44,69 @@ def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
     return DIRECTION_EAST if x2 >= x1 else DIRECTION_WEST
 
 
+_PROTOTYPE_BOXES: dict[str, tuple[float, float]] = {}
+_PROTOTYPE_COLLISIONS: dict[str, tuple[float, float]] = {}
+
+
+def entity_bounding_box(proto: dict[str, Any]) -> tuple[float, float]:
+    """Derive entity width and height from prototype collision box."""
+    box = proto.get("collision_box", [[-0.4, -0.4], [0.4, 0.4]])
+    w = math.ceil(float(box[1][0]) - float(box[0][0]))
+    h = math.ceil(float(box[1][1]) - float(box[0][1]))
+    return float(max(1, w)), float(max(1, h))
+
+
+def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
+    """Register prototype dimensions and collision half-sizes from prototype data."""
+    for key, value in prototypes.items():
+        if isinstance(value, dict):
+            if "collision_box" in value:
+                box = value["collision_box"]
+                if len(box) >= 2:
+                    w, h = entity_bounding_box(value)
+                    _PROTOTYPE_BOXES[key] = (w, h)
+                    _PROTOTYPE_COLLISIONS[key] = (
+                        abs(float(box[1][0])),
+                        abs(float(box[1][1])),
+                    )
+            else:
+                for sub_key, sub_val in value.items():
+                    if isinstance(sub_val, dict) and "collision_box" in sub_val:
+                        box = sub_val["collision_box"]
+                        if len(box) >= 2:
+                            w, h = entity_bounding_box(sub_val)
+                            _PROTOTYPE_BOXES[sub_key] = (w, h)
+                            _PROTOTYPE_COLLISIONS[sub_key] = (
+                                abs(float(box[1][0])),
+                                abs(float(box[1][1])),
+                            )
+
+
 def entity_size(name: str) -> tuple[float, float]:
     """Return width and height of named entity."""
+    if name in _PROTOTYPE_BOXES:
+        return _PROTOTYPE_BOXES[name]
+    for key, box in _PROTOTYPE_BOXES.items():
+        if key in name or name in key:
+            return box
     if "rocket-silo" in name:
         return 9.0, 9.0
-    if "oil-refinery" in name:
+    if "oil-refinery" in name or "nuclear-reactor" in name:
         return 5.0, 5.0
     if (
         "assembling-machine" in name
         or "electric-furnace" in name
         or "chemical-plant" in name
         or "centrifuge" in name
+        or "lab" in name
     ):
         return 3.0, 3.0
-    if "steel-furnace" in name or "stone-furnace" in name or "power-switch" in name:
+    if (
+        "steel-furnace" in name
+        or "stone-furnace" in name
+        or "power-switch" in name
+        or "boiler" in name
+    ):
         return 2.0, 2.0
     if "pump" in name:
         return 1.0, 2.0
@@ -71,6 +115,11 @@ def entity_size(name: str) -> tuple[float, float]:
 
 def entity_collision_half_size(name: str) -> tuple[float, float]:
     """Return half width and half height of entity collision box."""
+    if name in _PROTOTYPE_COLLISIONS:
+        return _PROTOTYPE_COLLISIONS[name]
+    for key, coll in _PROTOTYPE_COLLISIONS.items():
+        if key in name or name in key:
+            return coll
     if "rocket-silo" in name:
         return 4.2, 4.2
     if "oil-refinery" in name:
@@ -205,6 +254,11 @@ def prune_dead_end_belts(
     netlist_data: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Prune dead-end stub belts that do not reach any downstream sink."""
+    try:
+        from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
+    except ImportError:
+        from lef import FLUID_MATERIALS, get_macro_port_slots
+
     scale = 1.0 / float(def_data.get("units", 1000))
     fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
 

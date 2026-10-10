@@ -20,9 +20,21 @@ from typing import Any
 
 try:
     from foundry import netlist, pdk
+    from foundry.entity_helpers import (
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+    )
 except ImportError:
     import netlist
     import pdk
+    from entity_helpers import (
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+    )
 
 # Tile edge of a pin, by the side of the factory flow the material
 # enters or leaves. The game bridge reads the same table when it turns
@@ -134,10 +146,109 @@ def get_macro_port_slots(
     return in_slots, out_slots
 
 
+def get_macro_port_geometry(
+    cell: dict[str, Any], port: str, is_output: bool = False
+) -> dict[str, Any]:
+    """Calculate the face, layer, RECT, inserter position, and approach tile for a macro port."""
+    w = float(cell.get("width", 3))
+    h = float(cell.get("height", 3))
+    m_h = float(cell.get("machine_height", h - 2 if h > 2 else h))
+    port_faces = cell.get("port_faces", {})
+    machine = cell.get("machine", "")
+
+    face = port_faces.get(port, "E") if is_output else port_faces.get(port, "W")
+
+    h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
+    v_layer = pdk.LAYER_CIRCUIT_GREEN if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
+
+    if (
+        machine in ("chemical-plant", "oil-refinery")
+        or cell.get("circuit_cell")
+        or cell.get("compound")
+    ):
+        in_slots, out_slots = get_macro_port_slots(cell)
+        if is_output:
+            cy = out_slots.get(port, int(h) // 2) + 0.5
+            return {
+                "face": "E",
+                "layer": h_layer,
+                "rect": (w - 0.5, cy - 0.25, w, cy + 0.25),
+                "inserter_pos": (w - 0.5, cy),
+                "inserter_dir": DIRECTION_WEST,
+                "approach_pos": (w + 0.5, cy),
+                "approach_dir": DIRECTION_EAST,
+            }
+        cy = in_slots.get(port, int(h) // 2) + 0.5
+        return {
+            "face": "W",
+            "layer": h_layer,
+            "rect": (0.0, cy - 0.25, 0.5, cy + 0.25),
+            "inserter_pos": (0.5, cy),
+            "inserter_dir": DIRECTION_WEST,
+            "approach_pos": (-0.5, cy),
+            "approach_dir": DIRECTION_EAST,
+        }
+
+    # Standard GAA machines:
+    if face == "E":
+        in_slots, out_slots = get_macro_port_slots(cell)
+        cy = out_slots.get(port, int(h) // 2) + 0.5
+        if h > m_h:
+            cy = h / 2.0
+        return {
+            "face": "E",
+            "layer": h_layer,
+            "rect": (w - 0.5, cy - 0.25, w, cy + 0.25),
+            "inserter_pos": (w - 0.5, cy),
+            "inserter_dir": DIRECTION_WEST,
+            "approach_pos": (w + 0.5, cy),
+            "approach_dir": DIRECTION_EAST,
+        }
+    if face == "N":
+        cx = w / 2.0
+        return {
+            "face": "N",
+            "layer": v_layer,
+            "rect": (cx - 0.25, h - 0.5, cx + 0.25, h),
+            "inserter_pos": (cx, h - 0.5),
+            "inserter_dir": DIRECTION_SOUTH,
+            "approach_pos": (cx, h + 0.5),
+            "approach_dir": DIRECTION_NORTH,
+        }
+    if face == "S":
+        cx = w / 2.0
+        return {
+            "face": "S",
+            "layer": v_layer,
+            "rect": (cx - 0.25, 0.0, cx + 0.25, 0.5),
+            "inserter_pos": (cx, 0.5),
+            "inserter_dir": DIRECTION_NORTH,
+            "approach_pos": (cx, -0.5),
+            "approach_dir": DIRECTION_SOUTH,
+        }
+    in_slots, _ = get_macro_port_slots(cell)
+    cy = in_slots.get(port, int(h) // 2) + 0.5
+    if h > m_h:
+        cy = h / 2.0
+    return {
+        "face": "W",
+        "layer": h_layer,
+        "rect": (0.0, cy - 0.25, 0.5, cy + 0.25),
+        "inserter_pos": (0.5, cy),
+        "inserter_dir": DIRECTION_WEST,
+        "approach_pos": (-0.5, cy),
+        "approach_dir": DIRECTION_EAST,
+    }
+
+
 def _input_pin_rect(
     cell: dict[str, Any], idx: int, total: int, port: str = ""
 ) -> tuple[str, float, float, float, float]:
     """Calculate input pin layer and bounds on the macro grid."""
+    if port and cell.get("port_faces"):
+        geom = get_macro_port_geometry(cell, port, is_output=False)
+        r = geom["rect"]
+        return geom["layer"], r[0], r[1], r[2], r[3]
     width = cell["width"]
     height = cell["height"]
     h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE
@@ -163,6 +274,10 @@ def _output_pin_rect(
     cell: dict[str, Any], idx: int, total: int, port: str = ""
 ) -> tuple[str, float, float, float, float]:
     """Calculate output pin layer and bounds on the macro grid."""
+    if port and cell.get("port_faces"):
+        geom = get_macro_port_geometry(cell, port, is_output=True)
+        r = geom["rect"]
+        return geom["layer"], r[0], r[1], r[2], r[3]
     width = cell["width"]
     height = cell["height"]
     h_layer = pdk.LAYER_CIRCUIT_RED if cell.get("circuit_cell") else pdk.LAYER_SURFACE

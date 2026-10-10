@@ -78,7 +78,7 @@ class TestDef2Bp(unittest.TestCase):
 
     def test_build_entities(self) -> None:
         def_data = def2bp.parse_def(MINI_DEF)
-        entities, wires = def2bp.build_entities(def_data, MINI_NETLIST)
+        entities, wires = def2bp.build_entities(def_data, MINI_NETLIST, strict_drc=False)
         self.assertIsInstance(wires, list)
 
         # Look up by name
@@ -105,7 +105,9 @@ class TestDef2Bp(unittest.TestCase):
             self.assertEqual(ent["entity_number"], idx)
 
     def test_def_to_blueprint_roundtrip(self) -> None:
-        bp_string = def2bp.def_to_blueprint(MINI_DEF, MINI_NETLIST, label="test_rig")
+        bp_string = def2bp.def_to_blueprint(
+            MINI_DEF, MINI_NETLIST, label="test_rig", strict_drc=False
+        )
         self.assertTrue(bp_string.startswith("0"))
 
         doc = blueprint.decode(bp_string)
