@@ -89,6 +89,8 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
                         set pad 10
+                    } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
+                        set pad 2
                     }
                     set row_w [expr {$row_w + $dw + $pad}]
                     if {$dh > $rank_max_h} {
@@ -149,6 +151,8 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
                         set pad 10
+                    } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
+                        set pad 2
                     }
                     set rx [expr {$rx + $dw + $pad}]
                 }

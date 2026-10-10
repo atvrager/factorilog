@@ -25,11 +25,14 @@ sys.path.insert(0, str(REPO_ROOT / "test"))
 
 import blueprint
 import check_blueprint
+import circuit
+import circuit_synth
 import lef
 import liberty
 import pdk
 import solve
 from test_routing_primitives import run_factorio_simulation
+
 
 
 class TestCircuitPower(unittest.TestCase):
@@ -575,6 +578,184 @@ class TestCircuitPower(unittest.TestCase):
             self.assertEqual(results.get("COUNT_constant-combinator"), 1)
             self.assertEqual(results.get("COUNT_medium-electric-pole"), 2)
 
+    def test_synthesized_verilog_circuit_wires_in_simulation(self) -> None:
+        """Verify in-game wire connections on synthesized Verilog combinators and switch."""
+        v_path = REPO_ROOT / "flow" / "controllers" / "power_sequencer.v"
+        synth_result = circuit_synth.synthesize_verilog(v_path)
+
+        entities: list[dict[str, Any]] = []
+        inst_to_entity: dict[str, dict[str, Any]] = {}
+        grid_entities: dict[tuple[float, float], dict[str, Any]] = {}
+
+        # Place combinators and switch in a compact test grid (within 9 tiles reach)
+        for idx, c in enumerate(synth_result.cells):
+            ename = (
+                "constant-combinator"
+                if "constant" in c.cell
+                else (
+                    "power-switch"
+                    if "switch" in c.cell
+                    else ("arithmetic-combinator" if "arithmetic" in c.cell else "decider-combinator")
+                )
+            )
+            extra: dict[str, Any] = {}
+            if c.control_behavior:
+                extra["control_behavior"] = c.control_behavior
+            ent = {
+                "name": ename,
+                "position": {"x": 2.0 * (idx % 5), "y": 2.0 * (idx // 5)},
+                "direction": 0,
+                **extra,
+            }
+            entities.append(ent)
+            inst_to_entity[c.name] = ent
+            grid_entities[(round(ent["position"]["x"], 2), round(ent["position"]["y"], 2))] = ent
+
+        # Add two power poles
+        pole1 = {"name": "medium-electric-pole", "position": {"x": 0.0, "y": 6.0}}
+        pole2 = {"name": "medium-electric-pole", "position": {"x": 4.0, "y": 6.0}}
+        entities.extend([pole1, pole2])
+
+        pole_entities = {
+            (0.0, 6.0): pole1,
+            (4.0, 6.0): pole2,
+        }
+        mst_connections = [((0.0, 6.0), (4.0, 6.0))]
+
+        netlist_data = {
+            "instances": [
+                {"name": c.name, "cell": c.cell, "control_behavior": c.control_behavior}
+                for c in synth_result.cells
+            ],
+            "circuit_connections": [
+                {
+                    "source": c.source,
+                    "target": c.target,
+                    "color": c.color,
+                    "source_port": c.source_port,
+                    "target_port": c.target_port,
+                }
+                for c in synth_result.connections
+            ],
+            "telemetry": [],
+        }
+
+        wires = circuit.wire_telemetry(
+            entities,
+            netlist_data,
+            inst_to_entity,
+            {},
+            grid_entities,
+            mst_connections,
+            pole_entities,
+        )
+
+        # Python-level assertions: wires must include combinators, switches, and poles
+        comb_wires = [
+            w for w in wires if any("combinator" in entities[num - 1]["name"] for num in (w[0], w[2]))
+        ]
+        switch_wires = [
+            w for w in wires if any("switch" in entities[num - 1]["name"] for num in (w[0], w[2]))
+        ]
+        self.assertGreater(len(comb_wires), 5, "Combinators must have multiple wires in wires array")
+        self.assertEqual(len(switch_wires), 3, "Power switch must have 1 circuit and 2 copper wires")
+
+        bp_str = blueprint.encode(entities, "test_synth_circuit", wires=wires)
+
+        init_lua = f"""
+        local BP = [==[{bp_str}]==]
+        game.forces.player.research_all_technologies()
+        local surface = game.surfaces[1]
+        for cx = -2, 2 do
+            for cy = -2, 2 do
+                surface.request_to_generate_chunks({{cx * 32, cy * 32}}, 1)
+            end
+        end
+        surface.force_generate_chunk_requests()
+
+        local tiles = {{}}
+        for x = -10, 20 do
+            for y = -10, 20 do
+                tiles[#tiles + 1] = {{name = "concrete", position = {{x, y}}}}
+            end
+        end
+        surface.set_tiles(tiles)
+
+        for _, entity in pairs(surface.find_entities_filtered{{area = {{{{-10, -10}}, {{20, 20}}}}}}) do
+            if entity.name ~= "character" then
+                entity.destroy()
+            end
+        end
+
+        local inv = game.create_inventory(1)
+        local stack = inv[1]
+        stack.set_stack{{name = "blueprint", count = 1}}
+        local import_res = stack.import_stack(BP)
+
+        local built = stack.build_blueprint{{
+            surface = surface,
+            force = game.forces.player,
+            position = {{0, 0}},
+            force_build = true
+        }}
+
+        local ghosts = surface.find_entities_filtered{{name = "entity-ghost"}}
+        for _, g in ipairs(ghosts) do
+            g.silent_revive()
+        end
+        """
+
+        tick_lua = """
+        local surface = game.surfaces[1]
+        local decs = surface.find_entities_filtered{name = "decider-combinator"}
+        local switches = surface.find_entities_filtered{name = "power-switch"}
+        local consts = surface.find_entities_filtered{name = "constant-combinator"}
+
+        local connected_decs = 0
+        for _, d in ipairs(decs) do
+            local in_r = d.get_wire_connector(defines.wire_connector_id.combinator_input_red, true)
+            local in_g = d.get_wire_connector(defines.wire_connector_id.combinator_input_green, true)
+            local out_r = d.get_wire_connector(defines.wire_connector_id.combinator_output_red, true)
+            local out_g = d.get_wire_connector(defines.wire_connector_id.combinator_output_green, true)
+            local total_conns = #in_r.connections + #in_g.connections + #out_r.connections + #out_g.connections
+            if total_conns > 0 then
+                connected_decs = connected_decs + 1
+            end
+        end
+
+        local ps = switches[1]
+        local switch_wire_count = 0
+        if ps then
+            local c_r = ps.get_wire_connector(defines.wire_connector_id.circuit_red, true)
+            local c_left = ps.get_wire_connector(defines.wire_connector_id.power_switch_left_copper, true)
+            local c_right = ps.get_wire_connector(defines.wire_connector_id.power_switch_right_copper, true)
+            switch_wire_count = #c_r.connections + #c_left.connections + #c_right.connections
+        end
+
+        local const_wire_count = 0
+        local cc = consts[1]
+        if cc then
+            local out_r = cc.get_wire_connector(defines.wire_connector_id.circuit_red, true)
+            const_wire_count = #out_r.connections
+        end
+
+        log("TEST_RESULT: decs=" .. #decs .. " conn_decs=" .. connected_decs .. " switch_wires=" .. switch_wire_count .. " const_wires=" .. const_wire_count)
+        """
+
+        results = run_factorio_simulation(init_lua, tick_lua, ticks=2)
+        self.assertGreater(len(results), 0, "Simulation results must not be empty")
+
+        matched = False
+        for line in results:
+            if "TEST_RESULT: decs=" in line:
+                matched = True
+                self.assertIn("decs=7 conn_decs=7", line)
+                self.assertIn("switch_wires=3", line)
+                self.assertIn("const_wires=5", line)
+
+        self.assertTrue(matched, f"Test result pattern not found in simulation output: {results}")
+
 
 if __name__ == "__main__":
     unittest.main()
+

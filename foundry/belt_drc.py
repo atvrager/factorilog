@@ -88,6 +88,7 @@ class BeltDrcChecker:
         input_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
         unresolved_crossings: list[tuple[float, float]] | set[tuple[float, float]] | None = None,
         output_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
+        wires: list[list[int]] | None = None,
     ) -> list[DrcViolation]:
         """Verify all physical rules on a list of placed entities."""
         violations: list[DrcViolation] = []
@@ -144,6 +145,12 @@ class BeltDrcChecker:
         violations.extend(
             self._check_surface_collision(tile_map, unresolved_crossings=unresolved_crossings)
         )
+
+        # 9. Check circuit and power switch connectivity (Rules DRC-09..12)
+        if wires is not None or any(
+            "combinator" in e.get("name", "") or "switch" in e.get("name", "") for e in entities
+        ):
+            violations.extend(self._check_circuit_connectivity(entities, wires or []))
 
         return violations
 
@@ -879,5 +886,115 @@ class BeltDrcChecker:
                         y=float(pos[1]),
                     )
                 )
+
+        return violations
+
+    def _check_circuit_connectivity(
+        self,
+        entities: list[dict[str, Any]],
+        wires: list[list[int]],
+    ) -> list[DrcViolation]:
+        """Verify circuit network connectivity and wire length limits (Rules DRC-09..12)."""
+        violations: list[DrcViolation] = []
+        ent_by_num: dict[int, dict[str, Any]] = {}
+        for ent in entities:
+            num = ent.get("entity_number")
+            if num:
+                ent_by_num[num] = ent
+
+        # Map each entity number to its connected connector IDs
+        ent_conns: dict[int, set[int]] = collections.defaultdict(set)
+        for w in wires:
+            if len(w) >= 4:
+                id1, c1, id2, c2 = w[0], w[1], w[2], w[3]
+                ent_conns[id1].add(c1)
+                ent_conns[id2].add(c2)
+
+                # Rule DRC-09: Wire reach distance <= 9.0 tiles
+                e1 = ent_by_num.get(id1)
+                e2 = ent_by_num.get(id2)
+                if e1 and e2:
+                    p1 = e1.get("position", {})
+                    p2 = e2.get("position", {})
+                    x1, y1 = float(p1.get("x", 0)), float(p1.get("y", 0))
+                    x2, y2 = float(p2.get("x", 0)), float(p2.get("y", 0))
+                    dist = math.hypot(x1 - x2, y1 - y2)
+                    if dist > 9.0:
+                        violations.append(
+                            DrcViolation(
+                                code="DRC-09",
+                                message=f"Wire distance {dist:.2f} between {e1.get('name')} (#{id1}) and {e2.get('name')} (#{id2}) exceeds 9.0 tiles limit",
+                                x=x1,
+                                y=y1,
+                            )
+                        )
+
+        for ent in entities:
+            ename = ent.get("name", "")
+            num = ent.get("entity_number")
+            pos = ent.get("position", {})
+            x = float(pos.get("x", 0))
+            y = float(pos.get("y", 0))
+            conns = ent_conns.get(num, set()) if num else set()
+
+            # Rule DRC-10: Combinator input and output connectivity
+            if ename in ("decider-combinator", "arithmetic-combinator"):
+                has_input = (1 in conns) or (2 in conns)
+                has_output = (3 in conns) or (4 in conns)
+                if not has_input:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-10",
+                            message=f"Combinator {ename} (#{num}) at ({x}, {y}) has unconnected inputs",
+                            x=x,
+                            y=y,
+                        )
+                    )
+                if not has_output:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-10",
+                            message=f"Combinator {ename} (#{num}) at ({x}, {y}) has unconnected outputs",
+                            x=x,
+                            y=y,
+                        )
+                    )
+
+            # Rule DRC-11: Constant combinator connectivity
+            elif ename == "constant-combinator":
+                has_output = (1 in conns) or (2 in conns)
+                if not has_output:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-11",
+                            message=f"Constant combinator (#{num}) at ({x}, {y}) has no wire connections",
+                            x=x,
+                            y=y,
+                        )
+                    )
+
+            # Rule DRC-12: Power switch connectivity (circuit and both copper terminals)
+            elif ename == "power-switch":
+                has_circuit = (1 in conns) or (2 in conns)
+                has_left_cu = 5 in conns
+                has_right_cu = 6 in conns
+                if not has_circuit:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-12",
+                            message=f"Power switch (#{num}) at ({x}, {y}) has no circuit wire connection",
+                            x=x,
+                            y=y,
+                        )
+                    )
+                if not has_left_cu or not has_right_cu:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-12",
+                            message=f"Power switch (#{num}) at ({x}, {y}) missing copper terminal connections (left={has_left_cu}, right={has_right_cu})",
+                            x=x,
+                            y=y,
+                        )
+                    )
 
         return violations

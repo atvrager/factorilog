@@ -87,6 +87,7 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
                     "filters": [
                         {
                             "index": 1,
+                            "type": "virtual",
                             "name": "signal-A",
                             "quality": "normal",
                             "comparator": "=",
@@ -94,6 +95,7 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
                         },
                         {
                             "index": 2,
+                            "type": "virtual",
                             "name": "signal-B",
                             "quality": "normal",
                             "comparator": "=",
@@ -101,6 +103,7 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
                         },
                         {
                             "index": 3,
+                            "type": "virtual",
                             "name": "signal-C",
                             "quality": "normal",
                             "comparator": "=",
@@ -108,6 +111,7 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
                         },
                         {
                             "index": 4,
+                            "type": "virtual",
                             "name": "signal-D",
                             "quality": "normal",
                             "comparator": "=",
@@ -319,7 +323,45 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
         )
     )
 
-    # Connect state latch output to output deciders
+    # 1. Connect parameter constants to input comparator deciders
+    conns.extend(
+        [
+            CircuitConnection(
+                source="u_const_params",
+                source_port=1,
+                target=dec_name,
+                target_port=1,
+                color="red",
+            )
+            for dec_name in (
+                "u_dec_throttled",
+                "u_dec_emergency",
+                "u_dec_rec_normal",
+                "u_dec_rec_throttled",
+            )
+        ]
+    )
+
+    # 2. Connect comparator outputs to state latch input
+    conns.extend(
+        [
+            CircuitConnection(
+                source=dec_name,
+                source_port=3,
+                target="u_state_latch",
+                target_port=1,
+                color="red",
+            )
+            for dec_name in (
+                "u_dec_throttled",
+                "u_dec_emergency",
+                "u_dec_rec_normal",
+                "u_dec_rec_throttled",
+            )
+        ]
+    )
+
+    # 3. Connect state latch output to output deciders
     conns.append(
         CircuitConnection(
             source="u_state_latch",

@@ -658,8 +658,6 @@ def factorilog_science_factory(
         tags = None):
     """Builds full physical design flow for a science pack factory."""
     merged_tags = list(tags) if tags else []
-    if "manual" not in merged_tags:
-        merged_tags.append("manual")
 
     synth_name = name + "_synth"
     pnr_name = name + "_pnr"
@@ -772,7 +770,7 @@ def factorilog_science_factory(
     demand_tokens = demand.split(" ")
     primary_item = test_expected_item if test_expected_item else (demand_tokens[0] if demand_tokens else "automation-science-pack")
     test_tags = list(merged_tags)
-    for t in ("local", "no-sandbox"):
+    for t in ("local", "no-sandbox", "manual"):
         if t not in test_tags:
             test_tags.append(t)
 

@@ -37,6 +37,37 @@ def find_nearest_pole(
     return best_pole
 
 
+def resolve_connector_id(entity: dict[str, Any], port: int, color: str = "red") -> int:
+    """Resolve entity port number and color to Factorio 2.0 wire connector ID."""
+    ename = entity.get("name", "")
+    if "combinator" in ename and ename != "constant-combinator":
+        if port == WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED:
+            return WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED
+        if port == WIRE_CONNECTOR_COMBINATOR_OUTPUT_GREEN:
+            return WIRE_CONNECTOR_COMBINATOR_OUTPUT_GREEN
+        if port == 2:
+            if color == "red":
+                return WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED
+            return WIRE_CONNECTOR_COMBINATOR_INPUT_GREEN
+        if port == 1:
+            if color == "green":
+                return WIRE_CONNECTOR_COMBINATOR_INPUT_GREEN
+            return WIRE_CONNECTOR_COMBINATOR_INPUT_RED
+        return WIRE_CONNECTOR_COMBINATOR_INPUT_RED
+    if ename == "power-switch":
+        if port in (
+            WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
+            WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER,
+        ):
+            return port
+        return WIRE_CONNECTOR_CIRCUIT_GREEN if color == "green" else WIRE_CONNECTOR_CIRCUIT_RED
+    if "electric-pole" in ename:
+        if port == WIRE_CONNECTOR_POLE_COPPER:
+            return WIRE_CONNECTOR_POLE_COPPER
+        return WIRE_CONNECTOR_CIRCUIT_GREEN if color == "green" else WIRE_CONNECTOR_CIRCUIT_RED
+    return WIRE_CONNECTOR_CIRCUIT_GREEN if color == "green" else WIRE_CONNECTOR_CIRCUIT_RED
+
+
 def wire_telemetry(
     entities: list[dict[str, Any]],
     netlist_data: dict[str, Any],
@@ -46,21 +77,128 @@ def wire_telemetry(
     mst_connections: list[tuple[tuple[float, float], tuple[float, float]]],
     pole_entities: dict[tuple[float, float], dict[str, Any]],
 ) -> list[list[int]]:
-    """Wire circuit telemetry and assign sequential entity numbers."""
+    """Wire circuit telemetry, combinators, and power switches into 2.0 wires array."""
+    # 1. Assign sequential 1-based entity numbers
+    for idx, ent in enumerate(entities, 1):
+        ent["entity_number"] = idx
+
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
+    wires: list[list[int]] = []
+    seen_wires: set[tuple[tuple[int, int], tuple[int, int]]] = set()
 
-    def connect_wire(
-        ent_a: dict[str, Any], port_a: int, ent_b: dict[str, Any], port_b: int, color: str
+    def add_wire(
+        ent_a: dict[str, Any],
+        port_a: int,
+        ent_b: dict[str, Any],
+        port_b: int,
+        color: str = "red",
     ) -> None:
-        conns_a = (
-            ent_a.setdefault("connections", {}).setdefault(str(port_a), {}).setdefault(color, [])
-        )
-        conns_b = (
-            ent_b.setdefault("connections", {}).setdefault(str(port_b), {}).setdefault(color, [])
-        )
-        conns_a.append({"_target": ent_b, "circuit_id": port_b})
-        conns_b.append({"_target": ent_a, "circuit_id": port_a})
+        num_a = ent_a.get("entity_number")
+        num_b = ent_b.get("entity_number")
+        if not num_a or not num_b:
+            return
+        cid_a = resolve_connector_id(ent_a, port_a, color)
+        cid_b = resolve_connector_id(ent_b, port_b, color)
+        key = (min((num_a, cid_a), (num_b, cid_b)), max((num_a, cid_a), (num_b, cid_b)))
+        if key in seen_wires:
+            return
+        seen_wires.add(key)
+        wires.append([num_a, cid_a, num_b, cid_b])
 
+        # Also store in ent["connections"] for Factorio 1.0 schema compatibility
+        if color in ("red", "green"):
+            is_comb_a = (
+                "combinator" in ent_a.get("name", "") and ent_a.get("name") != "constant-combinator"
+            )
+            is_comb_b = (
+                "combinator" in ent_b.get("name", "") and ent_b.get("name") != "constant-combinator"
+            )
+            pk_a = ("1" if cid_a in (1, 2) else "2") if is_comb_a else str(cid_a)
+            pk_b = ("1" if cid_b in (1, 2) else "2") if is_comb_b else str(cid_b)
+            if pk_a in ("1", "2") and pk_b in ("1", "2"):
+                link_cid_a = (1 if cid_a in (1, 2) else 2) if is_comb_a else cid_a
+                link_cid_b = (1 if cid_b in (1, 2) else 2) if is_comb_b else cid_b
+
+                conns_a = (
+                    ent_a.setdefault("connections", {}).setdefault(pk_a, {}).setdefault(color, [])
+                )
+                conns_b = (
+                    ent_b.setdefault("connections", {}).setdefault(pk_b, {}).setdefault(color, [])
+                )
+                conns_a.append({"entity_id": num_b, "circuit_id": link_cid_b})
+                conns_b.append({"entity_id": num_a, "circuit_id": link_cid_a})
+
+    # 2. Power switch copper connections
+    power_switch_ents = [e for e in entities if e.get("name") == "power-switch"]
+    switch_isolated_copper_edges: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    for ps in power_switch_ents:
+        ps_pos = (ps["position"]["x"], ps["position"]["y"])
+        if not pole_entities:
+            continue
+        sorted_poles = sorted(
+            pole_entities.items(),
+            key=lambda item: math.hypot(item[0][0] - ps_pos[0], item[0][1] - ps_pos[1]),
+        )
+        if len(sorted_poles) >= 2:
+            p_left_pos, p_left_ent = sorted_poles[0]
+            p_right_pos, p_right_ent = sorted_poles[1]
+            add_wire(
+                p_left_ent,
+                WIRE_CONNECTOR_POLE_COPPER,
+                ps,
+                WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
+                color="copper",
+            )
+            add_wire(
+                ps,
+                WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER,
+                p_right_ent,
+                WIRE_CONNECTOR_POLE_COPPER,
+                color="copper",
+            )
+            edge_key = (min(p_left_pos, p_right_pos), max(p_left_pos, p_right_pos))
+            switch_isolated_copper_edges.add(edge_key)
+        elif len(sorted_poles) == 1:
+            _p_pos, p_ent = sorted_poles[0]
+            add_wire(
+                p_ent,
+                WIRE_CONNECTOR_POLE_COPPER,
+                ps,
+                WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
+                color="copper",
+            )
+
+    # 3. Electric pole MST connections
+    for p1, p2 in mst_connections:
+        ent1 = pole_entities.get(p1)
+        ent2 = pole_entities.get(p2)
+        if not ent1 or not ent2:
+            continue
+        edge_key = (min(p1, p2), max(p1, p2))
+        if edge_key not in switch_isolated_copper_edges:
+            add_wire(
+                ent1,
+                WIRE_CONNECTOR_POLE_COPPER,
+                ent2,
+                WIRE_CONNECTOR_POLE_COPPER,
+                color="copper",
+            )
+        add_wire(
+            ent1,
+            WIRE_CONNECTOR_CIRCUIT_RED,
+            ent2,
+            WIRE_CONNECTOR_CIRCUIT_RED,
+            color="red",
+        )
+        add_wire(
+            ent1,
+            WIRE_CONNECTOR_CIRCUIT_GREEN,
+            ent2,
+            WIRE_CONNECTOR_CIRCUIT_GREEN,
+            color="green",
+        )
+
+    # 4. Telemetry sensors and readout displays
     for rec in netlist_data.get("telemetry", []):
         mat = rec.get("material", "")
         disp_name = rec.get("display_instance")
@@ -69,10 +207,10 @@ def wire_telemetry(
         circ_ent = inst_to_entity.get(circ_name) if circ_name else None
 
         ref_pos = None
-        if disp_ent:
-            ref_pos = (disp_ent["position"]["x"], disp_ent["position"]["y"])
-        elif circ_ent:
+        if circ_ent:
             ref_pos = (circ_ent["position"]["x"], circ_ent["position"]["y"])
+        elif disp_ent:
+            ref_pos = (disp_ent["position"]["x"], disp_ent["position"]["y"])
 
         if not ref_pos:
             continue
@@ -80,15 +218,19 @@ def wire_telemetry(
         mat_bare = mat.replace("-", "_").replace(".", "__")
         candidate_tiles = set(net_surface_tiles.get(mat, {}).keys())
         candidate_tiles.update(net_surface_tiles.get(mat_bare, {}).keys())
+        for k, v in net_surface_tiles.items():
+            if k.startswith(mat_bare + "__"):
+                candidate_tiles.update(v.keys())
 
         best_ent = None
         best_dist = 1e9
         for pos_tile in candidate_tiles:
             cand = grid_entities.get(pos_tile)
             if cand and "transport-belt" in cand.get("name", ""):
-                cand_dist = math.hypot(pos_tile[0] - ref_pos[0], pos_tile[1] - ref_pos[1])
-                if cand_dist < best_dist:
-                    best_dist = cand_dist
+                d_ref = math.hypot(pos_tile[0] - ref_pos[0], pos_tile[1] - ref_pos[1])
+                pole = find_nearest_pole(pos_tile, pole_entities, max_reach=9.0)
+                if (d_ref <= 9.0 or pole is not None) and d_ref < best_dist:
+                    best_dist = d_ref
                     best_ent = cand
 
         if best_ent is None:
@@ -96,44 +238,90 @@ def wire_telemetry(
                 if cand.get("name") == "splitter":
                     inst_obj = inst_map.get(inst_name, {})
                     if inst_obj.get("recipe") == mat:
-                        cand_dist = math.hypot(
-                            cand["position"]["x"] - ref_pos[0], cand["position"]["y"] - ref_pos[1]
-                        )
-                        if cand_dist < best_dist:
-                            best_dist = cand_dist
+                        cand_pos = (cand["position"]["x"], cand["position"]["y"])
+                        d_ref = math.hypot(cand_pos[0] - ref_pos[0], cand_pos[1] - ref_pos[1])
+                        pole = find_nearest_pole(cand_pos, pole_entities, max_reach=9.0)
+                        if (d_ref <= 9.0 or pole is not None) and d_ref < best_dist:
+                            best_dist = d_ref
                             best_ent = cand
 
         if best_ent is not None:
             best_ent.setdefault("control_behavior", {})["circuit_read_hand_contents"] = True
             best_ent["control_behavior"]["circuit_contents_read_mode"] = 0
 
-            cand_dist = math.hypot(
-                best_ent["position"]["x"] - ref_pos[0],
-                best_ent["position"]["y"] - ref_pos[1],
-            )
             target_ent = circ_ent if circ_ent else disp_ent
+            tgt_pos = (
+                (target_ent["position"]["x"], target_ent["position"]["y"])
+                if target_ent
+                else ref_pos
+            )
+            cand_dist = math.hypot(
+                best_ent["position"]["x"] - tgt_pos[0],
+                best_ent["position"]["y"] - tgt_pos[1],
+            )
 
-            # Use pole MST network for long distances (> 9 tiles)
-            if cand_dist > 9.0 and pole_entities:
+            if cand_dist <= 9.0:
+                if target_ent:
+                    add_wire(best_ent, 1, target_ent, 1, color="red")
+            elif pole_entities:
                 src_pos = (best_ent["position"]["x"], best_ent["position"]["y"])
-                pole_src = find_nearest_pole(src_pos, pole_entities)
-                pole_dst = find_nearest_pole(ref_pos, pole_entities)
+                pole_src = find_nearest_pole(src_pos, pole_entities, max_reach=9.0)
+                pole_dst = find_nearest_pole(tgt_pos, pole_entities, max_reach=9.0)
                 if pole_src and pole_dst:
-                    connect_wire(best_ent, 1, pole_src, 1, "red")
+                    add_wire(best_ent, 1, pole_src, 1, color="red")
                     if target_ent:
-                        connect_wire(target_ent, 1, pole_dst, 1, "red")
-                elif target_ent:
-                    connect_wire(best_ent, 1, target_ent, 1, "red")
-            elif target_ent:
-                connect_wire(best_ent, 1, target_ent, 1, "red")
+                        add_wire(target_ent, 1, pole_dst, 1, color="red")
 
             if circ_ent:
                 # Accumulator self-feedback loop
-                connect_wire(circ_ent, 2, circ_ent, 1, "green")
+                add_wire(
+                    circ_ent,
+                    WIRE_CONNECTOR_COMBINATOR_OUTPUT_GREEN,
+                    circ_ent,
+                    WIRE_CONNECTOR_COMBINATOR_INPUT_GREEN,
+                    color="green",
+                )
                 if disp_ent:
-                    connect_wire(circ_ent, 2, disp_ent, 1, "red")
+                    d_cd = math.hypot(
+                        circ_ent["position"]["x"] - disp_ent["position"]["x"],
+                        circ_ent["position"]["y"] - disp_ent["position"]["y"],
+                    )
+                    if d_cd <= 9.0:
+                        add_wire(
+                            circ_ent,
+                            WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED,
+                            disp_ent,
+                            WIRE_CONNECTOR_CIRCUIT_RED,
+                            color="red",
+                        )
+                    elif pole_entities:
+                        p_circ = find_nearest_pole(
+                            (circ_ent["position"]["x"], circ_ent["position"]["y"]),
+                            pole_entities,
+                            max_reach=9.0,
+                        )
+                        p_disp = find_nearest_pole(
+                            (disp_ent["position"]["x"], disp_ent["position"]["y"]),
+                            pole_entities,
+                            max_reach=9.0,
+                        )
+                        if p_circ and p_disp:
+                            add_wire(
+                                circ_ent,
+                                WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED,
+                                p_circ,
+                                WIRE_CONNECTOR_CIRCUIT_RED,
+                                color="red",
+                            )
+                            add_wire(
+                                disp_ent,
+                                WIRE_CONNECTOR_CIRCUIT_RED,
+                                p_disp,
+                                WIRE_CONNECTOR_CIRCUIT_RED,
+                                color="red",
+                            )
 
-    # Wire synthesized controller circuit connections
+    # 5. Controller circuit connections
     for c_conn in netlist_data.get("circuit_connections", []):
         src_name = c_conn.get("source")
         tgt_name = c_conn.get("target")
@@ -155,65 +343,57 @@ def wire_telemetry(
             p_tgt = find_nearest_pole(
                 (ent_tgt["position"]["x"], ent_tgt["position"]["y"]), pole_entities
             )
+            pole_port = (
+                WIRE_CONNECTOR_CIRCUIT_GREEN if color == "green" else WIRE_CONNECTOR_CIRCUIT_RED
+            )
             if p_src and p_tgt:
-                connect_wire(ent_src, src_port, p_src, 1, color)
-                connect_wire(ent_tgt, tgt_port, p_tgt, 1, color)
+                add_wire(ent_src, src_port, p_src, pole_port, color=color)
+                add_wire(ent_tgt, tgt_port, p_tgt, pole_port, color=color)
             else:
-                connect_wire(ent_src, src_port, ent_tgt, tgt_port, color)
+                add_wire(ent_src, src_port, ent_tgt, tgt_port, color=color)
         else:
-            connect_wire(ent_src, src_port, ent_tgt, tgt_port, color)
+            add_wire(ent_src, src_port, ent_tgt, tgt_port, color=color)
 
-    # Assign 1-based sequential entity numbers
-    for idx, ent in enumerate(entities, 1):
-        ent["entity_number"] = idx
-
-    # Resolve wire connections to entity_id
-    for ent in entities:
-        for colors in ent.get("connections", {}).values():
-            for color, links in list(colors.items()):
-                resolved_links = []
-                for link in links:
-                    target = link.get("_target")
-                    cid = link.get("circuit_id", 1)
-                    if target and "entity_number" in target:
-                        resolved_links.append(
-                            {"entity_id": target["entity_number"], "circuit_id": cid}
-                        )
-                    elif "entity_id" in link:
-                        resolved_links.append(link)
-                colors[color] = resolved_links
-
-    wires: list[list[int]] = []
-    for p1, p2 in mst_connections:
-        ent1 = pole_entities.get(p1)
-        ent2 = pole_entities.get(p2)
-        if ent1 and ent2 and "entity_number" in ent1 and "entity_number" in ent2:
-            # 1. Copper power connection
-            wires.append(
-                [
-                    ent1["entity_number"],
-                    WIRE_CONNECTOR_POLE_COPPER,
-                    ent2["entity_number"],
-                    WIRE_CONNECTOR_POLE_COPPER,
-                ]
+    # 6. Connect parameter constant combinator to nearest pole to broadcast on circuit bus
+    const_params_ent = inst_to_entity.get("u_const_params")
+    if const_params_ent and pole_entities:
+        p = find_nearest_pole(
+            (const_params_ent["position"]["x"], const_params_ent["position"]["y"]),
+            pole_entities,
+        )
+        if p:
+            add_wire(
+                const_params_ent,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                p,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                color="red",
             )
-            # 2. Red circuit bus connection
-            wires.append(
-                [
-                    ent1["entity_number"],
+
+    # 7. Connect controller primary outputs to nearest pole to broadcast on circuit bus
+    driven_sources = {
+        c_conn.get("source") for c_conn in netlist_data.get("circuit_connections", [])
+    }
+    for inst in netlist_data.get("instances", []):
+        iname = inst.get("name", "")
+        icell = inst.get("cell", "")
+        ent = inst_to_entity.get(iname)
+        if not ent or not pole_entities:
+            continue
+        if (
+            "combinator" in icell
+            and icell != "constant_combinator"
+            and iname not in driven_sources
+            and "u_acc_" not in iname
+        ):
+            p = find_nearest_pole((ent["position"]["x"], ent["position"]["y"]), pole_entities)
+            if p:
+                add_wire(
+                    ent,
+                    WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED,
+                    p,
                     WIRE_CONNECTOR_CIRCUIT_RED,
-                    ent2["entity_number"],
-                    WIRE_CONNECTOR_CIRCUIT_RED,
-                ]
-            )
-            # 3. Green circuit bus connection
-            wires.append(
-                [
-                    ent1["entity_number"],
-                    WIRE_CONNECTOR_CIRCUIT_GREEN,
-                    ent2["entity_number"],
-                    WIRE_CONNECTOR_CIRCUIT_GREEN,
-                ]
-            )
+                    color="red",
+                )
 
     return wires

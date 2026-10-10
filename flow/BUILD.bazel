@@ -173,7 +173,6 @@ factorilog_science_factory(
     test_min_active_ratio = "0.60",
     test_ticks = 25200,
     tags = [
-        "manual",
         "science",
         "automation_science",
     ],
@@ -193,7 +192,6 @@ factorilog_science_factory(
     telemetry_taps = "io",
     use_row_placement = True,
     tags = [
-        "manual",
         "science",
         "automation_controlled_science",
     ],
@@ -214,7 +212,6 @@ factorilog_science_factory(
     test_min_active_ratio = "0.50",
     test_ticks = 45000,
     tags = [
-        "manual",
         "science",
         "logistic_science",
     ],

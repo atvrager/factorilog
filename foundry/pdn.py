@@ -55,6 +55,8 @@ def generate_pdn(
                 "inserter",
                 "pump",
                 "combinator",
+                "power-switch",
+                "display-panel",
                 "lab",
                 "radar",
             )

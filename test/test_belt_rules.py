@@ -667,6 +667,102 @@ END DESIGN
             any(v.code == "DRC-08" and "Surface tile collision" in v.message for v in violations)
         )
 
+    def test_drc_circuit_wire_distance_exceeded_flags_drc09(self) -> None:
+        """Rule DRC-09 flags wires exceeding maximum reach distance of 9.0 tiles."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.0, "y": 0.0}},
+            {"entity_number": 2, "name": "medium-electric-pole", "position": {"x": 12.0, "y": 0.0}},
+        ]
+        wires = [[1, 5, 2, 5]]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        self.assertTrue(
+            any(v.code == "DRC-09" and "exceeds 9.0 tiles limit" in v.message for v in violations)
+        )
+
+    def test_drc_combinator_unconnected_inputs_outputs_flags_drc10(self) -> None:
+        """Rule DRC-10 flags combinators with unconnected inputs or outputs."""
+        entities = [
+            {
+                "entity_number": 1,
+                "name": "decider-combinator",
+                "position": {"x": 0.0, "y": 0.0},
+            },
+            {
+                "entity_number": 2,
+                "name": "arithmetic-combinator",
+                "position": {"x": 2.0, "y": 0.0},
+            },
+        ]
+        # Only input of entity 1 is wired to output of entity 2
+        wires = [[1, 1, 2, 3]]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        # Entity 1 missing output, Entity 2 missing input
+        self.assertTrue(
+            any(
+                v.code == "DRC-10" and "unconnected outputs" in v.message and "(#1)" in v.message
+                for v in violations
+            )
+        )
+        self.assertTrue(
+            any(
+                v.code == "DRC-10" and "unconnected inputs" in v.message and "(#2)" in v.message
+                for v in violations
+            )
+        )
+
+    def test_drc_constant_combinator_unconnected_flags_drc11(self) -> None:
+        """Rule DRC-11 flags constant combinators with no wire connections."""
+        entities = [
+            {
+                "entity_number": 1,
+                "name": "constant-combinator",
+                "position": {"x": 0.0, "y": 0.0},
+            }
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=[])
+        self.assertTrue(any(v.code == "DRC-11" for v in violations))
+
+    def test_drc_power_switch_unconnected_flags_drc12(self) -> None:
+        """Rule DRC-12 flags power switches missing circuit or copper terminals."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.0, "y": 0.0}},
+            {"entity_number": 2, "name": "power-switch", "position": {"x": 2.0, "y": 0.0}},
+        ]
+        # Only left copper terminal connected
+        wires = [[1, 5, 2, 5]]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        self.assertTrue(
+            any(v.code == "DRC-12" and "no circuit wire connection" in v.message for v in violations)
+        )
+        self.assertTrue(
+            any(v.code == "DRC-12" and "missing copper terminal" in v.message for v in violations)
+        )
+
+    def test_drc_clean_circuit_connectivity_passes(self) -> None:
+        """Fully connected circuit and power switch entities pass with zero DRC violations."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.0, "y": 0.0}},
+            {"entity_number": 2, "name": "power-switch", "position": {"x": 2.0, "y": 0.0}},
+            {"entity_number": 3, "name": "medium-electric-pole", "position": {"x": 4.0, "y": 0.0}},
+            {"entity_number": 4, "name": "decider-combinator", "position": {"x": 2.0, "y": 2.0}},
+            {"entity_number": 5, "name": "constant-combinator", "position": {"x": 0.0, "y": 2.0}},
+        ]
+        wires = [
+            [1, 5, 2, 5],  # Pole 1 to Switch left copper
+            [2, 6, 3, 5],  # Switch right copper to Pole 3
+            [5, 1, 4, 1],  # Constant 5 to Decider 4 input red
+            [4, 3, 2, 1],  # Decider 4 output red to Switch 2 circuit red
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        circ_violations = [v for v in violations if v.code in ("DRC-09", "DRC-10", "DRC-11", "DRC-12")]
+        self.assertEqual(circ_violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()
+

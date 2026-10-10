@@ -222,13 +222,45 @@ END DESIGN
         entities, wires = def2bp.build_entities(def_data, netlist_data, strict_drc=False)
 
         # 1. Verify pole MST connections carry both copper and circuit bus (red and green)
-        copper_wires = [w for w in wires if w[1] == 5 and w[3] == 5]
-        red_bus_wires = [w for w in wires if w[1] == 1 and w[3] == 1]
-        green_bus_wires = [w for w in wires if w[1] == 2 and w[3] == 2]
+        pole_nums = {e["entity_number"] for e in entities if e["name"] == "medium-electric-pole"}
+        pole_copper_wires = [
+            w for w in wires if w[1] == 5 and w[3] == 5 and w[0] in pole_nums and w[2] in pole_nums
+        ]
+        pole_red_bus_wires = [
+            w for w in wires if w[1] == 1 and w[3] == 1 and w[0] in pole_nums and w[2] in pole_nums
+        ]
+        pole_green_bus_wires = [
+            w for w in wires if w[1] == 2 and w[3] == 2 and w[0] in pole_nums and w[2] in pole_nums
+        ]
 
-        self.assertGreater(len(copper_wires), 0, "Copper MST connections must exist")
-        self.assertEqual(len(copper_wires), len(red_bus_wires), "Red circuit bus must match copper MST edges")
-        self.assertEqual(len(copper_wires), len(green_bus_wires), "Green circuit bus must match copper MST edges")
+        self.assertGreater(len(pole_copper_wires), 0, "Copper MST connections must exist")
+        self.assertEqual(
+            len(pole_copper_wires),
+            len(pole_red_bus_wires),
+            "Red circuit bus must match copper MST edges",
+        )
+        self.assertEqual(
+            len(pole_copper_wires),
+            len(pole_green_bus_wires),
+            "Green circuit bus must match copper MST edges",
+        )
+
+        # Verify sensor belt and display panel are connected into the wires array
+        belt_ent = next(e for e in entities if e["name"] == "transport-belt")
+        disp_ent = next(e for e in entities if e["name"] == "display-panel")
+        belt_wires = [
+            w
+            for w in wires
+            if w[0] == belt_ent["entity_number"] or w[2] == belt_ent["entity_number"]
+        ]
+        disp_wires = [
+            w
+            for w in wires
+            if w[0] == disp_ent["entity_number"] or w[2] == disp_ent["entity_number"]
+        ]
+        self.assertGreater(len(belt_wires), 0, "Sensor belt must have wire connection in wires")
+        self.assertGreater(len(disp_wires), 0, "Display panel must have wire connection in wires")
+
 
         # 2. Verify all entity connections are within maximum wire reach (<= 9.0 tiles)
         ent_by_num = {e["entity_number"]: e for e in entities}

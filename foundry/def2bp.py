@@ -180,6 +180,7 @@ def build_entities(
         input_pins=drc_in_pins,
         output_pins=drc_out_pins,
         unresolved_crossings=remaining_conflicts,
+        wires=wires,
     )
     if violations:
         for v in violations:

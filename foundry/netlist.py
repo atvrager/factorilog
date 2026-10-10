@@ -1326,7 +1326,7 @@ def emit_ranks_tcl(
                 rank_sort_keys[name] = (
                     round(inst_group_x, 1),
                     3,
-                    "",
+                    mat,
                     len(machines_in_rank) + 1,
                     0,
                     0.0,
