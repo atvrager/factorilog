@@ -262,6 +262,7 @@ script.on_event(defines.events.on_tick, function(event)
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
                 if ent.electric_buffer_size and ent.electric_buffer_size > 0 and ent.energy == 0 then
                     unpowered = unpowered + 1
+                    log(string.format("UNPOWERED_ENT: %s at (%.1f, %.1f)", ent.name, ent.position.x, ent.position.y))
                 end
             end
         end
@@ -313,6 +314,7 @@ end)
             or "SPLITTER at" in line
             or "PRODUCTION_STAT:" in line
             or "BELTS_WITH_ITEMS" in line
+            or "UNPOWERED_ENT:" in line
         ):
             print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:

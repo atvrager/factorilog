@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import collections
 import math
+import re
 from typing import Any
 
 import pdk
@@ -192,11 +193,26 @@ def stage_rank_of(
 ) -> int:
     """Classify instances into structured linear row placement bands."""
     m = material_or_recipe.lower().replace("_", "-")
-    if "copper-ore" in m or m == "copper-plate":
-        return 0
+    if any(k in m for k in ("science-pack", "science")):
+        return 5
     if "iron-ore" in m or m == "iron-plate":
         return 1
-    if "copper-cable" in m:
+    if ("copper-ore" in m or m == "copper-plate" or "stone" in m or "coal" in m) and m not in (
+        "stone-wall",
+        "stone-brick-wall",
+    ):
+        return 0
+    if any(
+        k in m
+        for k in (
+            "copper-cable",
+            "steel-plate",
+            "firearm-magazine",
+            "grenade",
+            "stone-wall",
+            "iron-gear-wheel",
+        )
+    ):
         return 3
     if any(
         k in m
@@ -204,16 +220,24 @@ def stage_rank_of(
             "electronic-circuit",
             "gear-belt-combo",
             "gear-inserter-combo",
-            "gear",
             "transport-belt",
             "inserter",
+            "piercing-rounds-magazine",
         )
     ):
         return 4
-    if any(k in m for k in ("logistic-science", "automation-science", "science-pack")):
-        return 5
-    if inputs and material_depths:
-        return max((material_depths.get(p, 0) for p in inputs), default=0)
+    if material_depths:
+        d = material_depths.get(material_or_recipe)
+        if d is None and inputs:
+            d = max((material_depths.get(p, 0) for p in inputs), default=0) + 1
+        if d is not None:
+            if d <= 1:
+                return 0
+            if d == 2:
+                return 3
+            if d == 3:
+                return 4
+            return 5
     return 0
 
 
@@ -349,7 +373,8 @@ def build(
             if inst.recipe == "iron-plate":
                 try:
                     idx = int(inst.name.split("_")[-1])
-                    if idx > 4:
+                    total_iron = len([i for i in nl.instances if i.recipe == "iron-plate"])
+                    if total_iron > 4 and idx > total_iron // 2:
                         r = 2
                 except ValueError:
                     pass
@@ -391,7 +416,7 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
         return cur[0], sub_entries
 
     if net.material == "iron-plate" and len(current) > 4:
-        mid = 4
+        mid = len(current) // 2
         out1, entries1 = _merge_list(current[:mid], default_rank=1)
         out2, entries2 = _merge_list(current[mid:], default_rank=2)
         entries.extend(entries1)
@@ -480,11 +505,17 @@ def split_net(
     targets = [f"{material}__{s}" for s in net.sinks]
     count = [0]
     bal_count = [0]
-    rank = (
-        3
-        if net.material == "iron-plate"
-        else stage_rank_of(net.material, material_depths=nl.material_depths)
+    inst_by_name = {inst.name: inst for inst in nl.instances}
+    is_smelted = any(
+        "furnace" in nl.cells.get(inst.cell_key, {}).get("machine", "")
+        and inst.recipe == net.material
+        for inst in nl.instances
     )
+    sink_ranks = [inst_by_name[s].rank for s in net.sinks if s in inst_by_name]
+    if sink_ranks and min(sink_ranks) > 0 and (is_smelted or net.material == "coal"):
+        rank = min(sink_ranks)
+    else:
+        rank = stage_rank_of(net.material, material_depths=nl.material_depths)
 
     def _build_tree(in_wire: str, sinks: list[str], tree_rank: int | None = None) -> None:
         if not synthesize_trees or len(sinks) <= 1:
@@ -506,8 +537,20 @@ def split_net(
         entries.append((name, in_wire, y1_wire, y2_wire))
         nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
 
-        left_rank = 1 if (net.material == "iron-ore" and tree_rank is None) else r
-        right_rank = 2 if (net.material == "iron-ore" and tree_rank is None) else r
+        total_iron = len(
+            [
+                i
+                for i in nl.instances
+                if i.recipe == "iron-plate"
+                and not i.name.startswith(("u_merge", "u_split", "u_bal"))
+            ]
+        )
+        left_rank = (
+            1 if (net.material == "iron-ore" and tree_rank is None and total_iron > 4) else r
+        )
+        right_rank = (
+            2 if (net.material == "iron-ore" and tree_rank is None and total_iron > 4) else r
+        )
 
         if len(left) > 1:
             _build_tree(y1_wire, left, tree_rank=left_rank)
@@ -880,6 +923,11 @@ def _instance_flow_priority(inst: Instance) -> int:
     return 1
 
 
+def _natural_key(s: str) -> list[int | str]:
+    """Sort strings with embedded numbers naturally (e.g. 7 before 10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
+
+
 def emit_ranks_tcl(
     nl: Netlist,
     merge_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
@@ -891,11 +939,19 @@ def emit_ranks_tcl(
         "# ranks.tcl - Instance rank assignments for structured linear row placement",
         "set instance_ranks [dict create]",
     ]
-    by_rank: dict[int, list[str]] = {}
+    raw_by_rank: dict[int, list[str]] = {}
     inst_by_name = {inst.name: inst for inst in nl.instances}
     for inst in nl.instances:
-        lines.append(f"dict set instance_ranks {inst.name} {inst.rank}")
-        by_rank.setdefault(inst.rank, []).append(inst.name)
+        raw_by_rank.setdefault(inst.rank, []).append(inst.name)
+
+    active_ranks = sorted(raw_by_rank.keys())
+    rank_remap = {old_r: new_r for new_r, old_r in enumerate(active_ranks)}
+    by_rank: dict[int, list[str]] = {}
+    for inst in nl.instances:
+        new_r = rank_remap[inst.rank]
+        inst.rank = new_r
+        lines.append(f"dict set instance_ranks {inst.name} {new_r}")
+        by_rank.setdefault(new_r, []).append(inst.name)
 
     # Build intra-rank dependency graph from wire drivers and sinks
     wire_driver: dict[str, str] = {}
@@ -944,8 +1000,34 @@ def emit_ranks_tcl(
             if driver != sink:
                 deps[sink].add(driver)
 
+    forward_deps: dict[str, set[str]] = collections.defaultdict(set)
+    reverse_deps: dict[str, set[str]] = collections.defaultdict(set)
+    for wire, driver in wire_driver.items():
+        for sink in wire_sinks.get(wire, []):
+            if driver != sink:
+                forward_deps[driver].add(sink)
+                reverse_deps[sink].add(driver)
+
+    terminal_order: dict[str, int] = {}
+    for idx, out_mat in enumerate(nl.outputs):
+        for inst in nl.instances:
+            if inst.recipe == out_mat:
+                terminal_order[inst.name] = idx
+
+    inst_terminal_prio: dict[str, int] = dict(terminal_order)
+    queue = list(terminal_order.keys())
+
+    while queue:
+        curr = queue.pop(0)
+        curr_prio = inst_terminal_prio[curr]
+        for upstream in reverse_deps.get(curr, set()):
+            if upstream not in inst_terminal_prio or curr_prio < inst_terminal_prio[upstream]:
+                inst_terminal_prio[upstream] = curr_prio
+                queue.append(upstream)
+
     num_ranks = (max(by_rank.keys()) + 1) if by_rank else 0
     lines.append(f"set num_ranks {num_ranks}")
+    sorted_by_rank: dict[int, list[str]] = {}
     for r in range(num_ranks):
         rank_insts = set(by_rank.get(r, []))
         rank_deps = {
@@ -959,6 +1041,7 @@ def emit_ranks_tcl(
         while ready:
             ready.sort(
                 key=lambda name: (
+                    inst_terminal_prio.get(name, 999),
                     _instance_family(inst_by_name[name]),
                     _instance_flow_priority(inst_by_name[name]),
                     name,
@@ -976,6 +1059,104 @@ def emit_ranks_tcl(
             if name not in sorted_insts:
                 sorted_insts.append(name)
 
+        sorted_by_rank[r] = sorted_insts
         insts = " ".join(sorted_insts)
         lines.append(f"set rank_instances({r}) [list {insts}]")
+
+    # Map input wires for all instances
+    inst_input_wires: dict[str, list[str]] = collections.defaultdict(list)
+    for inst in nl.instances:
+        cell = nl.cells.get(inst.cell_key, {})
+        for p in cell.get("inputs", []):
+            wname = (
+                f"{sanitize(p)}__{inst.name}"
+                if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans)
+                else sanitize(p)
+            )
+            inst_input_wires[inst.name].append(wname)
+
+    if merge_plans:
+        for plan in merge_plans.values():
+            for m_name, a_w, b_w, _y_w in plan:
+                inst_input_wires[m_name].extend([a_w, b_w])
+
+    if split_plans:
+        for plan in split_plans.values():
+            for s_name, in_w, _y1_w, _y2_w in plan:
+                inst_input_wires[s_name].append(in_w)
+
+    if balancer_plans:
+        for b_plan in balancer_plans.values():
+            for bal_name, a1_w, a2_w, _y1_w, _y2_w in b_plan:
+                inst_input_wires[bal_name].extend([a1_w, a2_w])
+
+    # Compute automated rank offsets based on pipeline stage and driver-sink alignment
+    rank_offsets: dict[int, int] = {}
+    inst_abs_center: dict[str, float] = {}
+
+    for r in range(num_ranks):
+        insts = sorted_by_rank.get(r, [])
+        rel_centers: dict[str, float] = {}
+        curr_x = 0.0
+        for iname in insts:
+            inst = inst_by_name[iname]
+            cell = nl.cells.get(inst.cell_key, {})
+            w = float(cell.get("width", 3))
+            pad = 4.0
+            if "merge" in iname:
+                pad = 16.0
+            elif "split" in iname or "bal" in iname:
+                pad = 6.0
+            rel_centers[iname] = curr_x + w / 2.0
+            curr_x += w + pad
+
+        # Check if rank has raw material smelting furnaces (iron-ore, copper-ore, stone)
+        has_furnaces = any(
+            "furnace" in nl.cells.get(inst_by_name[iname].cell_key, {}).get("machine", "")
+            and any(
+                "-ore" in inp or inp in ("stone", "coal")
+                for inp in nl.cells.get(inst_by_name[iname].cell_key, {}).get("inputs", [])
+            )
+            for iname in insts
+        )
+
+        # Terminal rank offset: align with first machine cluster drivers
+        # In combined automation+logistic, first cluster is automation science (starts at 20)
+        # In logistic science alone, first cluster is logistic science (starts at 70)
+        cur_mach = [i for i in insts if not any(x in i for x in ("merge", "split", "bal"))]
+        first_prio = min((inst_terminal_prio.get(i, 0) for i in cur_mach), default=0)
+        first_mach = [i for i in cur_mach if inst_terminal_prio.get(i, 0) == first_prio]
+        is_terminal = r == num_ranks - 1
+
+        if r <= 2 or has_furnaces:
+            offset = 0
+        elif r == 3:
+            offset = 20
+        elif r == 4:
+            # If Rank 4 contains only Tree 1 (logistic science subtree), offset to East (70)
+            # to preserve a vertical routing superhighway on the West for Tree 0
+            offset = 70 if first_prio > 0 else 25
+        elif is_terminal:
+            # If the first terminal machines are automation science or raw-feeder: offset 20
+            # If first terminal machines are logistic science: offset 70
+            if any(
+                "automation-science" in nl.cells.get(inst_by_name[i].cell_key, {}).get("recipe", "")
+                for i in first_mach
+            ):
+                offset = 20
+            elif any(
+                "logistic-science" in nl.cells.get(inst_by_name[i].cell_key, {}).get("recipe", "")
+                for i in first_mach
+            ):
+                offset = 70
+            else:
+                offset = 25
+        else:
+            offset = 20 + (r - 3) * 5
+
+        rank_offsets[r] = offset
+        for iname in insts:
+            inst_abs_center[iname] = offset + rel_centers[iname]
+        lines.append(f"set rank_offset_x({r}) {offset}")
+
     return "\n".join(lines) + "\n"

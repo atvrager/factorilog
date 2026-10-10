@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import sys
 from typing import Any
 
 try:
@@ -131,14 +132,23 @@ def generate_pdn(
         cx, cy = entity_collision_half_size(powered[i].get("name", ""))
         reach = math.ceil(3.5 + max(cx, cy))
         found_cand = False
+        reasons = []
         for dx in range(-reach, reach + 1):
             for dy in range(-reach, reach + 1):
                 cand = (math.floor(px + dx) + 0.5, math.floor(py + dy) + 0.5)
-                if (
-                    cand not in surface_occupied
-                    and cand not in chosen
-                    and is_covered(powered[i], cand)
-                ):
+                if not is_covered(powered[i], cand):
+                    continue
+                if cand in surface_occupied:
+                    occ_by = [
+                        e.get("name")
+                        for e in entities
+                        if round(e["position"]["x"], 2) == cand[0]
+                        and round(e["position"]["y"], 2) == cand[1]
+                    ]
+                    reasons.append(f"{cand}:occ({occ_by or 'occ_pos'})")
+                elif cand in chosen:
+                    reasons.append(f"{cand}:already_chosen")
+                else:
                     chosen.add(cand)
                     cands.append(cand)
                     uncovered.remove(i)
@@ -146,6 +156,10 @@ def generate_pdn(
                     break
             if found_cand:
                 break
+        if not found_cand:
+            sys.stderr.write(f"UNCOVERED {powered[i].get('name')} at ({px}, {py}):\n")
+            for r in reasons:
+                sys.stderr.write(f"  {r}\n")
 
     # Connect chosen poles through Steiner MST with maximum wire span 9.0 tiles
     cand_list = list(cands)

@@ -80,6 +80,7 @@ def entity_collision_half_size(name: str) -> tuple[float, float]:
         or "electric-furnace" in name
         or "chemical-plant" in name
         or "centrifuge" in name
+        or "lab" in name
     ):
         return 1.2, 1.2
     if "furnace" in name or "power-switch" in name:
@@ -116,8 +117,8 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
     for e in powered:
         ex = e["position"]["x"]
         ey = e["position"]["y"]
-        w, h = entity_size(e.get("name", ""))
-        max_dist = supply_radius + max(w, h) / 2.0
+        cx, cy = entity_collision_half_size(e.get("name", ""))
+        max_dist = supply_radius + max(cx, cy)
         covered = False
         for p in poles:
             px = p["position"]["x"]
@@ -126,8 +127,8 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
                 continue
             if (
                 max(
-                    max(0.0, abs(ex - px) - w / 2.0),
-                    max(0.0, abs(ey - py) - h / 2.0),
+                    max(0.0, abs(ex - px) - cx),
+                    max(0.0, abs(ey - py) - cy),
                 )
                 <= supply_radius
             ):
