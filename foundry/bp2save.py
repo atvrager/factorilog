@@ -156,7 +156,9 @@ script.on_init(function()
     storage.center_y = shift_y + 15
 
     for _, g in ipairs(ghosts) do
-        g.silent_revive()
+        if g and g.valid then
+            g.silent_revive()
+        end
     end
 
     -- Off-chip power supply: single generator outside floorplan hooked to PDN
@@ -164,32 +166,43 @@ script.on_init(function()
     if #all_poles > 0 then
         local min_x = 1e9
         for _, p in ipairs(all_poles) do
-            if p.position.x < min_x then min_x = p.position.x end
+            if p.valid and p.position.x < min_x then min_x = p.position.x end
         end
 
         local target_pole = nil
         local switches = surface.find_entities_filtered{{name = "power-switch"}}
         if #switches > 0 then
             local ps = switches[1]
-            local best_d = 1e9
-            for _, p in ipairs(all_poles) do
-                local d = (p.position.x - ps.position.x)^2 + (p.position.y - ps.position.y)^2
-                if d < best_d then
-                    best_d = d
-                    target_pole = p
+            local left_conn = ps.get_wire_connector(defines.wire_connector_id.power_switch_left_copper, true)
+            if left_conn and #left_conn.connections > 0 then
+                local owner = left_conn.connections[1].target.owner
+                if owner and owner.valid then
+                    target_pole = owner
+                end
+            end
+            if not (target_pole and target_pole.valid) then
+                local best_d = 1e9
+                for _, p in ipairs(all_poles) do
+                    if p.valid then
+                        local d = (p.position.x - ps.position.x)^2 + (p.position.y - ps.position.y)^2
+                        if d < best_d then
+                            best_d = d
+                            target_pole = p
+                        end
+                    end
                 end
             end
         else
             local best_x = 1e9
             for _, p in ipairs(all_poles) do
-                if p.position.x < best_x then
+                if p.valid and p.position.x < best_x then
                     best_x = p.position.x
                     target_pole = p
                 end
             end
         end
 
-        if target_pole then
+        if target_pole and target_pole.valid then
             local gen_x = math.floor(min_x - 5.5) + 0.5
             local gen_y = target_pole.position.y
 
@@ -215,12 +228,12 @@ script.on_init(function()
                 position = {{curr_x, gen_y}},
                 force = game.forces.player
             }}
-            if prev_pole and feed_pole then
+            if prev_pole and feed_pole and prev_pole.valid and feed_pole.valid then
                 local c1 = prev_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 local c2 = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 c1.connect_to(c2, false)
             end
-            if feed_pole and target_pole then
+            if feed_pole and target_pole and feed_pole.valid and target_pole.valid then
                 local c1 = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 local c2 = target_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 c1.connect_to(c2, false)

@@ -133,14 +133,40 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
         elif macro == "arithmetic_combinator" or cell_id == "arithmetic_combinator":
             cw, ch = 1, 2
             center_x, center_y = gx + 0.5, gy + 1.0
-            cb = inst.get("control_behavior") or {
-                "arithmetic_conditions": {
-                    "first_signal": {"type": "virtual", "name": "signal-each"},
-                    "operation": "+",
-                    "second_constant": 0,
-                    "output_signal": {"type": "virtual", "name": "signal-each"},
+            recipe = inst.get("recipe", "")
+            if recipe:
+                sig_type = (
+                    "fluid"
+                    if recipe
+                    in (
+                        "crude-oil",
+                        "petroleum-gas",
+                        "heavy-oil",
+                        "light-oil",
+                        "sulfuric-acid",
+                        "water",
+                        "steam",
+                    )
+                    else "item"
+                )
+                default_cb = {
+                    "arithmetic_conditions": {
+                        "first_signal": {"type": sig_type, "name": recipe},
+                        "operation": "+",
+                        "second_constant": 0,
+                        "output_signal": {"type": sig_type, "name": recipe},
+                    }
                 }
-            }
+            else:
+                default_cb = {
+                    "arithmetic_conditions": {
+                        "first_signal": {"type": "virtual", "name": "signal-each"},
+                        "operation": "+",
+                        "second_constant": 0,
+                        "output_signal": {"type": "virtual", "name": "signal-each"},
+                    }
+                }
+            cb = inst.get("control_behavior") or default_cb
             extra = {"control_behavior": cb}
             ent = add_entity(
                 "arithmetic-combinator", center_x, center_y, direction=DIRECTION_NORTH, extra=extra

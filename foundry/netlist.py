@@ -1330,6 +1330,7 @@ def emit_ranks_tcl(
                     len(machines_in_rank) + 1,
                     0,
                     0.0,
+                    inst_by_name[name].recipe or "",
                     _natural_key(name),
                 )
 

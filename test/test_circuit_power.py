@@ -30,6 +30,7 @@ import circuit
 import circuit_synth
 import lef
 import liberty
+import pdn
 import pdk
 import solve
 from test_routing_primitives import run_factorio_simulation
@@ -895,6 +896,233 @@ class TestCircuitPower(unittest.TestCase):
                 self.assertIn("gen_x=-8", line)
 
         self.assertTrue(matched, f"Test result pattern not found in simulation output: {results}")
+
+    def test_multi_domain_pdn_isolation_and_power_gating(self) -> None:
+        """Verify multi-domain PDN synthesizes isolated copper networks bridged by switch."""
+        entities = [
+            {"name": "assembling-machine-3", "position": {"x": 20.5, "y": 20.5}},
+            {"name": "assembling-machine-3", "position": {"x": 25.5, "y": 20.5}},
+            {
+                "name": "power-switch",
+                "position": {"x": 20.0, "y": 30.0},
+                "control_behavior": {
+                    "circuit_enabled": True,
+                    "circuit_condition": {
+                        "first_signal": {"type": "virtual", "name": "signal-P"},
+                        "comparator": ">",
+                        "constant": 0,
+                    },
+                },
+                "switch_state": False,
+            },
+            {
+                "name": "constant-combinator",
+                "position": {"x": 20.5, "y": 40.5},
+                "control_behavior": {
+                    "sections": {
+                        "sections": [
+                            {
+                                "index": 1,
+                                "filters": [
+                                    {
+                                        "index": 1,
+                                        "type": "virtual",
+                                        "name": "signal-P",
+                                        "quality": "normal",
+                                        "comparator": "=",
+                                        "count": 1,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "name": "decider-combinator",
+                "position": {"x": 25.5, "y": 40.0},
+                "control_behavior": {
+                    "decider_conditions": {
+                        "first_signal": {"type": "virtual", "name": "signal-P"},
+                        "comparator": ">",
+                        "constant": 0,
+                        "output_signal": {"type": "virtual", "name": "signal-P"},
+                        "copy_count_from_input": True,
+                    }
+                },
+            },
+        ]
+        pole_entities, mst_connections = pdn.generate_pdn(
+            entities,
+            occupied_positions=set(),
+            pin_tiles=set(),
+            valid_input_pins=set(),
+            valid_output_pins=set(),
+        )
+
+        aon_poles = [p for p in pole_entities.values() if p.get("power_domain") == "aon"]
+        switched_poles = [p for p in pole_entities.values() if p.get("power_domain") == "switched"]
+        self.assertGreaterEqual(len(aon_poles), 1)
+        self.assertGreaterEqual(len(switched_poles), 1)
+
+        inst_to_entity = {
+            "u_const_params": entities[3],
+            "u_out_power_switch": entities[4],
+        }
+        netlist_data = {
+            "instances": [
+                {"name": "u_const_params", "cell": "constant_combinator"},
+                {"name": "u_out_power_switch", "cell": "decider_combinator"},
+            ],
+            "circuit_connections": [
+                {
+                    "source": "u_const_params",
+                    "source_port": circuit.WIRE_CONNECTOR_CIRCUIT_RED,
+                    "target": "u_out_power_switch",
+                    "target_port": circuit.WIRE_CONNECTOR_COMBINATOR_INPUT_RED,
+                    "color": "red",
+                }
+            ],
+        }
+
+        wires = circuit.wire_telemetry(
+            entities,
+            netlist_data=netlist_data,
+            inst_to_entity=inst_to_entity,
+            net_surface_tiles={},
+            grid_entities={},
+            mst_connections=mst_connections,
+            pole_entities=pole_entities,
+        )
+
+        copper_adj: dict[int, list[int]] = {}
+        for w in wires:
+            e1, c1, e2, c2 = w
+            if c1 in (5, 6) and c2 in (5, 6):
+                copper_adj.setdefault(e1, []).append(e2)
+                copper_adj.setdefault(e2, []).append(e1)
+
+        ps_ent = [e for e in entities if e.get("name") == "power-switch"][0]
+        ps_num = ps_ent["entity_number"]
+
+        visited = set()
+        components = []
+        for e in entities:
+            num = e.get("entity_number")
+            if num == ps_num or num not in copper_adj or num in visited:
+                continue
+            comp = []
+            q = [num]
+            visited.add(num)
+            while q:
+                curr = q.pop(0)
+                comp.append(curr)
+                for nbr in copper_adj.get(curr, []):
+                    if nbr != ps_num and nbr not in visited:
+                        visited.add(nbr)
+                        q.append(nbr)
+            components.append(comp)
+
+        self.assertEqual(len(components), 2, "Must partition into exactly 2 isolated copper domains")
+
+        bp_str = blueprint.encode(entities, "test_multi_domain_pdn", wires=wires)
+        lua = bp2save.generate_control_lua(bp_str, {"inputs": [], "outputs": []})
+
+        probe_code = """
+        if event.tick == 2 or event.tick == 10 then
+            local surface = game.surfaces[1]
+            local ps = surface.find_entities_filtered{name = "power-switch"}[1]
+            local sw_state = ps and ps.power_switch_state or false
+            local machs = surface.find_entities_filtered{type = "assembling-machine"}
+            local m_powered = 0
+            for _, m in ipairs(machs) do if m.energy > 0 then m_powered = m_powered + 1 end end
+            local coms = surface.find_entities_filtered{type = "decider-combinator"}
+            local c_powered = 0
+            for _, c in ipairs(coms) do if c.energy > 0 then c_powered = c_powered + 1 end end
+            log(string.format("TEST_RESULT: tick=%d sw_state=%s coms=%d/%d machs=%d/%d",
+                event.tick, tostring(sw_state), c_powered, #coms, m_powered, #machs))
+        end
+        """
+
+        init_header = lua[:lua.find("script.on_init(function()")]
+        init_body = lua[lua.find("script.on_init(function()") + len("script.on_init(function()"):lua.rfind("end)")]
+
+        results = run_factorio_simulation(init_header + "\n" + init_body, probe_code, ticks=20)
+        self.assertGreater(len(results), 0)
+
+        matched = False
+        for line in results:
+            if "TEST_RESULT: tick=10" in line:
+                matched = True
+                self.assertIn("sw_state=true", line, f"All results: {results}")
+                self.assertIn("coms=1/1", line, f"All results: {results}")
+                self.assertIn("machs=2/2", line, f"All results: {results}")
+        self.assertTrue(matched, f"Expected simulation output not found: {results}")
+
+    def test_automation_controlled_science_end_to_end_power_and_sequencer(self) -> None:
+        """Verify full automation_controlled_science factory powers on and closes power switch."""
+        candidate_paths = [
+            REPO_ROOT / "bazel-bin" / "flow" / "automation_controlled_science.blueprint",
+            Path("flow/automation_controlled_science.blueprint"),
+        ]
+        bp_path = None
+        for p in candidate_paths:
+            if p.is_file():
+                bp_path = p
+                break
+        if not bp_path:
+            raise unittest.SkipTest("automation_controlled_science.blueprint not found")
+
+        bp_str = bp_path.read_text().strip()
+        pins_data = {
+            "inputs": [
+                {"name": "copper-ore", "x": 0.5, "y": 20.5, "type": "belt"},
+                {"name": "iron-ore", "x": 0.5, "y": 36.5, "type": "belt"},
+            ],
+            "outputs": [
+                {"name": "automation-science-pack", "x": 251.5, "y": 64.5, "type": "belt"},
+            ],
+        }
+
+        lua = bp2save.generate_control_lua(bp_str, pins_data)
+        probe_code = """
+        if event.tick == 2 or event.tick == 20 or event.tick == 60 then
+            local surface = game.surfaces[1]
+            local ps = surface.find_entities_filtered{name = "power-switch"}[1]
+            local sw_state = ps and ps.power_switch_state or false
+            local sig_p = ps.get_signal({type = "virtual", name = "signal-P"}, defines.wire_connector_id.circuit_red)
+            local coms = surface.find_entities_filtered{type = "decider-combinator"}
+            local c_powered = 0
+            for _, c in ipairs(coms) do if c.energy > 0 then c_powered = c_powered + 1 end end
+            local machs = surface.find_entities_filtered{type = "assembling-machine"}
+            local m_powered = 0
+            for _, m in ipairs(machs) do if m.energy > 0 then m_powered = m_powered + 1 end end
+            log(string.format("TEST_RESULT: tick=%d sw_state=%s sig_P=%d coms=%d/%d machs=%d/%d",
+                event.tick, tostring(sw_state), sig_p, c_powered, #coms, m_powered, #machs))
+        end
+        """
+
+        init_header = lua[:lua.find("script.on_init(function()")]
+        init_body = lua[lua.find("script.on_init(function()") + len("script.on_init(function()"):lua.rfind("end)")]
+
+        results = run_factorio_simulation(init_header + "\n" + init_body, probe_code, ticks=70)
+        self.assertGreater(len(results), 0)
+
+        matched_tick2 = False
+        matched_tick60 = False
+        for line in results:
+            if "TEST_RESULT: tick=2" in line:
+                matched_tick2 = True
+                self.assertIn("coms=7/7", line)
+            if "TEST_RESULT: tick=60" in line:
+                matched_tick60 = True
+                self.assertIn("sw_state=true", line)
+                self.assertIn("sig_P=1", line)
+                self.assertIn("coms=7/7", line)
+                self.assertIn("machs=5/5", line)
+
+        self.assertTrue(matched_tick2, f"Tick 2 result not found: {results}")
+        self.assertTrue(matched_tick60, f"Tick 60 result not found: {results}")
 
 
 if __name__ == "__main__":

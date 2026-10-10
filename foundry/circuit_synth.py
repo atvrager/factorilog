@@ -307,11 +307,12 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
 
     # 10. Controllable power switch
     ps_cb = {
+        "circuit_enabled": True,
         "circuit_condition": {
             "first_signal": {"type": "virtual", "name": "signal-P"},
             "comparator": ">",
             "constant": 0,
-        }
+        },
     }
     cells.append(
         CombinatorCell(
@@ -319,7 +320,7 @@ def synthesize_power_sequencer() -> CircuitSynthResult:
             cell=pdk.POWER_SWITCH_CELL,
             recipe="switch",
             control_behavior=ps_cb,
-            rank=4,
+            rank=0,
         )
     )
 

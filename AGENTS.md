@@ -1,5 +1,11 @@
 Communicate only in Simplified Technical English (ASD-STE100).
 
+## Testing Rules
+
+- Do NOT execute scratch Python scripts for tests.
+- Write all tests in test suites under `test/`.
+- Execute all tests through Bazel (`bazel test //...`).
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

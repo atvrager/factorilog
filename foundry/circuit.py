@@ -135,13 +135,23 @@ def wire_telemetry(
         ps_pos = (ps["position"]["x"], ps["position"]["y"])
         if not pole_entities:
             continue
-        sorted_poles = sorted(
-            pole_entities.items(),
-            key=lambda item: math.hypot(item[0][0] - ps_pos[0], item[0][1] - ps_pos[1]),
-        )
-        if len(sorted_poles) >= 2:
-            p_left_pos, p_left_ent = sorted_poles[0]
-            p_right_pos, p_right_ent = sorted_poles[1]
+        aon_poles = [
+            (pos, ent) for pos, ent in pole_entities.items() if ent.get("power_domain") == "aon"
+        ]
+        switched_poles = [
+            (pos, ent)
+            for pos, ent in pole_entities.items()
+            if ent.get("power_domain") == "switched"
+        ]
+        if aon_poles and switched_poles:
+            p_left_pos, p_left_ent = min(
+                aon_poles,
+                key=lambda item: math.hypot(item[0][0] - ps_pos[0], item[0][1] - ps_pos[1]),
+            )
+            p_right_pos, p_right_ent = min(
+                switched_poles,
+                key=lambda item: math.hypot(item[0][0] - ps_pos[0], item[0][1] - ps_pos[1]),
+            )
             add_wire(
                 p_left_ent,
                 WIRE_CONNECTOR_POLE_COPPER,
@@ -156,17 +166,62 @@ def wire_telemetry(
                 WIRE_CONNECTOR_POLE_COPPER,
                 color="copper",
             )
-            edge_key = (min(p_left_pos, p_right_pos), max(p_left_pos, p_right_pos))
-            switch_isolated_copper_edges.add(edge_key)
-        elif len(sorted_poles) == 1:
-            _p_pos, p_ent = sorted_poles[0]
+            # Bridge circuit bus (red/green) between controller and factory without copper
             add_wire(
-                p_ent,
-                WIRE_CONNECTOR_POLE_COPPER,
-                ps,
-                WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
-                color="copper",
+                p_left_ent,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                p_right_ent,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                color="red",
             )
+            add_wire(
+                p_left_ent,
+                WIRE_CONNECTOR_CIRCUIT_GREEN,
+                p_right_ent,
+                WIRE_CONNECTOR_CIRCUIT_GREEN,
+                color="green",
+            )
+            # Connect power switch control terminal to aon pole red circuit wire
+            add_wire(
+                ps,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                p_left_ent,
+                WIRE_CONNECTOR_CIRCUIT_RED,
+                color="red",
+            )
+        else:
+            sorted_poles = sorted(
+                pole_entities.items(),
+                key=lambda item: math.hypot(item[0][0] - ps_pos[0], item[0][1] - ps_pos[1]),
+            )
+            if len(sorted_poles) >= 2:
+                p_left_pos, p_left_ent = sorted_poles[0]
+                p_right_pos, p_right_ent = sorted_poles[1]
+                add_wire(
+                    p_left_ent,
+                    WIRE_CONNECTOR_POLE_COPPER,
+                    ps,
+                    WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
+                    color="copper",
+                )
+                add_wire(
+                    ps,
+                    WIRE_CONNECTOR_POWER_SWITCH_RIGHT_COPPER,
+                    p_right_ent,
+                    WIRE_CONNECTOR_POLE_COPPER,
+                    color="copper",
+                )
+                edge_key = (min(p_left_pos, p_right_pos), max(p_left_pos, p_right_pos))
+                switch_isolated_copper_edges.add(edge_key)
+            elif len(sorted_poles) == 1:
+                _p_pos, p_ent = sorted_poles[0]
+                add_wire(
+                    p_ent,
+                    WIRE_CONNECTOR_POLE_COPPER,
+                    ps,
+                    WIRE_CONNECTOR_POWER_SWITCH_LEFT_COPPER,
+                    color="copper",
+                )
 
     # 3. Electric pole MST connections
     for p1, p2 in mst_connections:
@@ -294,32 +349,6 @@ def wire_telemetry(
                             WIRE_CONNECTOR_CIRCUIT_RED,
                             color="red",
                         )
-                    elif pole_entities:
-                        p_circ = find_nearest_pole(
-                            (circ_ent["position"]["x"], circ_ent["position"]["y"]),
-                            pole_entities,
-                            max_reach=9.0,
-                        )
-                        p_disp = find_nearest_pole(
-                            (disp_ent["position"]["x"], disp_ent["position"]["y"]),
-                            pole_entities,
-                            max_reach=9.0,
-                        )
-                        if p_circ and p_disp:
-                            add_wire(
-                                circ_ent,
-                                WIRE_CONNECTOR_COMBINATOR_OUTPUT_RED,
-                                p_circ,
-                                WIRE_CONNECTOR_CIRCUIT_RED,
-                                color="red",
-                            )
-                            add_wire(
-                                disp_ent,
-                                WIRE_CONNECTOR_CIRCUIT_RED,
-                                p_disp,
-                                WIRE_CONNECTOR_CIRCUIT_RED,
-                                color="red",
-                            )
 
     # 5. Controller circuit connections
     for c_conn in netlist_data.get("circuit_connections", []):
