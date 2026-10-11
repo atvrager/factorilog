@@ -535,6 +535,9 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                         v["y"] = py_out[1]
                 continue
 
+        if not cross_pin:
+            continue
+
         x_min_1 = min(py1[0], end2[0])
         x_max_1 = max(py1[0], end2[0])
         x_min_2 = min(py2[0], end1[0])

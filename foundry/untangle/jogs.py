@@ -183,25 +183,6 @@ def straighten_collinear_routes(def_data: dict[str, Any]) -> None:
                 continue
 
 
-FLUID_MATERIALS_NAMES = frozenset(
-    {
-        "crude_oil",
-        "crude-oil",
-        "water",
-        "petroleum_gas",
-        "petroleum-gas",
-        "heavy_oil",
-        "heavy-oil",
-        "light_oil",
-        "light-oil",
-        "sulfuric_acid",
-        "sulfuric-acid",
-        "lubricant",
-        "steam",
-    }
-)
-
-
 def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
     """Eliminate unblocked intermediate staircase jogs on routing tracks.
 

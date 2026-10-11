@@ -286,12 +286,12 @@ def prune_dead_end_belts(
 ) -> list[dict[str, Any]]:
     """Prune dead-end stub belts that do not reach any downstream sink."""
     try:
-        from foundry.lef import FLUID_MATERIALS, get_macro_port_slots
+        from foundry.lef import get_macro_port_slots
     except ImportError:
-        from lef import FLUID_MATERIALS, get_macro_port_slots
+        from lef import get_macro_port_slots
 
     scale = 1.0 / float(def_data.get("units", 1000))
-    fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
+    fluids = set(netlist_data.get("fluids") or [])
 
     output_pins: set[tuple[float, float]] = set()
     for pin in def_data.get("pins", []):

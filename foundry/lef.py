@@ -54,20 +54,6 @@ class LefError(Exception):
     """One structural violation in the emitted LEF."""
 
 
-FLUID_MATERIALS: frozenset[str] = frozenset(
-    {
-        "crude-oil",
-        "water",
-        "petroleum-gas",
-        "heavy-oil",
-        "light-oil",
-        "sulfuric-acid",
-        "lubricant",
-        "steam",
-    }
-)
-
-
 def get_macro_port_slots(
     cell: dict[str, Any],
 ) -> tuple[dict[str, int], dict[str, int]]:

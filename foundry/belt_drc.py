@@ -37,25 +37,6 @@ try:
 except ImportError:
     from entity_helpers import entity_size
 
-try:
-    from foundry.lef import FLUID_MATERIALS
-except ImportError:
-    try:
-        from lef import FLUID_MATERIALS
-    except ImportError:
-        FLUID_MATERIALS = frozenset(
-            {
-                "crude-oil",
-                "water",
-                "petroleum-gas",
-                "heavy-oil",
-                "light-oil",
-                "sulfuric-acid",
-                "lubricant",
-                "steam",
-            }
-        )
-
 
 @dataclass(frozen=True)
 class DrcViolation:
@@ -1047,7 +1028,7 @@ class BeltDrcChecker:
     ) -> list[DrcViolation]:
         """Detect adjacent surface pipes or pipe connections carrying different fluids (Rule DRC-13)."""
         violations: list[DrcViolation] = []
-        known_fluids = set(fluids) if fluids else set(FLUID_MATERIALS)
+        known_fluids = set(fluids) if fluids else set()
 
         # Map each tile to its fluid material if known
         tile_fluids: dict[tuple[int, int], str] = {}

@@ -25,25 +25,6 @@ from typing import Any
 import pdk
 import solve
 
-try:
-    from foundry.lef import FLUID_MATERIALS
-except ImportError:
-    try:
-        from lef import FLUID_MATERIALS
-    except ImportError:
-        FLUID_MATERIALS = frozenset(
-            {
-                "crude-oil",
-                "water",
-                "petroleum-gas",
-                "heavy-oil",
-                "light-oil",
-                "sulfuric-acid",
-                "lubricant",
-                "steam",
-            }
-        )
-
 # The transport cell that joins two streams of one material. A splitter
 # run backwards. The PDK carries it next to the recipe cells.
 MERGE_CELL = "belt_merge2"
@@ -161,8 +142,9 @@ class Instance:
 class Net:
     """One material, its drivers, and its sinks."""
 
-    def __init__(self, material: str) -> None:
+    def __init__(self, material: str, is_fluid: bool = False) -> None:
         self.material = material
+        self.is_fluid = is_fluid
         self.drivers: list[str] = []  # instance or merge output names
         self.sinks: list[str] = []
         self.rate_per_min = 0.0
@@ -172,8 +154,9 @@ class Net:
 class Netlist:
     """Instances, nets, and the cell table of one plan."""
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, label: str, fluids: set[str] | None = None) -> None:
         self.label = label
+        self.fluids: set[str] = set(fluids) if fluids else set()
         self.cells: dict[str, dict[str, Any]] = {}
         self.instances: list[Instance] = []
         self.nets: dict[str, Net] = {}
@@ -184,7 +167,7 @@ class Netlist:
 
     def net(self, material: str) -> Net:
         if material not in self.nets:
-            self.nets[material] = Net(material)
+            self.nets[material] = Net(material, is_fluid=(material in self.fluids))
         return self.nets[material]
 
 
@@ -242,7 +225,7 @@ def build(
     lines, _power = solve.machine_counts(data, rates)
     plan_count = {line[0]: line[3] for line in lines}
 
-    nl = Netlist("factory")
+    nl = Netlist("factory", fluids=set(data.prototypes.get("fluid", {}).keys()))
     for recipe, rate in sorted(rates.items()):
         if isinstance(machine_override, dict):
             machine = machine_override.get(recipe, "assembling-machine-3")
@@ -291,7 +274,7 @@ def build(
     for material, rate in raw.items():
         net = nl.net(material)
         net.rate_per_min = rate
-        is_fluid = material in FLUID_MATERIALS or material in data.prototypes.get("fluid", {})
+        is_fluid = net.is_fluid or material in nl.fluids
         # Yellow belt capacity is 900 items per minute (15 items/sec).
         # Divide high-throughput input lines into power-of-two buses.
         if not is_fluid and rate > 900.0:
@@ -410,7 +393,7 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
     wire, except the last, which drives the material wire itself. Returns
     entries of (merge name, a wire, b wire, y wire), empty for one driver.
     """
-    if net.material in FLUID_MATERIALS or len(net.drivers) <= 1:
+    if net.is_fluid or net.material in nl.fluids or len(net.drivers) <= 1:
         return []
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
@@ -521,7 +504,7 @@ def split_net(
     When synthesize_trees is True, consumers become `belt_split2` instances.
     When synthesize_trees is False, consumers share a multi-drop belt bus.
     """
-    if net.material in FLUID_MATERIALS or len(net.sinks) <= 1:
+    if net.is_fluid or net.material in nl.fluids or len(net.sinks) <= 1:
         return []
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
@@ -979,7 +962,7 @@ def merge_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
     """Merge insertion for every multi-driver net, before emission."""
     plans: dict[str, list[tuple[str, str, str, str]]] = {}
     for net in nl.nets.values():
-        if net.material in FLUID_MATERIALS:
+        if net.is_fluid or net.material in nl.fluids:
             continue
         entries = merge_net(nl, net)
         if entries:
@@ -997,7 +980,7 @@ def split_plans_of(
     plans: dict[str, list[tuple[str, str, str, str]]] = {}
     nl.balancer_plans = {}
     for net in list(nl.nets.values()):
-        if net.material in FLUID_MATERIALS:
+        if net.is_fluid or net.material in nl.fluids:
             continue
         bal_entries: list[tuple[str, str, str, str, str]] = []
         entries = split_net(nl, net, bal_entries, synthesize_trees=synthesize_trees)
@@ -1040,6 +1023,9 @@ def emit_ranks_tcl(
         "# ranks.tcl - Instance rank assignments for structured linear row placement",
         "set instance_ranks [dict create]",
     ]
+    fluid_nets = [sanitize(m) for m in sorted(getattr(nl, "fluids", set())) if m in nl.nets]
+    if fluid_nets:
+        lines.append(f"set fluid_nets [list {' '.join(fluid_nets)}]")
     raw_by_rank: dict[int, list[str]] = {}
     inst_by_name = {inst.name: inst for inst in nl.instances}
     for inst in nl.instances:

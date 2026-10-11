@@ -7,7 +7,6 @@ from __future__ import annotations
 
 try:
     from foundry.untangle import (
-        FLUID_MATERIALS_NAMES,
         SpatialWireIndex,
         _get_net_fluid,
         _is_fluid_net,
@@ -31,7 +30,6 @@ try:
     )
 except ImportError:
     from untangle import (
-        FLUID_MATERIALS_NAMES,
         SpatialWireIndex,
         _get_net_fluid,
         _is_fluid_net,
@@ -55,7 +53,6 @@ except ImportError:
     )
 
 __all__ = [
-    "FLUID_MATERIALS_NAMES",
     "SpatialWireIndex",
     "_get_net_fluid",
     "_is_fluid_net",

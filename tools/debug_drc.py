@@ -216,11 +216,9 @@ def run_diagnostics(
     def_data = parse_def(def_path.read_text(encoding="utf-8"))
     netlist_data = json.loads(netlist_path.read_text(encoding="utf-8"))
     def_data["_netlist_data"] = netlist_data
-
     # 1. Pre-routing untangling
     untangle_shared_merger_tracks(def_data)
     untangle_merger_inputs(def_data)
-    # shortcut_backward_splitter_detours(def_data)
     simplify_orthogonal_routes(def_data)
     straighten_collinear_routes(def_data)
     eliminate_staircase_jogs(def_data)
@@ -230,7 +228,7 @@ def run_diagnostics(
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
     shift_congested_pin_turns(def_data)
-    separate_overlapping_channel_routes(def_data)
+    separate_overlapping_channel_routes(def_data, netlist_data)
     untangle_machine_inputs(def_data, netlist_data)
 
     # 2. Placement

@@ -237,11 +237,13 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
 # Non-default spacing rule for fluid nets to prevent adjacent surface pipe clashes:
 create_ndr -name fluid_ndr -spacing 1.25
 set fluid_count 0
-foreach net [$block getNets] {
-    set nname [$net getName]
-    if {[string match "*oil*" $nname] || [string match "*water*" $nname] || [string match "*petroleum*" $nname] || [string match "*acid*" $nname] || [string match "*lubricant*" $nname] || [string match "*steam*" $nname]} {
-        assign_ndr -ndr fluid_ndr -net $nname
-        incr fluid_count
+if {[info exists fluid_nets]} {
+    foreach fn $fluid_nets {
+        set net [$block findNet $fn]
+        if {$net != "NULL"} {
+            assign_ndr -ndr fluid_ndr -net $fn
+            incr fluid_count
+        }
     }
 }
 if {$fluid_count > 0} {

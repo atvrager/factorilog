@@ -10,11 +10,6 @@ import math
 import re
 from typing import Any
 
-try:
-    from foundry.lef import FLUID_MATERIALS
-except ImportError:
-    from lef import FLUID_MATERIALS
-
 
 def merge_collinear_wires(
     wires: list[dict[str, Any]], vias: list[dict[str, Any]] | None = None
@@ -189,12 +184,16 @@ def parse_def(text: str) -> dict[str, Any]:
                 if not (c[1].isdigit() or c[0].isdigit() or c[1] == "*" or c[0] == "*")
             ]
 
+            ndr_match = re.search(r"\+\s+NONDEFAULTRULE\s+(\S+)", chunk)
+            ndr = ndr_match.group(1) if ndr_match else None
+
             nets.append(
                 {
                     "name": net_name,
                     "wires": merge_collinear_wires(wires, vias),
                     "vias": vias,
                     "connections": conns,
+                    "nondefaultrule": ndr,
                 }
             )
 
@@ -212,20 +211,7 @@ def extract_pins(
 ) -> dict[str, list[dict[str, Any]]]:
     """Extract input and output pin coordinates and types by material name."""
     scale = 1.0 / float(def_data.get("units", 1000))
-    fluids = (
-        set(netlist_data.get("fluids") or [])
-        | set(FLUID_MATERIALS)
-        | {
-            "crude-oil",
-            "water",
-            "petroleum-gas",
-            "heavy-oil",
-            "light-oil",
-            "sulfuric-acid",
-            "lubricant",
-            "steam",
-        }
-    )
+    fluids = set(netlist_data.get("fluids") or [])
     inputs: list[dict[str, Any]] = []
     outputs: list[dict[str, Any]] = []
 

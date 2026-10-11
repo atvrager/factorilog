@@ -16,7 +16,7 @@ try:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
     )
-    from foundry.lef import FLUID_MATERIALS, get_macro_port_geometry
+    from foundry.lef import get_macro_port_geometry
 except ImportError:
     from entity_helpers import (
         DIRECTION_EAST,
@@ -24,7 +24,7 @@ except ImportError:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
     )
-    from lef import FLUID_MATERIALS, get_macro_port_geometry
+    from lef import get_macro_port_geometry
 
 
 @dataclass
@@ -73,7 +73,7 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
         return entity
 
     has_fluid_metadata = "fluids" in netlist_data
-    fluids = set(netlist_data.get("fluids") or []) | set(FLUID_MATERIALS)
+    fluids = set(netlist_data.get("fluids") or [])
 
     inst_to_entity: dict[str, dict[str, Any]] = {}
     for comp in def_data.get("components", []):
@@ -135,20 +135,7 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             center_x, center_y = gx + 0.5, gy + 1.0
             recipe = inst.get("recipe", "")
             if recipe:
-                sig_type = (
-                    "fluid"
-                    if recipe
-                    in (
-                        "crude-oil",
-                        "petroleum-gas",
-                        "heavy-oil",
-                        "light-oil",
-                        "sulfuric-acid",
-                        "water",
-                        "steam",
-                    )
-                    else "item"
-                )
+                sig_type = "fluid" if recipe in fluids else "item"
                 default_cb = {
                     "arithmetic_conditions": {
                         "first_signal": {"type": sig_type, "name": recipe},

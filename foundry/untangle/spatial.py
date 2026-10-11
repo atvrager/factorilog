@@ -6,30 +6,15 @@ import bisect
 import collections
 from typing import Any
 
-FLUID_MATERIALS_NAMES = frozenset(
-    {
-        "crude_oil",
-        "crude-oil",
-        "water",
-        "petroleum_gas",
-        "petroleum-gas",
-        "heavy_oil",
-        "heavy-oil",
-        "light_oil",
-        "light-oil",
-        "sulfuric_acid",
-        "sulfuric-acid",
-        "lubricant",
-        "steam",
-    }
-)
 
-
-def _is_fluid_net(net: dict[str, Any]) -> bool:
+def _is_fluid_net(net: dict[str, Any], fluids: set[str] | frozenset[str] | None = None) -> bool:
     """Return True if the net carries a fluid material."""
-    name = net.get("name", "")
-    mat = name.split("__")[0]
-    return mat in FLUID_MATERIALS_NAMES or net.get("nondefaultrule") == "fluid_ndr"
+    if net.get("nondefaultrule") == "fluid_ndr":
+        return True
+    if fluids:
+        mat = net.get("name", "").split("__")[0].replace("_", "-")
+        return mat in fluids or mat.replace("-", "_") in fluids
+    return False
 
 
 def _get_net_fluid(net: dict[str, Any]) -> str:

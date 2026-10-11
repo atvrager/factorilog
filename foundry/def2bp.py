@@ -130,7 +130,7 @@ def build_entities(
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
     shift_congested_pin_turns(def_data)
-    separate_overlapping_channel_routes(def_data)
+    separate_overlapping_channel_routes(def_data, netlist_data)
     untangle_machine_inputs(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))

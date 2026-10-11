@@ -25,7 +25,6 @@ try:
         untangle_splitter_outputs,
     )
     from foundry.untangle.spatial import (
-        FLUID_MATERIALS_NAMES,
         SpatialWireIndex,
         _get_net_fluid,
         _is_fluid_net,
@@ -55,7 +54,6 @@ except ImportError:
         untangle_splitter_outputs,
     )
     from untangle.spatial import (
-        FLUID_MATERIALS_NAMES,
         SpatialWireIndex,
         _get_net_fluid,
         _is_fluid_net,
@@ -64,7 +62,6 @@ except ImportError:
     )
 
 __all__ = [
-    "FLUID_MATERIALS_NAMES",
     "SpatialWireIndex",
     "_get_net_fluid",
     "_is_fluid_net",

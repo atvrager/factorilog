@@ -528,12 +528,18 @@ def untangle_interlocking_corners(def_data: dict[str, Any]) -> None:
                                 return
 
 
-def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
+def separate_overlapping_channel_routes(
+    def_data: dict[str, Any],
+    netlist_data: dict[str, Any] | None = None,
+    fluids: set[str] | frozenset[str] | None = None,
+) -> None:
     """Separate parallel or conflicting nets that detailed router placed on colliding tracks.
 
     Handles both horizontal M1 segments and vertical M2 segments.
     Separates overlapping tracks and prevents adjacent surface fluid mixing.
     """
+    if fluids is None and netlist_data is not None:
+        fluids = set(netlist_data.get("fluids", []))
     units = int(def_data.get("units", 1000))
     nets = def_data.get("nets", [])
 
@@ -562,8 +568,8 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                         w2_min_x, w2_max_x = min(w2["x1"], w2["x2"]), max(w2["x1"], w2["x2"])
 
                         is_conflict = False
-                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1) else None
-                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2) else None
+                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1, fluids=fluids) else None
+                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2, fluids=fluids) else None
                         different_fluids = f1 is not None and f2 is not None and f1 != f2
 
                         if y1 == y2:
@@ -618,7 +624,9 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                             for on in nets:
                                 if on is n2:
                                     continue
-                                of = _get_net_fluid(on) if _is_fluid_net(on) else None
+                                of = (
+                                    _get_net_fluid(on) if _is_fluid_net(on, fluids=fluids) else None
+                                )
                                 on_diff_fluid = f2 is not None and of is not None and f2 != of
                                 for ow in on.get("wires", []):
                                     if ow.get("layer") != "M1":
@@ -733,7 +741,7 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
         y1 = tgt_wire["y1"]
         y2 = tgt_wire["y2"]
         tgt_min_y, tgt_max_y = min(y1, y2), max(y1, y2)
-        f_tgt = _get_net_fluid(tgt_net) if _is_fluid_net(tgt_net) else None
+        f_tgt = _get_net_fluid(tgt_net) if _is_fluid_net(tgt_net, fluids=fluids) else None
 
         ep1_y = tgt_wire["y1"]
         ep2_y = tgt_wire["y2"]
@@ -806,7 +814,7 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
             for on in nets:
                 if on is tgt_net:
                     continue
-                of = _get_net_fluid(on) if _is_fluid_net(on) else None
+                of = _get_net_fluid(on) if _is_fluid_net(on, fluids=fluids) else None
                 on_diff_fluid = f_tgt is not None and of is not None and f_tgt != of
                 for ow in on.get("wires", []):
                     if ow.get("layer") != "M2":
@@ -925,8 +933,8 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                         w2_min_y, w2_max_y = min(w2["y1"], w2["y2"]), max(w2["y1"], w2["y2"])
 
                         is_conflict = False
-                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1) else None
-                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2) else None
+                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1, fluids=fluids) else None
+                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2, fluids=fluids) else None
                         different_fluids = f1 is not None and f2 is not None and f1 != f2
 
                         if x1 == x2:
