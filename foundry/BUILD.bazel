@@ -7,7 +7,10 @@ package(default_visibility = ["//visibility:public"])
 # Python sources, for the workspace-wide lint and type checks.
 filegroup(
     name = "py_srcs",
-    srcs = glob(["*.py"]),
+    srcs = glob([
+        "*.py",
+        "untangle/*.py",
+    ]),
 )
 
 py_library(
@@ -52,6 +55,11 @@ py_library(
         "placement.py",
         "render_bp.py",
         "solve.py",
+        "untangle/__init__.py",
+        "untangle/channels.py",
+        "untangle/jogs.py",
+        "untangle/pins.py",
+        "untangle/spatial.py",
     ],
     imports = ["."],
     deps = [

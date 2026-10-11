@@ -188,4 +188,12 @@ py_test(
     ],
 )
 
-
+py_test(
+    name = "def_untangle_test",
+    size = "small",
+    srcs = ["test_def_untangle.py"],
+    main = "test_def_untangle.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
