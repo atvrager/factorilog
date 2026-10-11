@@ -20,8 +20,10 @@ from foundry.def_untangle import (
     relocate_blocked_splitter_inputs,
     separate_overlapping_channel_routes,
     straighten_collinear_routes,
+    straighten_stepped_feeder_routes,
     untangle_interlocking_corners,
     untangle_merger_inputs,
+    untangle_shared_merger_tracks,
     untangle_splitter_outputs,
 )
 from foundry.jumper import route_and_resolve_jumpers
@@ -112,9 +114,11 @@ def run_diagnostics(
     netlist_data = json.loads(netlist_path.read_text(encoding="utf-8"))
 
     # 1. Pre-routing untangling
+    untangle_shared_merger_tracks(def_data)
+    untangle_merger_inputs(def_data)
+    straighten_stepped_feeder_routes(def_data)
     straighten_collinear_routes(def_data)
     untangle_splitter_outputs(def_data)
-    untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
@@ -175,7 +179,7 @@ def run_diagnostics(
         for att in atts
         if att.get("action") == "jump_committed"
     ]
-    if committed:
+    if committed and verbose and not filter_tile:
         print(f"\n[COMMITTED JUMPERS: {len(committed)}]")
         for j in committed:
             print(f"  - net {j['candidate']} dir={j['dir']} from {j['in_pos']} to {j['out_pos']}")
@@ -188,6 +192,12 @@ def run_diagnostics(
     )
 
     if displayed_conflicts:
+        print(f"\n[CONFLICT SUMMARY: {len(displayed_conflicts)} conflicts]")
+        for pos in sorted(displayed_conflicts):
+            cx, cy = pos
+            nets = sorted(routes.tile_to_nets.get(pos, set()))
+            print(f"  - ({cx:.1f}, {cy:.1f}): {nets}")
+
         print("\n[CONFLICT DETAIL]")
         for pos in sorted(displayed_conflicts):
             cx, cy = pos

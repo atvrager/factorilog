@@ -275,7 +275,7 @@ factorilog_science_factory(
     layer_adjustment = "",
     routability_driven = True,
     split_pad_sites = 8,
-    strict_drc = False,
+    strict_drc = True,
     synthesize_splitters = True,
     use_row_placement = True,
     tags = [

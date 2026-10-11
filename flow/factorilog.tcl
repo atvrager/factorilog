@@ -27,6 +27,9 @@ if {![info exists CORE_MARGIN]} {
 if {![info exists density]} {
     set density 0.18
 }
+if {![info exists SPLIT_PAD_SITES]} {
+    set SPLIT_PAD_SITES 10
+}
 
 read_liberty tech.lib
 read_lef tech.lef
@@ -88,7 +91,7 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                     if {[string match "*merge*" $iname]} {
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
-                        set pad 10
+                        set pad [expr {max(10, $SPLIT_PAD_SITES)}]
                     } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
                         set pad 2
                     }
@@ -150,7 +153,7 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
                     if {[string match "*merge*" $iname]} {
                         set pad 16
                     } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
-                        set pad 10
+                        set pad [expr {max(10, $SPLIT_PAD_SITES)}]
                     } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
                         set pad 2
                     }
@@ -390,13 +393,7 @@ proc do_untangle {block dbu} {
                         set y1 [get_net_sink_center_y $n1 $dbu]
                         set y2 [get_net_sink_center_y $n2 $dbu]
                         if {[expr {abs($y1 - $y2)}] >= 0.5} {
-                            set should_swap 0
-                            if {$y1 > ($sy + 5.0) && $y2 > ($sy + 5.0)} {
-                                if {$y1 < $y2} { set should_swap 1 }
-                            } else {
-                                if {$y1 > $y2} { set should_swap 1 }
-                            }
-                            if {$should_swap} {
+                            if {$y1 > $y2} {
                                 odb::dbITerm_disconnect $it1
                                 odb::dbITerm_disconnect $it2
                                 odb::dbITerm_connect $it1 $n2
@@ -430,13 +427,6 @@ proc do_untangle {block dbu} {
                             set xa [get_net_driver_center_x $na $dbu]
                             set xb [get_net_driver_center_x $nb $dbu]
                             if {$xa > $xb} {
-                                odb::dbITerm_disconnect $ita
-                                odb::dbITerm_disconnect $itb
-                                odb::dbITerm_connect $ita $nb
-                                odb::dbITerm_connect $itb $na
-                            }
-                        } elseif {$ya > $my && $yb > $my} {
-                            if {$ya < $yb} {
                                 odb::dbITerm_disconnect $ita
                                 odb::dbITerm_disconnect $itb
                                 odb::dbITerm_connect $ita $nb

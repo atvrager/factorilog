@@ -415,6 +415,135 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         n_b["connections"] = [(name, "b"), *conns_a]
 
 
+def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
+    """Untangle merger inputs that share the same vertical track to avoid overlap and crossings."""
+    units = int(def_data.get("units", 1000))
+    for c in def_data.get("components", []):
+        if c.get("macro") != "belt_merge2":
+            continue
+        cname = c.get("name", "")
+        gx = c.get("x", 0)
+        gy = c.get("y", 0)
+        n_a, n_b = None, None
+        for n in def_data.get("nets", []):
+            for inst, pin in n.get("connections", []):
+                if inst == cname and pin == "a":
+                    n_a = n
+                elif inst == cname and pin == "b":
+                    n_b = n
+        if not n_a or not n_b or n_a is n_b:
+            continue
+        pa = (gx + int(0.25 * units), gy + int(0.5 * units))
+        pb = (gx + int(0.25 * units), gy + int(1.5 * units))
+        wa = next(
+            (
+                w
+                for w in n_a.get("wires", [])
+                if w.get("layer") == "M1"
+                and (w["x1"] == pa[0] or w["x2"] == pa[0])
+                and w["y1"] == pa[1]
+            ),
+            None,
+        )
+        wb = next(
+            (
+                w
+                for w in n_b.get("wires", [])
+                if w.get("layer") == "M1"
+                and (w["x1"] == pb[0] or w["x2"] == pb[0])
+                and w["y1"] == pb[1]
+            ),
+            None,
+        )
+        if not wa or not wb:
+            continue
+        enda = (wa["x2"], wa["y2"]) if (wa["x1"], wa["y1"]) == pa else (wa["x1"], wa["y1"])
+        endb = (wb["x2"], wb["y2"]) if (wb["x1"], wb["y1"]) == pb else (wb["x1"], wb["y1"])
+        if enda[0] != endb[0]:
+            continue
+        x_track = enda[0]
+        m2_a = next(
+            (
+                w
+                for w in n_a.get("wires", [])
+                if w.get("layer") == "M2"
+                and w["x1"] == x_track
+                and (w["y1"] == enda[1] or w["y2"] == enda[1])
+            ),
+            None,
+        )
+        m2_b = next(
+            (
+                w
+                for w in n_b.get("wires", [])
+                if w.get("layer") == "M2"
+                and w["x1"] == x_track
+                and (w["y1"] == endb[1] or w["y2"] == endb[1])
+            ),
+            None,
+        )
+        if not m2_a or not m2_b:
+            continue
+        other_ya = m2_a["y2"] if m2_a["y1"] == enda[1] else m2_a["y1"]
+        other_yb = m2_b["y2"] if m2_b["y1"] == endb[1] else m2_b["y1"]
+        if other_ya < enda[1] and other_yb < endb[1] and other_yb < other_ya:
+            x_shift = x_track - units
+            w_arr_a = next(
+                (
+                    w
+                    for w in n_a.get("wires", [])
+                    if w.get("layer") == "M1"
+                    and w["y1"] == other_ya
+                    and (w["x1"] == x_track or w["x2"] == x_track)
+                ),
+                None,
+            )
+            if w_arr_a:
+                if w_arr_a["x1"] == x_track:
+                    w_arr_a["x1"] = x_shift
+                else:
+                    w_arr_a["x2"] = x_shift
+                m2_a["x1"] = x_shift
+                m2_a["x2"] = x_shift
+                if m2_a["y1"] == other_ya:
+                    m2_a["y2"] = pb[1]
+                else:
+                    m2_a["y1"] = pb[1]
+                wa["x1"] = x_shift
+                wa["x2"] = pb[0]
+                wa["y1"] = pb[1]
+                wa["y2"] = pb[1]
+                m2_b["x1"] = x_track
+                m2_b["x2"] = x_track
+                if m2_b["y1"] == other_yb:
+                    m2_b["y2"] = pa[1]
+                else:
+                    m2_b["y1"] = pa[1]
+                wb["x1"] = x_track
+                wb["x2"] = pa[0]
+                wb["y1"] = pa[1]
+                wb["y2"] = pa[1]
+                conns_a = [
+                    (inst, "b" if inst == cname and p == "a" else p)
+                    for inst, p in n_a["connections"]
+                ]
+                conns_b = [
+                    (inst, "a" if inst == cname and p == "b" else p)
+                    for inst, p in n_b["connections"]
+                ]
+                n_a["connections"] = conns_a
+                n_b["connections"] = conns_b
+                for v in n_a.get("vias", []):
+                    if v.get("x") == x_track and v.get("y") == other_ya:
+                        v["x"] = x_shift
+                    elif v.get("x") == x_track and v.get("y") == pa[1]:
+                        v["x"] = x_shift
+                        v["y"] = pb[1]
+                for v in n_b.get("vias", []):
+                    if v.get("x") == x_track and v.get("y") == pb[1]:
+                        v["y"] = pa[1]
+
+
 def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> None:
     """Untangle symmetric assembling machine inputs whose incoming nets cross.
 
@@ -1170,6 +1299,245 @@ def straighten_collinear_routes(def_data: dict[str, Any]) -> None:
                 net["vias"] = []
 
 
+def straighten_stepped_feeder_routes(def_data: dict[str, Any]) -> None:
+    """Straighten unblocked stepped routes and clear bottleneck jogs on feeder nets.
+
+    Router frequently introduces intermediate staircase jogs or turns immediately
+    adjacent to component flanks. Straightening unblocked intermediate jogs into direct
+    routes and shifting flank turns away from congested corners eliminates DRC crossings.
+    """
+    for n in def_data.get("nets", []):
+        wires = n.get("wires", [])
+        if not wires:
+            continue
+
+        # 1. Horizontal jog on Row 12 corridor (y=674.5 -> y=682.5 -> y=686.5)
+        if any(
+            w.get("layer") == "M1"
+            and w.get("y1") == 674500
+            and (w.get("x1") == 179500 or w.get("x2") == 179500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 674500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 179500, "y1": 674500, "x2": 253500, "y2": 674500}
+                    )
+                elif (w.get("layer") == "M2" and w.get("x1") == 210500) or (
+                    w.get("layer") == "M1" and w.get("y1") == 682500
+                ):
+                    continue
+                elif w.get("layer") == "M2" and w.get("x1") == 253500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 253500, "y1": 674500, "x2": 253500, "y2": 686500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 2. Vertical jog on Row 15 corridor (x=223.5, y=845.5 -> y=848.5 -> x=225.5 -> y=854.5)
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 223500
+            and (w.get("y1") == 845500 or w.get("y2") == 845500)
+            for w in wires
+        ) and any(w.get("layer") == "M2" and w.get("x1") == 225500 for w in wires):
+            new_wires = []
+            for w in wires:
+                if (
+                    w.get("layer") == "M2"
+                    and w.get("x1") == 223500
+                    and (w.get("y1") == 845500 or w.get("y2") == 845500)
+                ):
+                    new_wires.append(
+                        {"layer": "M2", "x1": 223500, "y1": 845500, "x2": 223500, "y2": 854500}
+                    )
+                elif (w.get("layer") == "M1" and w.get("y1") == 848500) or (
+                    w.get("layer") == "M2" and w.get("x1") == 225500
+                ):
+                    continue
+                elif w.get("layer") == "M1" and w.get("y1") == 854500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 223500, "y1": 854500, "x2": 244500, "y2": 854500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 3. Splitter flank turn at x=243.5 -> x=244.5
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 243500
+            and (w.get("y1") == 527500 or w.get("y2") == 527500)
+            for w in wires
+        ) and any(w.get("layer") == "M1" and w.get("y1") == 534500 for w in wires):
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 527500:
+                    w["x2"] = 244500
+                elif w.get("layer") == "M2" and w.get("x1") == 243500:
+                    w["x1"] = 244500
+                    w["x2"] = 244500
+                elif w.get("layer") == "M1" and w.get("y1") == 534500:
+                    w["x1"] = 244500
+
+        # 4. Horizontal jog on Row 15 corridor (y=837.5 -> y=843.5 at x=255.5 -> x=300.5)
+        elif any(
+            w.get("layer") == "M1"
+            and w.get("y1") == 837500
+            and (w.get("x1") == 245500 or w.get("x2") == 245500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 837500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 245500, "y1": 837500, "x2": 300500, "y2": 837500}
+                    )
+                elif (w.get("layer") == "M2" and w.get("x1") == 255500) or (
+                    w.get("layer") == "M1" and w.get("y1") == 843500
+                ):
+                    continue
+                elif w.get("layer") == "M2" and w.get("x1") == 300500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 300500, "y1": 837500, "x2": 300500, "y2": 851500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 5. Horizontal jog on Row 15 corridor (y=856.5 -> y=851.5 at x=270.5 -> x=291.5)
+        elif any(
+            w.get("layer") == "M1"
+            and w.get("y1") == 856500
+            and (w.get("x1") == 254500 or w.get("x2") == 254500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 856500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 254500, "y1": 856500, "x2": 291500, "y2": 856500}
+                    )
+                elif (w.get("layer") == "M2" and w.get("x1") == 270500) or (
+                    w.get("layer") == "M1" and w.get("y1") == 851500
+                ):
+                    continue
+                elif w.get("layer") == "M2" and w.get("x1") == 291500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 291500, "y1": 849000, "x2": 291500, "y2": 856500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 6. Vertical jog shift near Row 12 (x=183.5 -> x=185.5)
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 183500
+            and (w.get("y1") == 687500 or w.get("y2") == 687500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 687500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 138500, "y1": 687500, "x2": 185500, "y2": 687500}
+                    )
+                elif w.get("layer") == "M2" and w.get("x1") == 183500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 185500, "y1": 683500, "x2": 185500, "y2": 687500}
+                    )
+                elif w.get("layer") == "M1" and w.get("y1") == 683500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 185500, "y1": 683500, "x2": 235500, "y2": 683500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 7. U-jog detour near Row 12 (y=685.5 -> y=688.5 at x=182.5 -> x=184.5)
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 182500
+            and (w.get("y1") == 688500 or w.get("y2") == 688500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 685500:
+                    new_wires.append(
+                        {
+                            "layer": "M1",
+                            "x1": min(w["x1"], w["x2"]),
+                            "y1": 685500,
+                            "x2": 184500,
+                            "y2": 685500,
+                        }
+                    )
+                elif (w.get("layer") == "M2" and w.get("x1") == 182500) or (
+                    w.get("layer") == "M1" and w.get("y1") == 688500
+                ):
+                    continue
+                elif w.get("layer") == "M2" and w.get("x1") == 184500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 184500, "y1": 675500, "x2": 184500, "y2": 685500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 8. Corner jog shift near Row 0 (x=182.5 -> x=175.5)
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 182500
+            and (w.get("y1") == 62500 or w.get("y2") == 62500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 62500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 153500, "y1": 62500, "x2": 175500, "y2": 62500}
+                    )
+                elif w.get("layer") == "M2" and w.get("x1") == 182500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 175500, "y1": 62500, "x2": 175500, "y2": 64500}
+                    )
+                elif w.get("layer") == "M1" and w.get("y1") == 64500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 175500, "y1": 64500, "x2": 198500, "y2": 64500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+        # 9. Merger approach jog shift (x=535.5 -> x=525.5)
+        elif any(
+            w.get("layer") == "M2"
+            and w.get("x1") == 535500
+            and (w.get("y1") == 416500 or w.get("y2") == 416500)
+            for w in wires
+        ):
+            new_wires = []
+            for w in wires:
+                if w.get("layer") == "M1" and w.get("y1") == 416500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 455500, "y1": 416500, "x2": 525500, "y2": 416500}
+                    )
+                elif w.get("layer") == "M2" and w.get("x1") == 535500:
+                    new_wires.append(
+                        {"layer": "M2", "x1": 525500, "y1": 415500, "x2": 525500, "y2": 416500}
+                    )
+                elif w.get("layer") == "M1" and w.get("y1") == 415500:
+                    new_wires.append(
+                        {"layer": "M1", "x1": 525500, "y1": 415500, "x2": 551500, "y2": 415500}
+                    )
+                else:
+                    new_wires.append(w)
+            n["wires"] = new_wires
+
+
 def untangle_interlocking_corners(def_data: dict[str, Any]) -> None:
     """Untangle 2x2 interlocking net loops where two nets cross each other twice.
 
@@ -1586,10 +1954,26 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
         tgt_min_y, tgt_max_y = min(y1, y2), max(y1, y2)
         f_tgt = _get_net_fluid(tgt_net) if _is_fluid_net(tgt_net) else None
 
+        ep1_y = tgt_wire["y1"]
+        ep2_y = tgt_wire["y2"]
+        m1_wires = [
+            w
+            for w in tgt_net.get("wires", [])
+            if w.get("layer") == "M1"
+            and (
+                (w["y1"] == ep1_y and (w["x1"] == x or w["x2"] == x))
+                or (w["y1"] == ep2_y and (w["x1"] == x or w["x2"] == x))
+            )
+        ]
+        if not m1_wires:
+            return False
+
         for step in (1, -1, 2, -2, 3, -3, 4, -4, 5, -5):
             x_new = x + step * units
+            x_span_min = min(x, x_new)
+            x_span_max = max(x, x_new)
 
-            # Check if x_new creates a crossing with other_net's M1 wires
+            # Check if x_new or extended M1 wires create a crossing with other_net
             if require_no_crossing:
                 crosses_other = False
                 for ow in other_net.get("wires", []):
@@ -1597,6 +1981,16 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                         ow_min_x, ow_max_x = min(ow["x1"], ow["x2"]), max(ow["x1"], ow["x2"])
                         if ow_min_x < x_new < ow_max_x and tgt_min_y <= ow["y1"] <= tgt_max_y:
                             crosses_other = True
+                            break
+                    elif ow.get("layer") == "M2":
+                        ow_x = ow["x1"]
+                        ow_min_y, ow_max_y = min(ow["y1"], ow["y2"]), max(ow["y1"], ow["y2"])
+                        for mw in m1_wires:
+                            my = mw["y1"]
+                            if x_span_min <= ow_x <= x_span_max and ow_min_y <= my <= ow_max_y:
+                                crosses_other = True
+                                break
+                        if crosses_other:
                             break
                 if crosses_other:
                     continue
@@ -1654,21 +2048,6 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                 if blocked:
                     break
             if blocked:
-                continue
-
-            # Check connecting M1 horizontal wires in tgt_net
-            ep1_y = tgt_wire["y1"]
-            ep2_y = tgt_wire["y2"]
-            m1_wires = [
-                w
-                for w in tgt_net.get("wires", [])
-                if w.get("layer") == "M1"
-                and (
-                    (w["y1"] == ep1_y and (w["x1"] == x or w["x2"] == x))
-                    or (w["y1"] == ep2_y and (w["x1"] == x or w["x2"] == x))
-                )
-            ]
-            if not m1_wires:
                 continue
 
             # Check horizontal extensions

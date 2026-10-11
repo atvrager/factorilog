@@ -23,9 +23,11 @@ try:
         relocate_blocked_splitter_inputs,
         separate_overlapping_channel_routes,
         straighten_collinear_routes,
+        straighten_stepped_feeder_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
         untangle_merger_inputs,
+        untangle_shared_merger_tracks,
         untangle_splitter_outputs,
     )
     from foundry.entity_helpers import (
@@ -53,9 +55,11 @@ except ImportError:
         relocate_blocked_splitter_inputs,
         separate_overlapping_channel_routes,
         straighten_collinear_routes,
+        straighten_stepped_feeder_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
         untangle_merger_inputs,
+        untangle_shared_merger_tracks,
         untangle_splitter_outputs,
     )
     from entity_helpers import (
@@ -92,8 +96,10 @@ __all__ = [
     "merge_collinear_wires",
     "parse_def",
     "prune_dead_end_belts",
+    "straighten_stepped_feeder_routes",
     "untangle_machine_inputs",
     "untangle_merger_inputs",
+    "untangle_shared_merger_tracks",
     "untangle_splitter_outputs",
 ]
 
@@ -105,9 +111,11 @@ def build_entities(
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
     # 1. Untangle symmetric splitter outputs, inputs, and commutative machine inputs
+    untangle_shared_merger_tracks(def_data)
+    untangle_merger_inputs(def_data)
+    straighten_stepped_feeder_routes(def_data)
     straighten_collinear_routes(def_data)
     untangle_splitter_outputs(def_data)
-    untangle_merger_inputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
