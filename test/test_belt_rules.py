@@ -762,6 +762,70 @@ END DESIGN
         circ_violations = [v for v in violations if v.code in ("DRC-09", "DRC-10", "DRC-11", "DRC-12")]
         self.assertEqual(circ_violations, [])
 
+    def test_drc_fluid_mixing_adjacent_pipes(self) -> None:
+        """Rule DRC-13 flags adjacent surface pipes carrying different fluids."""
+        entities = [
+            {"name": "pipe", "position": {"x": 0.0, "y": 0.0}, "fluid": "water"},
+            {"name": "pipe", "position": {"x": 1.0, "y": 0.0}, "fluid": "crude-oil"},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-13" for v in violations))
+
+    def test_drc_fluid_clean_separate_pipes(self) -> None:
+        """Pipes with matching fluids or without orthogonal contact pass DRC-13."""
+        entities = [
+            {"name": "pipe", "position": {"x": 0.0, "y": 0.0}, "fluid": "water"},
+            {"name": "pipe", "position": {"x": 1.0, "y": 0.0}, "fluid": "water"},
+            {"name": "pipe", "position": {"x": 0.0, "y": 2.0}, "fluid": "crude-oil"},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertFalse(any(v.code == "DRC-13" for v in violations))
+
+    def test_drc_pipe_to_ground_valid_pairing(self) -> None:
+        """Matching pipe-to-ground entities facing each other within span pass DRC."""
+        # Entrance at (0, 0) direction 12 (West) points underground East
+        # Exit at (4, 0) direction 4 (East) points underground West
+        entities = [
+            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 4.0, "y": 0.0}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        pipe_violations = [v for v in violations if v.code in ("DRC-14", "DRC-15")]
+        self.assertEqual(pipe_violations, [])
+
+    def test_drc_pipe_to_ground_unpaired(self) -> None:
+        """Rule DRC-14 flags pipe-to-ground with no matching pair."""
+        entities = [
+            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-14" for v in violations))
+
+    def test_drc_pipe_to_ground_span_exceeded(self) -> None:
+        """Rule DRC-14 flags pipe-to-ground pairs exceeding maximum span (10 tiles between)."""
+        entities = [
+            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 15.0, "y": 0.0}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-14" for v in violations))
+
+    def test_drc_pipe_to_ground_span_overlap(self) -> None:
+        """Rule DRC-15 flags pipe-to-ground colliding with active underground pipe span."""
+        entities = [
+            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 6.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_NORTH, "position": {"x": 3.0, "y": 0.0}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertTrue(any(v.code == "DRC-15" for v in violations))
+
 
 if __name__ == "__main__":
     unittest.main()

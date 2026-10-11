@@ -1352,3 +1352,450 @@ def untangle_interlocking_corners(def_data: dict[str, Any]) -> None:
 
                             if shifted:
                                 return
+
+
+FLUID_MATERIALS_NAMES = frozenset(
+    {
+        "crude_oil",
+        "crude-oil",
+        "water",
+        "petroleum_gas",
+        "petroleum-gas",
+        "heavy_oil",
+        "heavy-oil",
+        "light_oil",
+        "light-oil",
+        "sulfuric_acid",
+        "sulfuric-acid",
+        "lubricant",
+        "steam",
+    }
+)
+
+
+def _is_fluid_net(net: dict[str, Any]) -> bool:
+    name = net.get("name", "")
+    mat = name.split("__")[0]
+    return mat in FLUID_MATERIALS_NAMES or net.get("nondefaultrule") == "fluid_ndr"
+
+
+def _get_net_fluid(net: dict[str, Any]) -> str:
+    name = net.get("name", "")
+    return name.split("__")[0].replace("_", "-")
+
+
+def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
+    """Separate parallel or conflicting nets that detailed router placed on colliding tracks.
+
+    Handles both horizontal M1 segments and vertical M2 segments.
+    Separates overlapping tracks and prevents adjacent surface fluid mixing.
+    """
+    units = int(def_data.get("units", 1000))
+    nets = def_data.get("nets", [])
+
+    # 1. Horizontal M1 track separation
+    for _pass in range(10):
+        any_shifted = False
+        for i, n1 in enumerate(nets):
+            for w1 in list(n1.get("wires", [])):
+                if w1.get("layer") != "M1":
+                    continue
+                y1 = w1["y1"]
+                if w1["y2"] != y1:
+                    continue
+                w1_min_x, w1_max_x = min(w1["x1"], w1["x2"]), max(w1["x1"], w1["x2"])
+
+                for j, n2 in enumerate(nets):
+                    if j <= i:
+                        continue
+                    shifted = False
+                    for w2 in list(n2.get("wires", [])):
+                        if w2.get("layer") != "M1":
+                            continue
+                        y2 = w2["y1"]
+                        if w2["y2"] != y2:
+                            continue
+                        w2_min_x, w2_max_x = min(w2["x1"], w2["x2"]), max(w2["x1"], w2["x2"])
+
+                        is_conflict = False
+                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1) else None
+                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2) else None
+                        different_fluids = f1 is not None and f2 is not None and f1 != f2
+
+                        if y1 == y2:
+                            overlap_min = max(w1_min_x, w2_min_x)
+                            overlap_max = min(w1_max_x, w2_max_x)
+                            if overlap_min < overlap_max:
+                                is_conflict = True
+                            elif different_fluids:
+                                gap = min(abs(w1_min_x - w2_max_x), abs(w2_min_x - w1_max_x))
+                                if gap <= units:
+                                    is_conflict = True
+                        elif different_fluids and abs(y1 - y2) <= units:
+                            overlap_min = max(w1_min_x, w2_min_x)
+                            overlap_max = min(w1_max_x, w2_max_x)
+                            if overlap_min <= overlap_max:
+                                is_conflict = True
+
+                        if not is_conflict:
+                            continue
+
+                        # Attempt to shift w2 to a free parallel track
+                        shifted = False
+                        for step in (2, 3, 4, 5, 6, 1, -2, -3, -4, -5, -6, -1):
+                            y_new = y2 + step * units
+                            if different_fluids and abs(y_new - y1) <= units:
+                                continue
+
+                            # Check components obstruction for new M1 segment
+                            blocked = False
+                            for c in def_data.get("components", []):
+                                cx = c.get("x", 0)
+                                cy = c.get("y", 0)
+                                orient = c.get("orient", "N")
+                                macro = c.get("macro", "")
+                                if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                                    cw, ch = (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                                elif "oil_refinery" in macro:
+                                    cw, ch = 7000, 7000
+                                elif "chemical_plant" in macro:
+                                    cw, ch = 5000, 5000
+                                else:
+                                    cw, ch = 5000, 5000
+                                if (cy <= y_new <= cy + ch) and not (
+                                    cx + cw <= w2_min_x or cx >= w2_max_x
+                                ):
+                                    blocked = True
+                                    break
+                            if blocked:
+                                continue
+
+                            # Check other nets on M1 at y_new
+                            for on in nets:
+                                if on is n2:
+                                    continue
+                                of = _get_net_fluid(on) if _is_fluid_net(on) else None
+                                on_diff_fluid = f2 is not None and of is not None and f2 != of
+                                for ow in on.get("wires", []):
+                                    if ow.get("layer") != "M1":
+                                        continue
+                                    ow_y = ow["y1"]
+                                    if ow["y2"] != ow_y:
+                                        continue
+                                    ow_min_x, ow_max_x = (
+                                        min(ow["x1"], ow["x2"]),
+                                        max(ow["x1"], ow["x2"]),
+                                    )
+                                    if ow_y == y_new:
+                                        if max(ow_min_x, w2_min_x) < min(ow_max_x, w2_max_x):
+                                            blocked = True
+                                            break
+                                        if on_diff_fluid:
+                                            gap = min(
+                                                abs(ow_min_x - w2_max_x), abs(w2_min_x - ow_max_x)
+                                            )
+                                            if gap <= units:
+                                                blocked = True
+                                                break
+                                    elif on_diff_fluid and abs(ow_y - y_new) <= units:
+                                        if max(ow_min_x, w2_min_x) <= min(ow_max_x, w2_max_x):
+                                            blocked = True
+                                            break
+                                if blocked:
+                                    break
+                            if blocked:
+                                continue
+
+                            # Check connecting M2 vertical wires in n2
+                            ep1_x = w2["x1"]
+                            ep2_x = w2["x2"]
+                            m2_wires = [
+                                w
+                                for w in n2.get("wires", [])
+                                if w.get("layer") == "M2"
+                                and (
+                                    (w["x1"] == ep1_x and (w["y1"] == y2 or w["y2"] == y2))
+                                    or (w["x1"] == ep2_x and (w["y1"] == y2 or w["y2"] == y2))
+                                )
+                            ]
+                            if not m2_wires:
+                                continue
+
+                            # Check vertical extensions
+                            y_span_min = min(y2, y_new)
+                            y_span_max = max(y2, y_new)
+                            for mw in m2_wires:
+                                mx = mw["x1"]
+                                for on in nets:
+                                    if on is n2:
+                                        continue
+                                    for ow in on.get("wires", []):
+                                        if (
+                                            ow.get("layer") == "M2"
+                                            and ow["x1"] == mx
+                                            and ow["x2"] == mx
+                                            and max(min(ow["y1"], ow["y2"]), y_span_min)
+                                            < min(max(ow["y1"], ow["y2"]), y_span_max)
+                                        ):
+                                            blocked = True
+                                            break
+                                    if blocked:
+                                        break
+                                if blocked:
+                                    break
+                            if blocked:
+                                continue
+
+                            # Apply shift to w2
+                            w2["y1"] = y_new
+                            w2["y2"] = y_new
+
+                            # Update M2 wires
+                            for mw in m2_wires:
+                                if mw["y1"] == y2:
+                                    mw["y1"] = y_new
+                                elif mw["y2"] == y2:
+                                    mw["y2"] = y_new
+
+                            # Update vias in n2
+                            for v in n2.get("vias", []):
+                                vx, vy = v.get("x"), v.get("y")
+                                if vy == y2 and vx in (ep1_x, ep2_x):
+                                    v["y"] = y_new
+
+                            shifted = True
+                            any_shifted = True
+                            break
+
+                        if shifted:
+                            break
+                    if shifted:
+                        break
+        if not any_shifted:
+            break
+
+    def _shift_m2(
+        tgt_net: dict[str, Any],
+        tgt_wire: dict[str, Any],
+        other_net: dict[str, Any],
+        require_no_crossing: bool,
+    ) -> bool:
+        x = tgt_wire["x1"]
+        y1 = tgt_wire["y1"]
+        y2 = tgt_wire["y2"]
+        tgt_min_y, tgt_max_y = min(y1, y2), max(y1, y2)
+        f_tgt = _get_net_fluid(tgt_net) if _is_fluid_net(tgt_net) else None
+
+        for step in (1, -1, 2, -2, 3, -3, 4, -4, 5, -5):
+            x_new = x + step * units
+
+            # Check if x_new creates a crossing with other_net's M1 wires
+            if require_no_crossing:
+                crosses_other = False
+                for ow in other_net.get("wires", []):
+                    if ow.get("layer") == "M1":
+                        ow_min_x, ow_max_x = min(ow["x1"], ow["x2"]), max(ow["x1"], ow["x2"])
+                        if ow_min_x < x_new < ow_max_x and tgt_min_y <= ow["y1"] <= tgt_max_y:
+                            crosses_other = True
+                            break
+                if crosses_other:
+                    continue
+
+            # Check components obstruction for new M2 segment
+            blocked = False
+            for c in def_data.get("components", []):
+                cx = c.get("x", 0)
+                cy = c.get("y", 0)
+                orient = c.get("orient", "N")
+                macro = c.get("macro", "")
+                if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                    cw, ch = (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                elif "oil_refinery" in macro:
+                    cw, ch = 7000, 7000
+                elif "chemical_plant" in macro:
+                    cw, ch = 5000, 5000
+                else:
+                    cw, ch = 5000, 5000
+                if (cx <= x_new <= cx + cw) and not (cy + ch <= tgt_min_y or cy >= tgt_max_y):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            # Check other nets on M2 at x_new
+            for on in nets:
+                if on is tgt_net:
+                    continue
+                of = _get_net_fluid(on) if _is_fluid_net(on) else None
+                on_diff_fluid = f_tgt is not None and of is not None and f_tgt != of
+                for ow in on.get("wires", []):
+                    if ow.get("layer") != "M2":
+                        continue
+                    ow_x = ow["x1"]
+                    if ow["x2"] != ow_x:
+                        continue
+                    ow_min_y, ow_max_y = (
+                        min(ow["y1"], ow["y2"]),
+                        max(ow["y1"], ow["y2"]),
+                    )
+                    if ow_x == x_new:
+                        if max(ow_min_y, tgt_min_y) < min(ow_max_y, tgt_max_y):
+                            blocked = True
+                            break
+                        if on_diff_fluid:
+                            gap = min(abs(ow_min_y - tgt_max_y), abs(tgt_min_y - ow_max_y))
+                            if gap <= units:
+                                blocked = True
+                                break
+                    elif on_diff_fluid and abs(ow_x - x_new) <= units:
+                        if max(ow_min_y, tgt_min_y) <= min(ow_max_y, tgt_max_y):
+                            blocked = True
+                            break
+                if blocked:
+                    break
+            if blocked:
+                continue
+
+            # Check connecting M1 horizontal wires in tgt_net
+            ep1_y = tgt_wire["y1"]
+            ep2_y = tgt_wire["y2"]
+            m1_wires = [
+                w
+                for w in tgt_net.get("wires", [])
+                if w.get("layer") == "M1"
+                and (
+                    (w["y1"] == ep1_y and (w["x1"] == x or w["x2"] == x))
+                    or (w["y1"] == ep2_y and (w["x1"] == x or w["x2"] == x))
+                )
+            ]
+            if not m1_wires:
+                continue
+
+            # Check horizontal extensions
+            x_span_min = min(x, x_new)
+            x_span_max = max(x, x_new)
+            for mw in m1_wires:
+                my = mw["y1"]
+                for c in def_data.get("components", []):
+                    cx = c.get("x", 0)
+                    cy = c.get("y", 0)
+                    orient = c.get("orient", "N")
+                    macro = c.get("macro", "")
+                    if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+                        cw, ch = (2000, 1000) if orient in ("W", "E") else (1000, 2000)
+                    elif "oil_refinery" in macro:
+                        cw, ch = 7000, 7000
+                    elif "chemical_plant" in macro:
+                        cw, ch = 5000, 5000
+                    else:
+                        cw, ch = 5000, 5000
+                    if (cy <= my <= cy + ch) and not (cx + cw <= x_span_min or cx >= x_span_max):
+                        blocked = True
+                        break
+                if blocked:
+                    break
+                for on in nets:
+                    if on is tgt_net:
+                        continue
+                    for ow in on.get("wires", []):
+                        if (
+                            ow.get("layer") == "M1"
+                            and ow["y1"] == my
+                            and ow["y2"] == my
+                            and max(min(ow["x1"], ow["x2"]), x_span_min)
+                            < min(max(ow["x1"], ow["x2"]), x_span_max)
+                        ):
+                            blocked = True
+                            break
+                    if blocked:
+                        break
+                if blocked:
+                    break
+            if blocked:
+                continue
+
+            # Apply shift to tgt_wire
+            tgt_wire["x1"] = x_new
+            tgt_wire["x2"] = x_new
+
+            # Update connecting M1 wires
+            for mw in m1_wires:
+                if mw["x1"] == x:
+                    mw["x1"] = x_new
+                elif mw["x2"] == x:
+                    mw["x2"] = x_new
+
+            # Update vias in tgt_net
+            for v in tgt_net.get("vias", []):
+                vx, vy = v.get("x"), v.get("y")
+                if vx == x and vy in (ep1_y, ep2_y):
+                    v["x"] = x_new
+
+            return True
+
+        return False
+
+    # 2. Vertical M2 track separation
+    for _pass in range(10):
+        any_shifted = False
+        for i, n1 in enumerate(nets):
+            for w1 in list(n1.get("wires", [])):
+                if w1.get("layer") != "M2":
+                    continue
+                x1 = w1["x1"]
+                if w1["x2"] != x1:
+                    continue
+                w1_min_y, w1_max_y = min(w1["y1"], w1["y2"]), max(w1["y1"], w1["y2"])
+
+                for j, n2 in enumerate(nets):
+                    if j <= i:
+                        continue
+                    shifted = False
+                    for w2 in list(n2.get("wires", [])):
+                        if w2.get("layer") != "M2":
+                            continue
+                        x2 = w2["x1"]
+                        if w2["x2"] != x2:
+                            continue
+                        w2_min_y, w2_max_y = min(w2["y1"], w2["y2"]), max(w2["y1"], w2["y2"])
+
+                        is_conflict = False
+                        f1 = _get_net_fluid(n1) if _is_fluid_net(n1) else None
+                        f2 = _get_net_fluid(n2) if _is_fluid_net(n2) else None
+                        different_fluids = f1 is not None and f2 is not None and f1 != f2
+
+                        if x1 == x2:
+                            overlap_min = max(w1_min_y, w2_min_y)
+                            overlap_max = min(w1_max_y, w2_max_y)
+                            if overlap_min < overlap_max:
+                                is_conflict = True
+                            elif different_fluids:
+                                gap = min(abs(w1_min_y - w2_max_y), abs(w2_min_y - w1_max_y))
+                                if gap <= units:
+                                    is_conflict = True
+                        elif different_fluids and abs(x1 - x2) <= units:
+                            overlap_min = max(w1_min_y, w2_min_y)
+                            overlap_max = min(w1_max_y, w2_max_y)
+                            if overlap_min <= overlap_max:
+                                is_conflict = True
+
+                        if not is_conflict:
+                            continue
+
+                        # Attempt to shift w1 or w2 to a free parallel track
+                        shifted = (
+                            _shift_m2(n1, w1, n2, require_no_crossing=True)
+                            or _shift_m2(n2, w2, n1, require_no_crossing=True)
+                            or _shift_m2(n1, w1, n2, require_no_crossing=False)
+                            or _shift_m2(n2, w2, n1, require_no_crossing=False)
+                        )
+                        if shifted:
+                            any_shifted = True
+                            break
+
+                    if shifted:
+                        break
+                if shifted:
+                    break
+        if not any_shifted:
+            break

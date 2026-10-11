@@ -245,6 +245,37 @@ def check_underground_pairing(
         else:
             unpaired.append(inp)
     unpaired.extend([o for o in outputs if id(o) not in matched_outputs])
+
+    pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
+    matched_pipes: set[int] = set()
+    for p in pipes:
+        if id(p) in matched_pipes:
+            continue
+        px = p["position"]["x"]
+        py = p["position"]["y"]
+        pd = p.get("direction", 0)
+        ug_d = OPPOSITE_DIR.get(pd, pd)
+        dx, dy = DIR_STEPS.get(ug_d, (0, 0))
+        found = None
+        for s in range(1, 12):
+            tx, ty = round(px + dx * s, 2), round(py + dy * s, 2)
+            for other in pipes:
+                if id(other) in matched_pipes or id(other) == id(p):
+                    continue
+                ox = round(other["position"]["x"], 2)
+                oy = round(other["position"]["y"], 2)
+                od = other.get("direction", 0)
+                if ox == tx and oy == ty and od == ug_d:
+                    found = other
+                    break
+            if found is not None:
+                break
+        if found is not None:
+            matched_pipes.add(id(p))
+            matched_pipes.add(id(found))
+        else:
+            unpaired.append(p)
+
     return unpaired
 
 

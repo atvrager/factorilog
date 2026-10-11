@@ -37,6 +37,25 @@ try:
 except ImportError:
     from entity_helpers import entity_size
 
+try:
+    from foundry.lef import FLUID_MATERIALS
+except ImportError:
+    try:
+        from lef import FLUID_MATERIALS
+    except ImportError:
+        FLUID_MATERIALS = frozenset(
+            {
+                "crude-oil",
+                "water",
+                "petroleum-gas",
+                "heavy-oil",
+                "light-oil",
+                "sulfuric-acid",
+                "lubricant",
+                "steam",
+            }
+        )
+
 
 @dataclass(frozen=True)
 class DrcViolation:
@@ -89,6 +108,8 @@ class BeltDrcChecker:
         unresolved_crossings: list[tuple[float, float]] | set[tuple[float, float]] | None = None,
         output_pins: list[tuple[float, float]] | set[tuple[int, int]] | None = None,
         wires: list[list[int]] | None = None,
+        tile_to_nets: dict[tuple[float, float], set[str]] | None = None,
+        fluids: set[str] | frozenset[str] | None = None,
     ) -> list[DrcViolation]:
         """Verify all physical rules on a list of placed entities."""
         violations: list[DrcViolation] = []
@@ -151,6 +172,23 @@ class BeltDrcChecker:
             "combinator" in e.get("name", "") or "switch" in e.get("name", "") for e in entities
         ):
             violations.extend(self._check_circuit_connectivity(entities, wires or []))
+
+        # 10. Check fluid mixing between adjacent surface pipes (Rule DRC-13)
+        violations.extend(
+            self._check_fluid_mixing(
+                entities,
+                tile_map,
+                tile_to_nets=tile_to_nets,
+                fluids=fluids,
+                net_map=_net_map,
+            )
+        )
+
+        # 11. Check pipe-to-ground pairing and maximum span (Rule DRC-14)
+        violations.extend(self._check_pipe_pairing(entities, tile_map))
+
+        # 12. Check pipe-to-ground underground span overlaps and collisions (Rule DRC-15)
+        violations.extend(self._check_pipe_span_overlap(entities, tile_map))
 
         return violations
 
@@ -996,5 +1034,265 @@ class BeltDrcChecker:
                             y=y,
                         )
                     )
+
+        return violations
+
+    def _check_fluid_mixing(
+        self,
+        entities: list[dict[str, Any]],
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+        tile_to_nets: dict[tuple[float, float], set[str]] | None = None,
+        fluids: set[str] | frozenset[str] | None = None,
+        net_map: dict[str, Any] | None = None,
+    ) -> list[DrcViolation]:
+        """Detect adjacent surface pipes or pipe connections carrying different fluids (Rule DRC-13)."""
+        violations: list[DrcViolation] = []
+        known_fluids = set(fluids) if fluids else set(FLUID_MATERIALS)
+
+        # Map each tile to its fluid material if known
+        tile_fluids: dict[tuple[int, int], str] = {}
+
+        for ent in entities:
+            pos = ent.get("position", {})
+            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            itile = (math.floor(cx), math.floor(cy))
+
+            # 1. Direct fluid annotation
+            fluid = ent.get("fluid")
+            if fluid:
+                tile_fluids[itile] = str(fluid)
+                continue
+
+            # 2. Lookup through tile_to_nets
+            if tile_to_nets:
+                nets = tile_to_nets.get((cx, cy), set()) or tile_to_nets.get(itile, set())
+                for n in nets:
+                    mat = n.split("__")[0].replace("_", "-")
+                    if mat in known_fluids:
+                        tile_fluids[itile] = mat
+                        break
+
+            # 3. Lookup through net_map
+            if itile not in tile_fluids and net_map:
+                net_val = net_map.get(itile) or net_map.get((cx, cy))
+                if isinstance(net_val, str):
+                    mat = net_val.split("__")[0].replace("_", "-")
+                    if mat in known_fluids:
+                        tile_fluids[itile] = mat
+                elif isinstance(net_val, dict):
+                    mat = str(net_val.get("material", "")).replace("_", "-")
+                    if mat in known_fluids:
+                        tile_fluids[itile] = mat
+
+        reported_pairs: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+
+        for ent in entities:
+            name = ent.get("name", "")
+            if name != "pipe":
+                continue
+            pos = ent.get("position", {})
+            x = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
+            y = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
+            f1 = tile_fluids.get((x, y))
+            if not f1:
+                continue
+
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nb_tile = (x + dx, y + dy)
+                pair_key = (min((x, y), nb_tile), max((x, y), nb_tile))
+                if pair_key in reported_pairs:
+                    continue
+
+                nb_ents = tile_map.get(nb_tile, [])
+                for nb in nb_ents:
+                    nb_name = nb.get("name", "")
+                    f2 = tile_fluids.get(nb_tile)
+                    if not f2:
+                        continue
+                    if f1 == f2:
+                        continue
+
+                    # Pipe-to-pipe connection
+                    if nb_name == "pipe":
+                        reported_pairs.add(pair_key)
+                        violations.append(
+                            DrcViolation(
+                                code="DRC-13",
+                                message=(
+                                    f"Fluid mixing: adjacent pipes carry different fluids "
+                                    f"'{f1}' at ({x}, {y}) and '{f2}' at {nb_tile}"
+                                ),
+                                x=float(x),
+                                y=float(y),
+                            )
+                        )
+                        break
+
+                    # Pipe-to-ground connection: only connects on its surface side (where direction points)
+                    if nb_name == "pipe-to-ground":
+                        nb_dir = nb.get("direction", DIRECTION_NORTH)
+                        surf_dx, surf_dy = DIR_STEPS.get(nb_dir, (0, 0))
+                        surf_conn = (nb_tile[0] + surf_dx, nb_tile[1] + surf_dy)
+                        if surf_conn == (x, y):
+                            reported_pairs.add(pair_key)
+                            violations.append(
+                                DrcViolation(
+                                    code="DRC-13",
+                                    message=(
+                                        f"Fluid mixing: pipe with fluid '{f1}' at ({x}, {y}) "
+                                        f"connects into pipe-to-ground with fluid '{f2}' at {nb_tile}"
+                                    ),
+                                    x=float(x),
+                                    y=float(y),
+                                )
+                            )
+                            break
+
+        return violations
+
+    def _check_pipe_pairing(
+        self,
+        entities: list[dict[str, Any]],
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+    ) -> list[DrcViolation]:
+        """Verify that every pipe-to-ground entity pairs with a facing pipe within maximum span (Rule DRC-14)."""
+        violations: list[DrcViolation] = []
+        pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
+        matched: set[int] = set()
+        max_span = 11
+
+        for p in pipes:
+            if id(p) in matched:
+                continue
+            pos = p.get("position", {})
+            px = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
+            py = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
+            d = p.get("direction", DIRECTION_NORTH)
+            ug_d = OPPOSITE_DIR.get(d, d)
+            dx, dy = DIR_STEPS.get(ug_d, (0, 0))
+
+            found = None
+            for span in range(1, max_span + 1):
+                chk_pos = (px + dx * span, py + dy * span)
+                candidates = tile_map.get(chk_pos, [])
+                for c in candidates:
+                    if (
+                        c.get("name") == "pipe-to-ground"
+                        and c.get("direction") == ug_d
+                        and id(c) not in matched
+                    ):
+                        found = c
+                        break
+                if found is not None:
+                    break
+
+            if found is not None:
+                matched.add(id(p))
+                matched.add(id(found))
+            else:
+                violations.append(
+                    DrcViolation(
+                        code="DRC-14",
+                        message=(
+                            f"Pipe-to-ground at ({px}, {py}) facing {d} has no matching "
+                            f"facing pipe-to-ground within max span 10"
+                        ),
+                        x=float(px),
+                        y=float(py),
+                    )
+                )
+
+        return violations
+
+    def _check_pipe_span_overlap(
+        self,
+        entities: list[dict[str, Any]],
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+    ) -> list[DrcViolation]:
+        """Detect pipe-to-ground hoods inside active underground spans or parallel span overlaps (Rule DRC-15)."""
+        violations: list[DrcViolation] = []
+        pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
+        max_span = 11
+        matched: set[int] = set()
+
+        spans: list[tuple[tuple[int, int], tuple[int, int], int, list[tuple[int, int]]]] = []
+        for p in pipes:
+            if id(p) in matched:
+                continue
+            pos = p.get("position", {})
+            px = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
+            py = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
+            d = p.get("direction", DIRECTION_NORTH)
+            ug_d = OPPOSITE_DIR.get(d, d)
+            dx, dy = DIR_STEPS.get(ug_d, (0, 0))
+
+            found = None
+            found_pos = None
+            found_span = 0
+            for span in range(1, max_span + 1):
+                chk_pos = (px + dx * span, py + dy * span)
+                for c in tile_map.get(chk_pos, []):
+                    if (
+                        c.get("name") == "pipe-to-ground"
+                        and c.get("direction") == ug_d
+                        and id(c) not in matched
+                    ):
+                        found = c
+                        found_pos = chk_pos
+                        found_span = span
+                        break
+                if found is not None:
+                    break
+
+            if found is not None and found_pos is not None:
+                matched.add(id(p))
+                matched.add(id(found))
+                span_tiles = [(px + dx * s, py + dy * s) for s in range(1, found_span)]
+                spans.append(((px, py), found_pos, ug_d, span_tiles))
+
+        # Check A: No pipe-to-ground hood on an intermediate span tile
+        for (ix, iy), (ox, oy), _d, span_tiles in spans:
+            for sx, sy in span_tiles:
+                violations.extend(
+                    [
+                        DrcViolation(
+                            code="DRC-15",
+                            message=(
+                                f"Pipe-to-ground at ({sx}, {sy}) collides with "
+                                f"underground pipe span from ({ix}, {iy}) to ({ox}, {oy})"
+                            ),
+                            x=float(sx),
+                            y=float(sy),
+                        )
+                        for ent in tile_map.get((sx, sy), [])
+                        if ent.get("name") == "pipe-to-ground"
+                    ]
+                )
+
+        # Check B: Parallel underground pipe span collisions
+        horiz_spans: dict[tuple[int, int], tuple[tuple[int, int], tuple[int, int]]] = {}
+        vert_spans: dict[tuple[int, int], tuple[tuple[int, int], tuple[int, int]]] = {}
+
+        for (ix, iy), (ox, oy), d, span_tiles in spans:
+            is_horiz = d in (DIRECTION_EAST, DIRECTION_WEST)
+            axis_map = horiz_spans if is_horiz else vert_spans
+            axis_name = "horizontal" if is_horiz else "vertical"
+            for st in span_tiles:
+                if st in axis_map:
+                    other_in, other_out = axis_map[st]
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-15",
+                            message=(
+                                f"Parallel {axis_name} underground pipe span collision at {st} "
+                                f"between span ({ix}, {iy})->({ox}, {oy}) and {other_in}->{other_out}"
+                            ),
+                            x=float(st[0]),
+                            y=float(st[1]),
+                        )
+                    )
+                else:
+                    axis_map[st] = ((ix, iy), (ox, oy))
 
         return violations

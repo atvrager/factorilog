@@ -131,13 +131,14 @@ def route_and_resolve_jumpers(
         max_allowed_span: int,
         axis_coord: float = 0.0,
         is_horizontal: bool = True,
+        nname: str = "",
         blocked_tiles: set[tuple[float, float]] | None = None,
     ) -> list[tuple[float, float, int]]:
         length = round(abs(end - start))
         step = 1 if end > start else -1
         if length <= max_allowed_span:
             return [(start, end, length)]
-        blocked = blocked_tiles or set()
+        blocked = blocked_tiles
         hops = []
         curr = start
         while True:
@@ -151,7 +152,13 @@ def route_and_resolve_jumpers(
                 next_in = round(exit_pos + step, 2)
                 p_exit = (exit_pos, axis_coord) if is_horizontal else (axis_coord, exit_pos)
                 p_next = (next_in, axis_coord) if is_horizontal else (axis_coord, next_in)
-                if p_exit not in blocked and p_next not in blocked:
+                if blocked is not None:
+                    exit_blocked = p_exit in blocked
+                    next_blocked = p_next in blocked
+                else:
+                    exit_blocked = any(n != nname for n in tile_to_nets.get(p_exit, ()))
+                    next_blocked = any(n != nname for n in tile_to_nets.get(p_next, ()))
+                if not exit_blocked and not next_blocked:
                     best_span = span
                     break
             if best_span is None:
@@ -381,9 +388,7 @@ def route_and_resolve_jumpers(
             if layer in CIRCUIT_LAYERS:
                 continue
 
-            is_fluid = is_fluid_wire(net, layer)
-            net_has_ug = any(w.get("layer") in ALL_UG_LAYERS for w in net.get("wires", []))
-            if layer in ALL_UG_LAYERS or (is_fluid and layer in ("M1", "M2") and not net_has_ug):
+            if layer in ALL_UG_LAYERS:
                 if from_p[0] == to_p[0]:
                     dx, dy = (0, 1) if d == DIRECTION_SOUTH else (0, -1)
                     while (t1_x, t1_y) in occupied_positions:
@@ -436,7 +441,6 @@ def route_and_resolve_jumpers(
     for net in def_data.get("nets", []):
         nname = net.get("name", "")
         is_fluid = is_fluid_wire(net, "M3")
-        blocked_tiles = {pos for pos, nets in tile_to_nets.items() if any(n != nname for n in nets)}
 
         for cy, segs in m3_runs_by_net.get(nname, {}).items():
             for s1, s2, d in segs:
@@ -494,7 +498,7 @@ def route_and_resolve_jumpers(
                         cur = round(cur + step, 2)
                 else:
                     max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
-                    hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, blocked_tiles)
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, nname=nname)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(h_start, cy)].add(nname)
                         tile_to_nets[(h_end, cy)].add(nname)
@@ -590,7 +594,7 @@ def route_and_resolve_jumpers(
                         cur = round(cur + step, 2)
                 else:
                     max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
-                    hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, blocked_tiles)
+                    hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, nname=nname)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(cx, h_start)].add(nname)
                         tile_to_nets[(cx, h_end)].add(nname)
@@ -649,27 +653,27 @@ def route_and_resolve_jumpers(
         for ue in underground_entities
         if ue.get("type") == "output" or ue.get("name") == "pipe-to-ground"
     ]
+    ug_outs_by_pos = {
+        (round(ue["position"]["x"], 2), round(ue["position"]["y"], 2)): ue for ue in ug_outs
+    }
     for u_in in ug_ins:
         d = u_in.get("direction", 0)
-        if d not in DIR_STEPS:
+        is_pipe = u_in.get("name") == "pipe-to-ground"
+        ug_d = OPPOSITE_DIR.get(d, d) if is_pipe else d
+        if ug_d not in DIR_STEPS:
             continue
-        dx, dy = DIR_STEPS[d]
+        dx, dy = DIR_STEPS[ug_d]
         ix = round(u_in["position"]["x"], 2)
         iy = round(u_in["position"]["y"], 2)
-        max_s = 11 if u_in.get("name") == "pipe-to-ground" else 10
+        max_s = 11 if is_pipe else 10
+        expected_out_dir = ug_d if is_pipe else d
         for s in range(1, max_s + 1):
-            chk_x = round(ix + dx * s, 2)
-            chk_y = round(iy + dy * s, 2)
-            matched = any(
-                round(u_out["position"]["x"], 2) == chk_x
-                and round(u_out["position"]["y"], 2) == chk_y
-                for u_out in ug_outs
-                if u_out is not u_in
-            )
-            if matched:
+            chk_pos = (round(ix + dx * s, 2), round(iy + dy * s, 2))
+            u_out = ug_outs_by_pos.get(chk_pos)
+            if u_out is not None and u_out.get("direction", 0) == expected_out_dir:
                 span_set = (
                     used_underground_spans_h
-                    if d in (DIRECTION_EAST, DIRECTION_WEST)
+                    if ug_d in (DIRECTION_EAST, DIRECTION_WEST)
                     else used_underground_spans_v
                 )
                 for step_s in range(1, s):
@@ -720,7 +724,7 @@ def route_and_resolve_jumpers(
                     valid_fluid_input_pins.add(pt)
                 else:
                     valid_input_pins.add(pt)
-                    machine_input_pins.add(pt)
+                machine_input_pins.add(pt)
             for port in cell.get("outputs", []):
                 geom = get_macro_port_geometry(cell, port, is_output=True)
                 ax, ay = geom["approach_pos"]
@@ -729,7 +733,7 @@ def route_and_resolve_jumpers(
                     valid_fluid_output_pins.add(pt)
                 else:
                     valid_output_pins.add(pt)
-                    machine_output_pins.add(pt)
+                machine_output_pins.add(pt)
 
     splitter_feeds: dict[tuple[float, float], set[int]] = collections.defaultdict(set)
     for comp in def_data.get("components", []):
@@ -744,438 +748,417 @@ def route_and_resolve_jumpers(
             for ty in range(4):
                 splitter_feeds[(round(gx + 2.5, 2), round(gy + ty + 0.5, 2))].add(DIRECTION_EAST)
 
-    while True:
-        conflicts = [pos for pos, nets in tile_to_nets.items() if len(nets) > 1]
-        adjacent_fluid_conflicts = set()
-        for pos, nets in tile_to_nets.items():
-            if len(nets) != 1:
+    fluid_nets: set[str] = {
+        n.get("name", "") for n in def_data.get("nets", []) if is_fluid_wire(n, "M1")
+    }
+
+    def check_adj_fluid(pos: tuple[float, float]) -> bool:
+        nets = tile_to_nets.get(pos)
+        if not nets or len(nets) != 1:
+            return False
+        n1 = next(iter(nets))
+        if n1 not in fluid_nets:
+            return False
+        cx, cy = pos
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            npos = (round(cx + dx, 2), round(cy + dy, 2))
+            adj_nets = tile_to_nets.get(npos)
+            if adj_nets and any(n2 != n1 and n2 in fluid_nets for n2 in adj_nets):
+                return True
+        return False
+
+    multi_net_conflicts: set[tuple[float, float]] = {
+        pos for pos, nets in tile_to_nets.items() if len(nets) > 1
+    }
+    adjacent_fluid_conflicts: set[tuple[float, float]] = set()
+    for pos, nets in tile_to_nets.items():
+        if len(nets) == 1 and next(iter(nets)) in fluid_nets and check_adj_fluid(pos):
+            adjacent_fluid_conflicts.add(pos)
+
+    def update_tile_conflict(pos: tuple[float, float]) -> None:
+        nets = tile_to_nets.get(pos)
+        if nets and len(nets) > 1:
+            multi_net_conflicts.add(pos)
+        else:
+            multi_net_conflicts.discard(pos)
+        cx, cy = pos
+        check_tiles = (
+            pos,
+            (round(cx + 1, 2), cy),
+            (round(cx - 1, 2), cy),
+            (round(cx, 2), round(cy + 1, 2)),
+            (round(cx, 2), round(cy - 1, 2)),
+        )
+        for p in check_tiles:
+            if check_adj_fluid(p):
+                adjacent_fluid_conflicts.add(p)
+            else:
+                adjacent_fluid_conflicts.discard(p)
+
+    def evaluate_options(pos: tuple[float, float]) -> list[tuple[float, str, Any]]:
+        nets = tile_to_nets.get(pos)
+        if not nets:
+            return []
+        if len(nets) <= 1 and pos not in adjacent_fluid_conflicts:
+            return []
+        cx, cy = pos
+        net_list = list(nets)
+        options: list[tuple[float, str, Any]] = []
+
+        for candidate in net_list:
+            is_fluid = candidate in fluid_nets
+            d = net_surface_tiles[candidate].get(pos)
+            if d not in DIR_STEPS:
                 continue
-            n1 = next(iter(nets))
-            if not is_fluid_wire(net_map.get(n1, {}), "M1"):
-                continue
-            cx, cy = pos
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                npos = (round(cx + dx, 2), round(cy + dy, 2))
-                adj_nets = tile_to_nets.get(npos, set())
-                if len(adj_nets) >= 1 and any(
-                    n2 != n1 and is_fluid_wire(net_map.get(n2, {}), "M1") for n2 in adj_nets
+            dx, dy = DIR_STEPS[d]
+            opp_d = OPPOSITE_DIR[d]
+            max_belt_span = (
+                max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
+            )
+            max_allowed_span = 11 if is_fluid else max_belt_span
+
+            for bspan in range(1, max_allowed_span):
+                in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
+                prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
+                fail_in = []
+                if in_pos not in net_surface_tiles[candidate]:
+                    fail_in.append("not_in_net")
+                elif net_surface_tiles[candidate][in_pos] != d and not (
+                    in_pos in machine_output_pins
+                    and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
                 ):
-                    adjacent_fluid_conflicts.add(pos)
-        for pos in sorted(adjacent_fluid_conflicts):
-            if pos not in conflicts:
-                conflicts.append(pos)
-
-        resolved_any = False
-        conflict_options: dict[tuple[float, float], list[tuple[float, str, Any]]] = {}
-
-        for pos in conflicts:
-            if len(tile_to_nets[pos]) <= 1 and pos not in adjacent_fluid_conflicts:
-                continue
-            cx, cy = pos
-            net_list = list(tile_to_nets[pos])
-            options: list[tuple[float, str, Any]] = []
-
-            for candidate in net_list:
-                is_fluid = is_fluid_wire(net_map.get(candidate, {}), "M1")
-                d = net_surface_tiles[candidate].get(pos)
-                if d not in DIR_STEPS:
-                    continue
-                dx, dy = DIR_STEPS[d]
-                opp_d = OPPOSITE_DIR[d]
-                max_belt_span = (
-                    max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
-                )
-                max_allowed_span = 11 if is_fluid else max_belt_span
-
-                for bspan in range(1, max_allowed_span):
-                    in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))
-                    prev_pos = (round(in_pos[0] - dx, 2), round(in_pos[1] - dy, 2))
-                    fail_in = []
-                    if in_pos not in net_surface_tiles[candidate]:
-                        fail_in.append("not_in_net")
-                    elif net_surface_tiles[candidate][in_pos] != d and not (
-                        in_pos in machine_output_pins
-                        and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
-                    ):
-                        fail_in.append(f"dir_mismatch({net_surface_tiles[candidate][in_pos]}!={d})")
-                    if len(tile_to_nets.get(in_pos, set())) > 1:
-                        fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
-                    if in_pos in used_underground_endpoints:
-                        fail_in.append("used_endpoint")
-                    if in_pos in used_underground_spans_h or in_pos in used_underground_spans_v:
-                        fail_in.append("in_underground_span")
-                    allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
-                    if in_pos in pin_tiles:
-                        allowed = in_pos in allowed_out and (
-                            d == DIRECTION_EAST
-                            or (
-                                not is_fluid
-                                and in_pos in machine_output_pins
-                                and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
-                            )
+                    fail_in.append(f"dir_mismatch({net_surface_tiles[candidate][in_pos]}!={d})")
+                if len(tile_to_nets.get(in_pos, set())) > 1:
+                    fail_in.append(f"in_pos_has_conflict({tile_to_nets.get(in_pos)})")
+                if in_pos in used_underground_endpoints:
+                    fail_in.append("used_endpoint")
+                if in_pos in used_underground_spans_h or in_pos in used_underground_spans_v:
+                    fail_in.append("in_underground_span")
+                allowed_out = valid_fluid_output_pins if is_fluid else valid_output_pins
+                if in_pos in pin_tiles:
+                    allowed = in_pos in allowed_out and (
+                        d == DIRECTION_EAST
+                        or (
+                            in_pos in machine_output_pins
+                            and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
                         )
-                        if not allowed:
-                            fail_in.append("in_pin_tiles")
-                    if any(s_dir != d for s_dir in splitter_feeds.get(in_pos, set())):
-                        fail_in.append("flank_feed_from_splitter")
-                    side_dirs = (
-                        (DIRECTION_EAST, DIRECTION_WEST)
-                        if d in (DIRECTION_NORTH, DIRECTION_SOUTH)
-                        else (DIRECTION_NORTH, DIRECTION_SOUTH)
                     )
-                    for s_dir in side_dirs:
-                        sdx, sdy = DIR_STEPS[s_dir]
-                        nb_pos = (round(in_pos[0] - sdx, 2), round(in_pos[1] - sdy, 2))
-                        if any(
-                            tiles.get(nb_pos) == s_dir
-                            for c_net, tiles in net_surface_tiles.items()
-                            if c_net != candidate
-                        ):
-                            fail_in.append("perpendicular_belt_feed")
+                    if not allowed:
+                        fail_in.append("in_pin_tiles")
+                if any(s_dir != d for s_dir in splitter_feeds.get(in_pos, set())):
+                    fail_in.append("flank_feed_from_splitter")
+                side_dirs = (
+                    (DIRECTION_EAST, DIRECTION_WEST)
+                    if d in (DIRECTION_NORTH, DIRECTION_SOUTH)
+                    else (DIRECTION_NORTH, DIRECTION_SOUTH)
+                )
+                for s_dir in side_dirs:
+                    sdx, sdy = DIR_STEPS[s_dir]
+                    nb_pos = (round(in_pos[0] - sdx, 2), round(in_pos[1] - sdy, 2))
+                    nb_nets = tile_to_nets.get(nb_pos)
+                    if nb_nets and any(
+                        net_surface_tiles[c_net].get(nb_pos) == s_dir
+                        for c_net in nb_nets
+                        if c_net != candidate
+                    ):
+                        fail_in.append("perpendicular_belt_feed")
+                        break
+                if in_pos in occupied_positions:
+                    fail_in.append("in_occupied")
+                if used_underground_endpoints.get(prev_pos) == opp_d:
+                    fail_in.append("opp_prev")
+                if fail_in:
+                    if debug_trace is not None:
+                        debug_trace.setdefault(pos, []).append(
+                            {
+                                "candidate": candidate,
+                                "dir": d,
+                                "bspan": bspan,
+                                "fspan": None,
+                                "in_pos": in_pos,
+                                "out_pos": None,
+                                "fail_in": list(fail_in),
+                                "fail_out": [],
+                                "valid_span": False,
+                                "invalid_reasons": [],
+                            }
+                        )
+                    continue
+
+                in_detour = None
+                if not is_fluid:
+                    side_feed = False
+                    in_turn_dir = None
+                    for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
+                        if b_dir == d:
+                            continue
+                        n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
+                        if net_surface_tiles[candidate].get(n_pos) == b_dir:
+                            side_feed = True
+                            in_turn_dir = b_dir
                             break
-                    if in_pos in occupied_positions:
-                        fail_in.append("in_occupied")
-                    if used_underground_endpoints.get(prev_pos) == opp_d:
-                        fail_in.append("opp_prev")
-                    if fail_in:
-                        if debug_trace is not None:
-                            debug_trace.setdefault(pos, []).append(
-                                {
-                                    "candidate": candidate,
-                                    "dir": d,
-                                    "bspan": bspan,
-                                    "fspan": None,
-                                    "in_pos": in_pos,
-                                    "out_pos": None,
-                                    "fail_in": list(fail_in),
-                                    "fail_out": [],
-                                    "valid_span": False,
-                                    "invalid_reasons": [],
-                                }
-                            )
-                        continue
+                    if side_feed:
+                        corner_in = (round(n_pos[0] - dx, 2), round(n_pos[1] - dy, 2))
+                        entry_tile = prev_pos
+                        detour_fails = []
+                        if in_turn_dir is None or abs(in_turn_dir - d) % 8 != 4:
+                            detour_fails.append(f"turn_dir({in_turn_dir})")
+                        if corner_in in occupied_positions:
+                            detour_fails.append(f"corner_in_occ({corner_in})")
+                        if corner_in in pin_tiles and corner_in not in valid_output_pins:
+                            detour_fails.append(f"corner_in_pin({corner_in})")
+                        if corner_in in used_underground_endpoints:
+                            detour_fails.append(f"corner_in_ug({corner_in})")
+                        if not (tile_to_nets.get(corner_in, set()) <= {candidate}):
+                            detour_fails.append(f"corner_in_net({tile_to_nets.get(corner_in)})")
+                        if entry_tile in occupied_positions:
+                            detour_fails.append(f"entry_occ({entry_tile})")
+                        if entry_tile in pin_tiles:
+                            detour_fails.append(f"entry_pin({entry_tile})")
+                        if entry_tile in used_underground_endpoints:
+                            detour_fails.append(f"entry_ug({entry_tile})")
+                        if not (tile_to_nets.get(entry_tile, set()) <= {candidate}):
+                            detour_fails.append(f"entry_net({tile_to_nets.get(entry_tile)})")
 
-                    in_detour = None
-                    if not is_fluid:
-                        side_feed = False
-                        in_turn_dir = None
-                        for b_dir, (b_dx, b_dy) in DIR_STEPS.items():
-                            if b_dir == d:
-                                continue
-                            n_pos = (round(in_pos[0] - b_dx, 2), round(in_pos[1] - b_dy, 2))
-                            if net_surface_tiles[candidate].get(n_pos) == b_dir:
-                                side_feed = True
-                                in_turn_dir = b_dir
-                                break
-                        if side_feed:
-                            corner_in = (round(n_pos[0] - dx, 2), round(n_pos[1] - dy, 2))
-                            entry_tile = prev_pos
-                            detour_fails = []
-                            if in_turn_dir is None or abs(in_turn_dir - d) % 8 != 4:
-                                detour_fails.append(f"turn_dir({in_turn_dir})")
-                            if corner_in in occupied_positions:
-                                detour_fails.append(f"corner_in_occ({corner_in})")
-                            if corner_in in pin_tiles and corner_in not in valid_output_pins:
-                                detour_fails.append(f"corner_in_pin({corner_in})")
-                            if corner_in in used_underground_endpoints:
-                                detour_fails.append(f"corner_in_ug({corner_in})")
-                            if not (tile_to_nets.get(corner_in, set()) <= {candidate}):
-                                detour_fails.append(f"corner_in_net({tile_to_nets.get(corner_in)})")
-                            if entry_tile in occupied_positions:
-                                detour_fails.append(f"entry_occ({entry_tile})")
-                            if entry_tile in pin_tiles:
-                                detour_fails.append(f"entry_pin({entry_tile})")
-                            if entry_tile in used_underground_endpoints:
-                                detour_fails.append(f"entry_ug({entry_tile})")
-                            if not (tile_to_nets.get(entry_tile, set()) <= {candidate}):
-                                detour_fails.append(f"entry_net({tile_to_nets.get(entry_tile)})")
-
-                            if not detour_fails:
-                                in_detour = (n_pos, opp_d, corner_in, in_turn_dir, entry_tile, d)
-                            else:
-                                if debug_trace is not None:
-                                    debug_trace.setdefault(pos, []).append(
-                                        {
-                                            "candidate": candidate,
-                                            "dir": d,
-                                            "bspan": bspan,
-                                            "fspan": None,
-                                            "in_pos": in_pos,
-                                            "out_pos": None,
-                                            "fail_in": [
-                                                f"in_detour_blocked:{','.join(detour_fails)}"
-                                            ],
-                                            "fail_out": [],
-                                            "valid_span": False,
-                                            "invalid_reasons": [],
-                                        }
-                                    )
-                                continue
-
-                    for fspan in range(1, max_allowed_span):
-                        if bspan + fspan > max_allowed_span:
-                            break
-                        out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
-                        next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
-                        fail_out = []
-                        turn_detour = None
-                        if out_pos not in net_surface_tiles[candidate]:
-                            fail_out.append("out_not_in_net")
-                        elif net_surface_tiles[candidate][out_pos] != d and not (
-                            out_pos in machine_input_pins
-                            and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
-                        ):
-                            turn_dir = net_surface_tiles[candidate][out_pos]
-                            if (
-                                not is_fluid
-                                and turn_dir in DIR_STEPS
-                                and abs(turn_dir - d) % 8 == 4
-                            ):
-                                tdx, tdy = DIR_STEPS[turn_dir]
-                                exit_tile = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
-                                corner_tile = (
-                                    round(exit_tile[0] + tdx, 2),
-                                    round(exit_tile[1] + tdy, 2),
-                                )
-                                next_in_net = (
-                                    round(out_pos[0] + tdx, 2),
-                                    round(out_pos[1] + tdy, 2),
-                                )
-                                next_in_net_dir = net_surface_tiles[candidate].get(next_in_net)
-                                if next_in_net_dir == d:
-                                    target_corner_d = d
-                                    bypass_tile = next_in_net
-                                    downstream_ok = (
-                                        corner_tile in net_surface_tiles[candidate]
-                                        or corner_tile in valid_input_pins
-                                        or (
-                                            round(corner_tile[0] + dx, 2),
-                                            round(corner_tile[1] + dy, 2),
-                                        )
-                                        in net_surface_tiles[candidate]
-                                    )
-                                else:
-                                    target_corner_d = opp_d
-                                    bypass_tile = None
-                                    downstream_ok = next_in_net in net_surface_tiles[candidate]
-
-                                if (
-                                    exit_tile not in occupied_positions
-                                    and (
-                                        exit_tile not in pin_tiles
-                                        or (
-                                            exit_tile in valid_input_pins
-                                            and (
-                                                turn_dir == DIRECTION_EAST
-                                                or exit_tile in machine_input_pins
-                                            )
-                                        )
-                                    )
-                                    and exit_tile not in used_underground_endpoints
-                                    and tile_to_nets.get(exit_tile, set()) <= {candidate}
-                                    and corner_tile not in occupied_positions
-                                    and (
-                                        corner_tile not in pin_tiles
-                                        or (
-                                            corner_tile in valid_input_pins
-                                            and (
-                                                target_corner_d == DIRECTION_EAST
-                                                or corner_tile in machine_input_pins
-                                            )
-                                        )
-                                    )
-                                    and corner_tile not in used_underground_endpoints
-                                    and tile_to_nets.get(corner_tile, set()) <= {candidate}
-                                    and downstream_ok
-                                ):
-                                    turn_detour = (
-                                        exit_tile,
-                                        turn_dir,
-                                        corner_tile,
-                                        target_corner_d,
-                                        bypass_tile,
-                                    )
-                                else:
-                                    detour_reasons = []
-                                    if exit_tile in occupied_positions:
-                                        detour_reasons.append(f"exit_occ({exit_tile})")
-                                    if exit_tile in pin_tiles and not (
-                                        exit_tile in valid_input_pins
-                                        and (
-                                            turn_dir == DIRECTION_EAST
-                                            or exit_tile in machine_input_pins
-                                        )
-                                    ):
-                                        detour_reasons.append(f"exit_pin({exit_tile})")
-                                    if exit_tile in used_underground_endpoints:
-                                        detour_reasons.append(f"exit_ug({exit_tile})")
-                                    if not (tile_to_nets.get(exit_tile, set()) <= {candidate}):
-                                        detour_reasons.append(
-                                            f"exit_net({tile_to_nets.get(exit_tile)})"
-                                        )
-                                    if corner_tile in occupied_positions:
-                                        detour_reasons.append(f"corner_occ({corner_tile})")
-                                    if corner_tile in pin_tiles and not (
-                                        corner_tile in valid_input_pins
-                                        and (
-                                            target_corner_d == DIRECTION_EAST
-                                            or corner_tile in machine_input_pins
-                                        )
-                                    ):
-                                        detour_reasons.append(f"corner_pin({corner_tile})")
-                                    if corner_tile in used_underground_endpoints:
-                                        detour_reasons.append(f"corner_ug({corner_tile})")
-                                    if not (tile_to_nets.get(corner_tile, set()) <= {candidate}):
-                                        detour_reasons.append(
-                                            f"corner_net({tile_to_nets.get(corner_tile)})"
-                                        )
-                                    if not downstream_ok:
-                                        detour_reasons.append("downstream_not_ok")
-                                    fail_out.append(f"detour_fail:{','.join(detour_reasons)}")
-                            else:
-                                fail_out.append(
-                                    f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
-                                )
-                        if len(tile_to_nets.get(out_pos, set())) > 1:
-                            fail_out.append("out_has_conflict")
-                        if out_pos in used_underground_endpoints:
-                            fail_out.append("out_used_endpoint")
-                        if (
-                            out_pos in used_underground_spans_h
-                            or out_pos in used_underground_spans_v
-                        ):
-                            fail_out.append("out_underground_span")
-                        allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
-                        if out_pos in pin_tiles:
-                            allowed = out_pos in allowed_in and (
-                                d == DIRECTION_EAST
-                                or (
-                                    not is_fluid
-                                    and out_pos in machine_input_pins
-                                    and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
-                                )
-                            )
-                            if not allowed:
-                                fail_out.append("out_in_pin_tiles")
-                        if out_pos in occupied_positions:
-                            fail_out.append("out_in_occupied")
-                        if splitter_feeds.get(out_pos):
-                            fail_out.append("feed_into_exit_hood")
-                        for s_dir in side_dirs:
-                            sdx, sdy = DIR_STEPS[s_dir]
-                            nb_pos = (round(out_pos[0] - sdx, 2), round(out_pos[1] - sdy, 2))
-                            if any(
-                                tiles.get(nb_pos) == s_dir
-                                for c_net, tiles in net_surface_tiles.items()
-                                if c_net != candidate
-                            ):
-                                fail_out.append("perpendicular_belt_feed")
-                                break
-                        rdx, rdy = DIR_STEPS[d]
-                        rear_pos = (round(out_pos[0] - rdx, 2), round(out_pos[1] - rdy, 2))
-                        if any(
-                            tiles.get(rear_pos) == d
-                            for c_net, tiles in net_surface_tiles.items()
-                            if c_net != candidate
-                        ):
-                            fail_out.append("rear_belt_feed")
-                        if (
-                            turn_detour is None
-                            and out_pos not in pin_tiles
-                            and next_pos not in net_surface_tiles[candidate]
-                        ):
-                            fail_out.append("out_next_not_in_net")
-                        if (
-                            turn_detour is None
-                            and used_underground_endpoints.get(next_pos) == opp_d
-                        ):
-                            fail_out.append("out_opp_next")
-                        if fail_out:
+                        if not detour_fails:
+                            in_detour = (n_pos, opp_d, corner_in, in_turn_dir, entry_tile, d)
+                        else:
                             if debug_trace is not None:
                                 debug_trace.setdefault(pos, []).append(
                                     {
                                         "candidate": candidate,
                                         "dir": d,
                                         "bspan": bspan,
-                                        "fspan": fspan,
+                                        "fspan": None,
                                         "in_pos": in_pos,
-                                        "out_pos": out_pos,
-                                        "fail_in": [],
-                                        "fail_out": list(fail_out),
+                                        "out_pos": None,
+                                        "fail_in": [f"in_detour_blocked:{','.join(detour_fails)}"],
+                                        "fail_out": [],
                                         "valid_span": False,
                                         "invalid_reasons": [],
                                     }
                                 )
                             continue
 
-                        valid_span = True
-                        conflicts_cleared = 0
-                        invalid_reasons = []
-                        is_horiz = d in (DIRECTION_EAST, DIRECTION_WEST)
-                        for s in range(-bspan + 1, fspan):
-                            it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                            if (
-                                it in net_surface_tiles[candidate]
-                                and net_surface_tiles[candidate][it] != d
-                            ):
-                                valid_span = False
-                                invalid_reasons.append(f"it_dir_mismatch({it})")
-                                break
-                            if it in occupied_positions:
-                                valid_span = False
-                                invalid_reasons.append(f"it_occupied({it})")
-                                break
-                            if it in used_underground_endpoints:
-                                valid_span = False
-                                invalid_reasons.append(f"it_used_endpoint({it})")
-                                break
-                            if is_horiz and it in used_underground_spans_h:
-                                valid_span = False
-                                invalid_reasons.append(f"it_used_span_h({it})")
-                                break
-                            if not is_horiz and it in used_underground_spans_v:
-                                valid_span = False
-                                invalid_reasons.append(f"it_used_span_v({it})")
-                                break
-                            if (
-                                len(tile_to_nets.get(it, set())) > 1
-                                or it in adjacent_fluid_conflicts
-                            ):
-                                conflicts_cleared += 1
-                        if not valid_span:
-                            if debug_trace is not None:
-                                debug_trace.setdefault(pos, []).append(
-                                    {
-                                        "candidate": candidate,
-                                        "dir": d,
-                                        "bspan": bspan,
-                                        "fspan": fspan,
-                                        "in_pos": in_pos,
-                                        "out_pos": out_pos,
-                                        "fail_in": [],
-                                        "fail_out": [],
-                                        "valid_span": False,
-                                        "invalid_reasons": list(invalid_reasons),
-                                    }
+                for fspan in range(1, max_allowed_span):
+                    if bspan + fspan > max_allowed_span:
+                        break
+                    out_pos = (round(cx + dx * fspan, 2), round(cy + dy * fspan, 2))
+                    next_pos = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                    fail_out = []
+                    turn_detour = None
+                    if out_pos not in net_surface_tiles[candidate]:
+                        fail_out.append("out_not_in_net")
+                    elif net_surface_tiles[candidate][out_pos] != d and not (
+                        out_pos in machine_input_pins
+                        and d in (DIRECTION_SOUTH, DIRECTION_NORTH, DIRECTION_EAST)
+                    ):
+                        turn_dir = net_surface_tiles[candidate][out_pos]
+                        if not is_fluid and turn_dir in DIR_STEPS and abs(turn_dir - d) % 8 == 4:
+                            tdx, tdy = DIR_STEPS[turn_dir]
+                            exit_tile = (round(out_pos[0] + dx, 2), round(out_pos[1] + dy, 2))
+                            corner_tile = (
+                                round(exit_tile[0] + tdx, 2),
+                                round(exit_tile[1] + tdy, 2),
+                            )
+                            next_in_net = (
+                                round(out_pos[0] + tdx, 2),
+                                round(out_pos[1] + tdy, 2),
+                            )
+                            next_in_net_dir = net_surface_tiles[candidate].get(next_in_net)
+                            if next_in_net_dir == d:
+                                target_corner_d = d
+                                bypass_tile = next_in_net
+                                downstream_ok = (
+                                    corner_tile in net_surface_tiles[candidate]
+                                    or corner_tile in valid_input_pins
+                                    or (
+                                        round(corner_tile[0] + dx, 2),
+                                        round(corner_tile[1] + dy, 2),
+                                    )
+                                    in net_surface_tiles[candidate]
                                 )
-                            continue
+                            else:
+                                target_corner_d = opp_d
+                                bypass_tile = None
+                                downstream_ok = next_in_net in net_surface_tiles[candidate]
 
-                        detour_penalty = (20 if turn_detour else 0) + (20 if in_detour else 0)
-                        penalty = (
-                            100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
-                        ) + detour_penalty
-                        score = conflicts_cleared * 50 - penalty - (bspan + fspan)
-                        jump_tuple = (
-                            in_pos,
-                            out_pos,
-                            bspan,
-                            fspan,
-                            d,
-                            is_fluid,
-                            in_detour,
-                            turn_detour,
+                            if (
+                                exit_tile not in occupied_positions
+                                and (
+                                    exit_tile not in pin_tiles
+                                    or (
+                                        exit_tile in valid_input_pins
+                                        and (
+                                            turn_dir == DIRECTION_EAST
+                                            or exit_tile in machine_input_pins
+                                        )
+                                    )
+                                )
+                                and exit_tile not in used_underground_endpoints
+                                and tile_to_nets.get(exit_tile, set()) <= {candidate}
+                                and corner_tile not in occupied_positions
+                                and (
+                                    corner_tile not in pin_tiles
+                                    or (
+                                        corner_tile in valid_input_pins
+                                        and (
+                                            target_corner_d == DIRECTION_EAST
+                                            or corner_tile in machine_input_pins
+                                        )
+                                    )
+                                )
+                                and corner_tile not in used_underground_endpoints
+                                and tile_to_nets.get(corner_tile, set()) <= {candidate}
+                                and downstream_ok
+                            ):
+                                turn_detour = (
+                                    exit_tile,
+                                    turn_dir,
+                                    corner_tile,
+                                    target_corner_d,
+                                    bypass_tile,
+                                )
+                            else:
+                                detour_reasons = []
+                                if exit_tile in occupied_positions:
+                                    detour_reasons.append(f"exit_occ({exit_tile})")
+                                if exit_tile in pin_tiles and not (
+                                    exit_tile in valid_input_pins
+                                    and (
+                                        turn_dir == DIRECTION_EAST
+                                        or exit_tile in machine_input_pins
+                                    )
+                                ):
+                                    detour_reasons.append(f"exit_pin({exit_tile})")
+                                if exit_tile in used_underground_endpoints:
+                                    detour_reasons.append(f"exit_ug({exit_tile})")
+                                if not (tile_to_nets.get(exit_tile, set()) <= {candidate}):
+                                    detour_reasons.append(
+                                        f"exit_net({tile_to_nets.get(exit_tile)})"
+                                    )
+                                if corner_tile in occupied_positions:
+                                    detour_reasons.append(f"corner_occ({corner_tile})")
+                                if corner_tile in pin_tiles and not (
+                                    corner_tile in valid_input_pins
+                                    and (
+                                        target_corner_d == DIRECTION_EAST
+                                        or corner_tile in machine_input_pins
+                                    )
+                                ):
+                                    detour_reasons.append(f"corner_pin({corner_tile})")
+                                if corner_tile in used_underground_endpoints:
+                                    detour_reasons.append(f"corner_ug({corner_tile})")
+                                if not (tile_to_nets.get(corner_tile, set()) <= {candidate}):
+                                    detour_reasons.append(
+                                        f"corner_net({tile_to_nets.get(corner_tile)})"
+                                    )
+                                if not downstream_ok:
+                                    detour_reasons.append("downstream_not_ok")
+                                fail_out.append(f"detour_fail:{','.join(detour_reasons)}")
+                        else:
+                            fail_out.append(
+                                f"out_dir_mismatch({net_surface_tiles[candidate][out_pos]}!={d})"
+                            )
+                    if len(tile_to_nets.get(out_pos, set())) > 1:
+                        fail_out.append("out_has_conflict")
+                    if out_pos in used_underground_endpoints:
+                        fail_out.append("out_used_endpoint")
+                    if out_pos in used_underground_spans_h or out_pos in used_underground_spans_v:
+                        fail_out.append("out_underground_span")
+                    allowed_in = valid_fluid_input_pins if is_fluid else valid_input_pins
+                    if out_pos in pin_tiles:
+                        allowed = out_pos in allowed_in and (
+                            d == DIRECTION_EAST
+                            or (
+                                out_pos in machine_input_pins
+                                and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
+                            )
                         )
-                        options.append((score, candidate, jump_tuple))
+                        if not allowed:
+                            fail_out.append("out_in_pin_tiles")
+                    if out_pos in occupied_positions:
+                        fail_out.append("out_in_occupied")
+                    if splitter_feeds.get(out_pos):
+                        fail_out.append("feed_into_exit_hood")
+                    for s_dir in side_dirs:
+                        sdx, sdy = DIR_STEPS[s_dir]
+                        nb_pos = (round(out_pos[0] - sdx, 2), round(out_pos[1] - sdy, 2))
+                        nb_nets = tile_to_nets.get(nb_pos)
+                        if nb_nets and any(
+                            net_surface_tiles[c_net].get(nb_pos) == s_dir
+                            for c_net in nb_nets
+                            if c_net != candidate
+                        ):
+                            fail_out.append("perpendicular_belt_feed")
+                            break
+                    rdx, rdy = DIR_STEPS[d]
+                    rear_pos = (round(out_pos[0] - rdx, 2), round(out_pos[1] - rdy, 2))
+                    rear_nets = tile_to_nets.get(rear_pos)
+                    if rear_nets and any(
+                        net_surface_tiles[c_net].get(rear_pos) == d
+                        for c_net in rear_nets
+                        if c_net != candidate
+                    ):
+                        fail_out.append("rear_belt_feed")
+                    if (
+                        turn_detour is None
+                        and out_pos not in pin_tiles
+                        and next_pos not in net_surface_tiles[candidate]
+                    ):
+                        fail_out.append("out_next_not_in_net")
+                    if turn_detour is None and used_underground_endpoints.get(next_pos) == opp_d:
+                        fail_out.append("out_opp_next")
+                    if fail_out:
+                        if debug_trace is not None:
+                            debug_trace.setdefault(pos, []).append(
+                                {
+                                    "candidate": candidate,
+                                    "dir": d,
+                                    "bspan": bspan,
+                                    "fspan": fspan,
+                                    "in_pos": in_pos,
+                                    "out_pos": out_pos,
+                                    "fail_in": [],
+                                    "fail_out": list(fail_out),
+                                    "valid_span": False,
+                                    "invalid_reasons": [],
+                                }
+                            )
+                        continue
+
+                    valid_span = True
+                    conflicts_cleared = 0
+                    invalid_reasons = []
+                    is_horiz = d in (DIRECTION_EAST, DIRECTION_WEST)
+                    for s in range(-bspan + 1, fspan):
+                        it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+                        if (
+                            it in net_surface_tiles[candidate]
+                            and net_surface_tiles[candidate][it] != d
+                        ):
+                            valid_span = False
+                            invalid_reasons.append(f"it_dir_mismatch({it})")
+                            break
+                        if it in occupied_positions:
+                            valid_span = False
+                            invalid_reasons.append(f"it_occupied({it})")
+                            break
+                        if it in used_underground_endpoints:
+                            valid_span = False
+                            invalid_reasons.append(f"it_used_endpoint({it})")
+                            break
+                        if is_horiz and it in used_underground_spans_h:
+                            valid_span = False
+                            invalid_reasons.append(f"it_used_span_h({it})")
+                            break
+                        if not is_horiz and it in used_underground_spans_v:
+                            valid_span = False
+                            invalid_reasons.append(f"it_used_span_v({it})")
+                            break
+                        if len(tile_to_nets.get(it, set())) > 1 or it in adjacent_fluid_conflicts:
+                            conflicts_cleared += 1
+                    if not valid_span:
                         if debug_trace is not None:
                             debug_trace.setdefault(pos, []).append(
                                 {
@@ -1187,89 +1170,168 @@ def route_and_resolve_jumpers(
                                     "out_pos": out_pos,
                                     "fail_in": [],
                                     "fail_out": [],
-                                    "valid_span": True,
-                                    "invalid_reasons": [],
-                                    "score": score,
+                                    "valid_span": False,
+                                    "invalid_reasons": list(invalid_reasons),
                                 }
                             )
+                        continue
 
-            if options:
-                conflict_options[pos] = options
+                    detour_penalty = (20 if turn_detour else 0) + (20 if in_detour else 0)
+                    penalty = (
+                        100 if len(tile_to_nets.get(next_pos, set())) > 1 else 0
+                    ) + detour_penalty
+                    score = conflicts_cleared * 50 - penalty - (bspan + fspan)
+                    jump_tuple = (
+                        in_pos,
+                        out_pos,
+                        bspan,
+                        fspan,
+                        d,
+                        is_fluid,
+                        in_detour,
+                        turn_detour,
+                    )
+                    options.append((score, candidate, jump_tuple))
+                    if debug_trace is not None:
+                        debug_trace.setdefault(pos, []).append(
+                            {
+                                "candidate": candidate,
+                                "dir": d,
+                                "bspan": bspan,
+                                "fspan": fspan,
+                                "in_pos": in_pos,
+                                "out_pos": out_pos,
+                                "fail_in": [],
+                                "fail_out": [],
+                                "valid_span": True,
+                                "invalid_reasons": [],
+                                "score": score,
+                            }
+                        )
 
-        if conflict_options:
-            multi_options = [
-                (opt[0], p, opt[1], opt[2])
-                for p in conflict_options
-                for opt in conflict_options[p]
-                if opt[0] >= 80
-            ]
-            if multi_options:
-                _, best_pos, best_candidate, best_jump = max(multi_options, key=lambda x: x[0])
-            else:
-                for p in conflicts:
-                    if p in conflict_options:
-                        best_pos = p
-                        _, best_candidate, best_jump = max(conflict_options[p], key=lambda x: x[0])
-                        break
+        return options
 
-            cx, cy = best_pos
+    cached_options: dict[tuple[float, float], list[tuple[float, str, Any]]] = {}
 
-            in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour = best_jump
-            dx, dy = DIR_STEPS[d]
-            used_underground_endpoints[in_pos] = d
-            used_underground_endpoints[out_pos] = d
-            jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
-            if debug_trace is not None:
-                debug_trace.setdefault(best_pos, []).append(
-                    {
-                        "action": "jump_committed",
-                        "candidate": best_candidate,
-                        "in_pos": in_pos,
-                        "out_pos": out_pos,
-                        "dir": d,
-                        "bspan": bspan,
-                        "fspan": fspan,
-                        "turn_detour": turn_detour is not None,
-                        "in_detour": in_detour is not None,
-                    }
-                )
-            span_set = (
-                used_underground_spans_h
-                if d in (DIRECTION_EAST, DIRECTION_WEST)
-                else used_underground_spans_v
-            )
-            for s in range(-bspan + 1, fspan):
-                it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
-                span_set.add(it)
-                if it in net_surface_tiles[best_candidate]:
-                    del net_surface_tiles[best_candidate][it]
-                if best_candidate in tile_to_nets[it]:
-                    tile_to_nets[it].remove(best_candidate)
-            if turn_detour:
-                exit_tile, exit_d, corner_tile, corner_d, bypass_tile = turn_detour
-                if out_pos in net_surface_tiles[best_candidate]:
-                    del net_surface_tiles[best_candidate][out_pos]
-                if best_candidate in tile_to_nets[out_pos]:
-                    tile_to_nets[out_pos].remove(best_candidate)
-                if bypass_tile:
-                    if bypass_tile in net_surface_tiles[best_candidate]:
-                        del net_surface_tiles[best_candidate][bypass_tile]
-                    if best_candidate in tile_to_nets[bypass_tile]:
-                        tile_to_nets[bypass_tile].remove(best_candidate)
-                net_surface_tiles[best_candidate][exit_tile] = exit_d
-                tile_to_nets[exit_tile].add(best_candidate)
-                net_surface_tiles[best_candidate][corner_tile] = corner_d
-                tile_to_nets[corner_tile].add(best_candidate)
-            if in_detour:
-                n_pos, n_dir, corner_in, corner_d, entry_tile, entry_d = in_detour
-                net_surface_tiles[best_candidate][n_pos] = n_dir
-                net_surface_tiles[best_candidate][corner_in] = corner_d
-                tile_to_nets[corner_in].add(best_candidate)
-                net_surface_tiles[best_candidate][entry_tile] = entry_d
-                tile_to_nets[entry_tile].add(best_candidate)
-            resolved_any = True
-        if not resolved_any:
+    while True:
+        active_conflicts = multi_net_conflicts | adjacent_fluid_conflicts
+        if not active_conflicts:
             break
+
+        # Remove stale entries from cached_options for positions that are no longer conflicts
+        for p in list(cached_options.keys()):
+            if p not in active_conflicts:
+                del cached_options[p]
+
+        # Evaluate options for conflicts not yet cached
+        for p in sorted(active_conflicts):
+            if p not in cached_options:
+                cached_options[p] = evaluate_options(p)
+
+        available_options = {p: opts for p, opts in cached_options.items() if opts}
+        if not available_options:
+            break
+
+        multi_options = [
+            (opt[0], p, opt[1], opt[2])
+            for p in sorted(available_options.keys())
+            for opt in available_options[p]
+            if opt[0] >= 80
+        ]
+        if multi_options:
+            _, best_pos, best_candidate, best_jump = max(multi_options, key=lambda x: x[0])
+        else:
+            best_pos = None
+            for p in sorted(active_conflicts):
+                if p in available_options:
+                    best_pos = p
+                    _, best_candidate, best_jump = max(available_options[p], key=lambda x: x[0])
+                    break
+            if best_pos is None:
+                break
+
+        cx, cy = best_pos
+        in_pos, out_pos, bspan, fspan, d, is_fluid, in_detour, turn_detour = best_jump
+        dx, dy = DIR_STEPS[d]
+        used_underground_endpoints[in_pos] = d
+        used_underground_endpoints[out_pos] = d
+        jumpers.append((best_candidate, in_pos, out_pos, d, is_fluid))
+        if debug_trace is not None:
+            debug_trace.setdefault(best_pos, []).append(
+                {
+                    "action": "jump_committed",
+                    "candidate": best_candidate,
+                    "in_pos": in_pos,
+                    "out_pos": out_pos,
+                    "dir": d,
+                    "bspan": bspan,
+                    "fspan": fspan,
+                    "turn_detour": turn_detour is not None,
+                    "in_detour": in_detour is not None,
+                }
+            )
+        span_set = (
+            used_underground_spans_h
+            if d in (DIRECTION_EAST, DIRECTION_WEST)
+            else used_underground_spans_v
+        )
+
+        touched_tiles: set[tuple[float, float]] = {in_pos, out_pos}
+
+        for s in range(-bspan + 1, fspan):
+            it = (round(cx + dx * s, 2), round(cy + dy * s, 2))
+            span_set.add(it)
+            touched_tiles.add(it)
+            if it in net_surface_tiles[best_candidate]:
+                del net_surface_tiles[best_candidate][it]
+            if best_candidate in tile_to_nets.get(it, set()):
+                tile_to_nets[it].remove(best_candidate)
+                if not tile_to_nets[it]:
+                    del tile_to_nets[it]
+                update_tile_conflict(it)
+
+        if turn_detour:
+            exit_tile, exit_d, corner_tile, corner_d, bypass_tile = turn_detour
+            touched_tiles.update({exit_tile, corner_tile, out_pos})
+            if out_pos in net_surface_tiles[best_candidate]:
+                del net_surface_tiles[best_candidate][out_pos]
+            if best_candidate in tile_to_nets.get(out_pos, set()):
+                tile_to_nets[out_pos].remove(best_candidate)
+                if not tile_to_nets[out_pos]:
+                    del tile_to_nets[out_pos]
+                update_tile_conflict(out_pos)
+            if bypass_tile:
+                touched_tiles.add(bypass_tile)
+                if bypass_tile in net_surface_tiles[best_candidate]:
+                    del net_surface_tiles[best_candidate][bypass_tile]
+                if best_candidate in tile_to_nets.get(bypass_tile, set()):
+                    tile_to_nets[bypass_tile].remove(best_candidate)
+                    if not tile_to_nets[bypass_tile]:
+                        del tile_to_nets[bypass_tile]
+                    update_tile_conflict(bypass_tile)
+            net_surface_tiles[best_candidate][exit_tile] = exit_d
+            tile_to_nets[exit_tile].add(best_candidate)
+            update_tile_conflict(exit_tile)
+            net_surface_tiles[best_candidate][corner_tile] = corner_d
+            tile_to_nets[corner_tile].add(best_candidate)
+            update_tile_conflict(corner_tile)
+
+        if in_detour:
+            n_pos, n_dir, corner_in, corner_d, entry_tile, entry_d = in_detour
+            touched_tiles.update({n_pos, corner_in, entry_tile})
+            net_surface_tiles[best_candidate][n_pos] = n_dir
+            net_surface_tiles[best_candidate][corner_in] = corner_d
+            tile_to_nets[corner_in].add(best_candidate)
+            update_tile_conflict(corner_in)
+            net_surface_tiles[best_candidate][entry_tile] = entry_d
+            tile_to_nets[entry_tile].add(best_candidate)
+            update_tile_conflict(entry_tile)
+
+        # Invalidate cached options within Manhattan distance 13 of any touched tile
+        for p in list(cached_options.keys()):
+            px, py = p
+            if any(abs(px - tx) + abs(py - ty) <= 13 for tx, ty in touched_tiles):
+                del cached_options[p]
 
     for _candidate, in_pos, out_pos, d, is_fluid in jumpers:
         span = round(abs(out_pos[0] - in_pos[0]) + abs(out_pos[1] - in_pos[1]))
@@ -1410,8 +1472,7 @@ def route_and_resolve_jumpers(
         ):
             grid_entities[pos]["direction"] = DIRECTION_EAST
 
-    grid_ents = {(round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities}
-    for pos, ent in grid_ents.items():
+    for pos, ent in list(grid_entities.items()):
         if "transport-belt" not in ent.get("name", ""):
             continue
         d = ent.get("direction", 0)
@@ -1419,17 +1480,17 @@ def route_and_resolve_jumpers(
             continue
         dx, dy = DIR_STEPS[d]
         tpos = (round(pos[0] + dx, 2), round(pos[1] + dy, 2))
-        if tpos in grid_ents:
-            target = grid_ents[tpos]
+        if tpos in grid_entities:
+            target = grid_entities[tpos]
             if "transport-belt" in target.get("name", ""):
                 td = target.get("direction", 0)
                 diff = abs(td - d) % 16
                 if diff in (4, 12):
                     tdx, tdy = DIR_STEPS.get(td, (0, 0))
                     behind_pos = (round(tpos[0] - tdx, 2), round(tpos[1] - tdy, 2))
-                    if behind_pos in grid_ents and "transport-belt" in grid_ents[behind_pos].get(
-                        "name", ""
-                    ):
+                    if behind_pos in grid_entities and "transport-belt" in grid_entities[
+                        behind_pos
+                    ].get("name", ""):
                         from_nets = tile_to_nets.get(pos, set())
                         target_nets = tile_to_nets.get(tpos, set())
                         from_mats = {n.split("__")[0] for n in from_nets}

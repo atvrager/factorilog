@@ -18,6 +18,7 @@ from foundry.def_parser import parse_def
 from foundry.def_untangle import (
     fix_reverse_splitter_inputs,
     relocate_blocked_splitter_inputs,
+    separate_overlapping_channel_routes,
     straighten_collinear_routes,
     untangle_interlocking_corners,
     untangle_merger_inputs,
@@ -117,6 +118,7 @@ def run_diagnostics(
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
+    separate_overlapping_channel_routes(def_data)
     # untangle_machine_inputs(def_data, netlist_data)
 
     # 2. Placement
@@ -155,6 +157,8 @@ def run_diagnostics(
         input_pins=drc_in_pins,
         output_pins=drc_out_pins,
         unresolved_crossings=unresolved_conflicts,
+        tile_to_nets=routes.tile_to_nets,
+        fluids=placement.fluids,
     )
 
     print("================================================================================")

@@ -21,6 +21,7 @@ try:
     from foundry.def_untangle import (
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
+        separate_overlapping_channel_routes,
         straighten_collinear_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
@@ -50,6 +51,7 @@ except ImportError:
     from def_untangle import (
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
+        separate_overlapping_channel_routes,
         straighten_collinear_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
@@ -109,6 +111,7 @@ def build_entities(
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
+    separate_overlapping_channel_routes(def_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 
@@ -181,6 +184,8 @@ def build_entities(
         output_pins=drc_out_pins,
         unresolved_crossings=remaining_conflicts,
         wires=wires,
+        tile_to_nets=routes.tile_to_nets,
+        fluids=placement.fluids,
     )
     if violations:
         for v in violations:

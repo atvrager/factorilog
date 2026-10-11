@@ -265,11 +265,19 @@ factorilog_science_factory(
 
 factorilog_science_factory(
     name = "chemical_science",
-    block_fill = "0.05",
-    cell_pad_sites = 7,
-    core_margin = 6,
+    block_fill = "0.005",
+    cell_pad_sites = 12,
+    channel_h = 48,
+    core_margin = 12,
     demand = "chemical-science-pack 60.0",
-    density = "0.08",
+    density = "0.01",
+    do_untangle = True,
+    layer_adjustment = "",
+    routability_driven = True,
+    split_pad_sites = 8,
+    strict_drc = False,
+    synthesize_splitters = True,
+    use_row_placement = True,
     tags = [
         "manual",
         "science",
