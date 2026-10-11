@@ -127,6 +127,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--net", "-n", type=str, help="Net name to trace")
     parser.add_argument("--component", "-c", type=str, help="Component name to inspect")
     parser.add_argument("--tile", "-t", type=str, help="Tile coordinate as X,Y")
+    parser.add_argument("--unrouted", action="store_true", help="List all unrouted nets in the DEF")
     parser.add_argument("--list-nets", action="store_true", help="List all net names in the DEF")
     parser.add_argument(
         "--list-components", action="store_true", help="List all components in the DEF"
@@ -157,6 +158,14 @@ def run_inspect(argv: list[str] | None = None) -> int:
     scale = 1.0 / float(def_data.get("units", 1000))
     nets = def_data.get("nets", [])
     components = def_data.get("components", [])
+
+    if args.unrouted:
+        unrouted = [n for n in nets if not n.get("wires")]
+        print(f"Unrouted nets in {def_path.name} ({len(unrouted)} total):")
+        for net in unrouted:
+            conns = ", ".join(f"{inst}.{pin}" for inst, pin in net.get("connections", []))
+            print(f"  {net.get('name'):35s} ({conns})")
+        return 0
 
     if args.list_nets:
         print(f"Nets in {def_path.name} ({len(nets)} total):")

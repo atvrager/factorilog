@@ -89,7 +89,7 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
     """
     scale = 1.0 / float(def_data.get("units", 1000))
     for c in def_data.get("components", []):
-        if c.get("macro") != "belt_split2":
+        if c.get("macro") not in ("belt_split2", "belt_balancer2"):
             continue
         name = c.get("name", "")
         gx = c.get("x", 0) * scale
@@ -311,18 +311,299 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
         if not m2_1 or not m2_2:
             continue
         other_y1 = m2_1["y2"] if m2_1["y1"] == end1[1] else m2_1["y1"]
-        dy1 = "N" if other_y1 < end1[1] else "S"
         other_y2 = m2_2["y2"] if m2_2["y1"] == end2[1] else m2_2["y1"]
-        dy2 = "N" if other_y2 < end2[1] else "S"
-
-        cross = (
-            (dy1 == "S" and dy2 == "N")
-            or (dy1 == "N" and dy2 == "N" and end2[0] < end1[0])
-            or (dy1 == "S" and dy2 == "S" and end1[0] < end2[0])
+        dy1 = "N" if other_y1 > end1[1] else "S"
+        dy2 = "N" if other_y2 > end2[1] else "S"
+        cross_pin = (
+            (dy1 == "N" and dy2 == "S")
+            or (dy1 == "N" and dy2 == "N" and end1[0] < end2[0])
+            or (dy1 == "S" and dy2 == "S" and end2[0] < end1[0])
         )
 
-        if not cross:
+        next_m1_1 = next(
+            (
+                w
+                for w in n_y1.get("wires", [])
+                if w.get("layer") == "M1"
+                and w["y1"] == other_y1
+                and (w["x1"] == end1[0] or w["x2"] == end1[0])
+                and w is not w1
+            ),
+            None,
+        )
+        next_m1_2 = next(
+            (
+                w
+                for w in n_y2.get("wires", [])
+                if w.get("layer") == "M1"
+                and w["y1"] == other_y2
+                and (w["x1"] == end2[0] or w["x2"] == end2[0])
+                and w is not w2
+            ),
+            None,
+        )
+
+        swap_trunks = False
+        dir_x1 = ""
+        dir_x2 = ""
+        if next_m1_1 and next_m1_2:
+            dir_x1 = (
+                "E"
+                if (next_m1_1["x2"] if next_m1_1["x1"] == end1[0] else next_m1_1["x1"]) > end1[0]
+                else "W"
+            )
+            dir_x2 = (
+                "E"
+                if (next_m1_2["x2"] if next_m1_2["x1"] == end2[0] else next_m1_2["x1"]) > end2[0]
+                else "W"
+            )
+            if (
+                (dir_x1 == "W" and dir_x2 == "E" and end1[0] > end2[0])
+                or (dir_x1 == "E" and dir_x2 == "W" and end1[0] < end2[0])
+                or (
+                    dir_x1 == "E"
+                    and dir_x2 == "E"
+                    and (
+                        (dy1 == "S" and dy2 == "S" and other_y1 > other_y2 and end1[0] < end2[0])
+                        or (dy1 == "S" and dy2 == "S" and other_y2 > other_y1 and end2[0] < end1[0])
+                        or (dy1 == "N" and dy2 == "N" and other_y1 < other_y2 and end1[0] < end2[0])
+                        or (dy1 == "N" and dy2 == "N" and other_y2 < other_y1 and end2[0] < end1[0])
+                    )
+                )
+                or (
+                    dir_x1 == "W"
+                    and dir_x2 == "W"
+                    and (
+                        (dy1 == "S" and dy2 == "S" and other_y1 > other_y2 and end1[0] > end2[0])
+                        or (dy1 == "S" and dy2 == "S" and other_y2 > other_y1 and end2[0] > end1[0])
+                        or (dy1 == "N" and dy2 == "N" and other_y1 < other_y2 and end1[0] > end2[0])
+                        or (dy1 == "N" and dy2 == "N" and other_y2 < other_y1 and end2[0] > end1[0])
+                    )
+                )
+            ):
+                swap_trunks = True
+
+        if not cross_pin and not swap_trunks:
             continue
+
+        if swap_trunks and next_m1_1 and next_m1_2:
+            x_inner = min(end1[0], end2[0])
+            x_outer = max(end1[0], end2[0])
+            if dir_x1 == "W" and dir_x2 == "E":
+                net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                    n_y1,
+                    end1[0],
+                    other_y1,
+                    w1,
+                    m2_1,
+                    next_m1_1,
+                )
+                net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                    n_y2,
+                    end2[0],
+                    other_y2,
+                    w2,
+                    m2_2,
+                    next_m1_2,
+                )
+            elif dir_x1 == "E" and dir_x2 == "W":
+                net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                    n_y2,
+                    end2[0],
+                    other_y2,
+                    w2,
+                    m2_2,
+                    next_m1_2,
+                )
+                net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                    n_y1,
+                    end1[0],
+                    other_y1,
+                    w1,
+                    m2_1,
+                    next_m1_1,
+                )
+            elif dir_x1 == "E" and dir_x2 == "E":
+                if (dy1 == "S" and other_y1 > other_y2) or (dy1 == "N" and other_y1 < other_y2):
+                    net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                        n_y1,
+                        end1[0],
+                        other_y1,
+                        w1,
+                        m2_1,
+                        next_m1_1,
+                    )
+                    net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                        n_y2,
+                        end2[0],
+                        other_y2,
+                        w2,
+                        m2_2,
+                        next_m1_2,
+                    )
+                else:
+                    net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                        n_y1,
+                        end1[0],
+                        other_y1,
+                        w1,
+                        m2_1,
+                        next_m1_1,
+                    )
+                    net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                        n_y2,
+                        end2[0],
+                        other_y2,
+                        w2,
+                        m2_2,
+                        next_m1_2,
+                    )
+            else:
+                if (dy1 == "S" and other_y1 > other_y2) or (dy1 == "N" and other_y1 < other_y2):
+                    net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                        n_y1,
+                        end1[0],
+                        other_y1,
+                        w1,
+                        m2_1,
+                        next_m1_1,
+                    )
+                    net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                        n_y2,
+                        end2[0],
+                        other_y2,
+                        w2,
+                        m2_2,
+                        next_m1_2,
+                    )
+                else:
+                    net_out, old_x_out, other_y_out, w_pin_out, m2_out, next_m1_out = (
+                        n_y1,
+                        end1[0],
+                        other_y1,
+                        w1,
+                        m2_1,
+                        next_m1_1,
+                    )
+                    net_in, old_x_in, other_y_in, w_pin_in, m2_in, next_m1_in = (
+                        n_y2,
+                        end2[0],
+                        other_y2,
+                        w2,
+                        m2_2,
+                        next_m1_2,
+                    )
+
+            if dy1 == "N":
+                py_in, pin_name_in = py2, "y2"
+                py_out, pin_name_out = py1, "y1"
+            else:
+                py_in, pin_name_in = py1, "y1"
+                py_out, pin_name_out = py2, "y2"
+
+            blocked = False
+            for other_net in def_data.get("nets", []):
+                if other_net is n_y1 or other_net is n_y2:
+                    continue
+                for ow in other_net.get("wires", []):
+                    layer = ow.get("layer")
+                    if layer == "M1":
+                        if (
+                            ow["y1"] == py1[1]
+                            and ow["y2"] == py1[1]
+                            and not (
+                                max(ow["x1"], ow["x2"]) < py1[0]
+                                or min(ow["x1"], ow["x2"]) > x_outer
+                            )
+                        ):
+                            blocked = True
+                            break
+                        if (
+                            ow["y1"] == py2[1]
+                            and ow["y2"] == py2[1]
+                            and not (
+                                max(ow["x1"], ow["x2"]) < py2[0]
+                                or min(ow["x1"], ow["x2"]) > x_outer
+                            )
+                        ):
+                            blocked = True
+                            break
+                    elif layer == "M2":
+                        if ow["x1"] == x_inner and ow["x2"] == x_inner:
+                            y_min = min(py_in[1], other_y_in)
+                            y_max = max(py_in[1], other_y_in)
+                            if not (
+                                max(ow["y1"], ow["y2"]) < y_min or min(ow["y1"], ow["y2"]) > y_max
+                            ):
+                                blocked = True
+                                break
+                        if ow["x1"] == x_outer and ow["x2"] == x_outer:
+                            y_min = min(py_out[1], other_y_out)
+                            y_max = max(py_out[1], other_y_out)
+                            if not (
+                                max(ow["y1"], ow["y2"]) < y_min or min(ow["y1"], ow["y2"]) > y_max
+                            ):
+                                blocked = True
+                                break
+                if blocked:
+                    break
+            if not blocked:
+                if w_pin_in["x1"] == py_in[0]:
+                    w_pin_in["x2"] = x_inner
+                else:
+                    w_pin_in["x1"] = x_inner
+                w_pin_in["y1"] = py_in[1]
+                w_pin_in["y2"] = py_in[1]
+
+                m2_in["x1"] = x_inner
+                m2_in["x2"] = x_inner
+                if m2_in["y1"] == other_y_in:
+                    m2_in["y2"] = py_in[1]
+                else:
+                    m2_in["y1"] = py_in[1]
+
+                if next_m1_in["x1"] == old_x_in:
+                    next_m1_in["x1"] = x_inner
+                else:
+                    next_m1_in["x2"] = x_inner
+
+                conns_in = [conn for conn in net_in.get("connections", []) if conn[0] != name]
+                net_in["connections"] = [(name, pin_name_in), *conns_in]
+
+                for v in net_in.get("vias", []):
+                    if v.get("x") == old_x_in:
+                        v["x"] = x_inner
+                    if v.get("y") in (py1[1], py2[1]):
+                        v["y"] = py_in[1]
+
+                if w_pin_out["x1"] == py_out[0]:
+                    w_pin_out["x2"] = x_outer
+                else:
+                    w_pin_out["x1"] = x_outer
+                w_pin_out["y1"] = py_out[1]
+                w_pin_out["y2"] = py_out[1]
+
+                m2_out["x1"] = x_outer
+                m2_out["x2"] = x_outer
+                if m2_out["y1"] == other_y_out:
+                    m2_out["y2"] = py_out[1]
+                else:
+                    m2_out["y1"] = py_out[1]
+
+                if next_m1_out["x1"] == old_x_out:
+                    next_m1_out["x1"] = x_outer
+                else:
+                    next_m1_out["x2"] = x_outer
+
+                conns_out = [conn for conn in net_out.get("connections", []) if conn[0] != name]
+                net_out["connections"] = [(name, pin_name_out), *conns_out]
+
+                for v in net_out.get("vias", []):
+                    if v.get("x") == old_x_out:
+                        v["x"] = x_outer
+                    if v.get("y") in (py1[1], py2[1]):
+                        v["y"] = py_out[1]
+                continue
 
         x_min_1 = min(py1[0], end2[0])
         x_max_1 = max(py1[0], end2[0])
@@ -344,7 +625,7 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                         ow["y1"] == py1[1]
                         and ow["y2"] == py1[1]
                         and not (
-                            max(ow["x1"], ow["x2"]) <= x_min_1 or min(ow["x1"], ow["x2"]) >= x_max_1
+                            max(ow["x1"], ow["x2"]) < x_min_1 or min(ow["x1"], ow["x2"]) > x_max_1
                         )
                     ):
                         blocked = True
@@ -353,7 +634,7 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                         ow["y1"] == py2[1]
                         and ow["y2"] == py2[1]
                         and not (
-                            max(ow["x1"], ow["x2"]) <= x_min_2 or min(ow["x1"], ow["x2"]) >= x_max_2
+                            max(ow["x1"], ow["x2"]) < x_min_2 or min(ow["x1"], ow["x2"]) > x_max_2
                         )
                     ):
                         blocked = True
@@ -363,7 +644,7 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                         ow["x1"] == end1[0]
                         and ow["x2"] == end1[0]
                         and not (
-                            max(ow["y1"], ow["y2"]) <= y_min_1 or min(ow["y1"], ow["y2"]) >= y_max_1
+                            max(ow["y1"], ow["y2"]) < y_min_1 or min(ow["y1"], ow["y2"]) > y_max_1
                         )
                     ):
                         blocked = True
@@ -372,7 +653,7 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                         ow["x1"] == end2[0]
                         and ow["x2"] == end2[0]
                         and not (
-                            max(ow["y1"], ow["y2"]) <= y_min_2 or min(ow["y1"], ow["y2"]) >= y_max_2
+                            max(ow["y1"], ow["y2"]) < y_min_2 or min(ow["y1"], ow["y2"]) > y_max_2
                         )
                     ):
                         blocked = True
@@ -458,8 +739,11 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
     """
     scale = 1.0 / float(def_data.get("units", 1000))
     for c in def_data.get("components", []):
-        if c.get("macro") != "belt_merge2":
+        macro = c.get("macro", "")
+        if macro not in ("belt_merge2", "belt_balancer2"):
             continue
+        pin_a_name = "a1" if macro == "belt_balancer2" else "a"
+        pin_b_name = "a2" if macro == "belt_balancer2" else "b"
         name = c.get("name", "")
         gx = c.get("x", 0) * scale
         gy = c.get("y", 0) * scale
@@ -467,11 +751,11 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         n_b = None
         for n in def_data.get("nets", []):
             for inst, pin in n.get("connections", []):
-                if inst == name and pin == "a":
+                if inst == name and pin == pin_a_name:
                     n_a = n
-                elif inst == name and pin == "b":
+                elif inst == name and pin == pin_b_name:
                     n_b = n
-        if not n_a or not n_b or n_a == n_b:
+        if not n_a or not n_b or n_a is n_b:
             continue
         pa = (round((gx + 0.25) * 1000), round((gy + 0.5) * 1000))
         pb = (round((gx + 0.25) * 1000), round((gy + 1.5) * 1000))
@@ -532,15 +816,56 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         if not m2_a or not m2_b:
             continue
         other_ya = m2_a["y2"] if m2_a["y1"] == enda[1] else m2_a["y1"]
-        dy_a = "N" if other_ya < enda[1] else "S"
+        dy_a = "N" if other_ya > enda[1] else "S"
         other_yb = m2_b["y2"] if m2_b["y1"] == endb[1] else m2_b["y1"]
-        dy_b = "N" if other_yb < endb[1] else "S"
+        dy_b = "N" if other_yb > endb[1] else "S"
 
-        cross = (
-            (dy_a == "S" and dy_b == "N")
-            or (dy_a == "N" and dy_b == "N" and enda[0] < endb[0])
-            or (dy_a == "S" and dy_b == "S" and enda[0] > endb[0])
+        cross = dy_a == "N" and dy_b == "S"
+        if (
+            dy_a == "N" and dy_b == "N" and (min(endb[0], pb[0]) < enda[0] < max(endb[0], pb[0]))
+        ) or (
+            dy_a == "S" and dy_b == "S" and (min(enda[0], pa[0]) < endb[0] < max(enda[0], pa[0]))
+        ):
+            cross = True
+
+        m1_app_a = next(
+            (
+                w
+                for w in n_a.get("wires", [])
+                if w.get("layer") == "M1"
+                and w["y1"] == other_ya
+                and (w["x1"] == enda[0] or w["x2"] == enda[0])
+                and w is not wa
+            ),
+            None,
         )
+        m1_app_b = next(
+            (
+                w
+                for w in n_b.get("wires", [])
+                if w.get("layer") == "M1"
+                and w["y1"] == other_yb
+                and (w["x1"] == endb[0] or w["x2"] == endb[0])
+                and w is not wb
+            ),
+            None,
+        )
+        if (
+            m1_app_a
+            and (min(other_yb, pb[1]) <= other_ya <= max(other_yb, pb[1]))
+            and (
+                min(m1_app_a["x1"], m1_app_a["x2"]) < endb[0] < max(m1_app_a["x1"], m1_app_a["x2"])
+            )
+        ):
+            cross = True
+        if (
+            m1_app_b
+            and (min(other_ya, pa[1]) <= other_yb <= max(other_ya, pa[1]))
+            and (
+                min(m1_app_b["x1"], m1_app_b["x2"]) < enda[0] < max(m1_app_b["x1"], m1_app_b["x2"])
+            )
+        ):
+            cross = True
 
         if not cross:
             continue
@@ -628,8 +953,8 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
 
         conns_a = [conn for conn in n_a.get("connections", []) if conn[0] != name]
         conns_b = [conn for conn in n_b.get("connections", []) if conn[0] != name]
-        n_a["connections"] = [(name, "a"), *conns_b]
-        n_b["connections"] = [(name, "b"), *conns_a]
+        n_a["connections"] = [(name, pin_a_name), *conns_b]
+        n_b["connections"] = [(name, pin_b_name), *conns_a]
 
 
 def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
@@ -759,6 +1084,62 @@ def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
                 for v in n_b.get("vias", []):
                     if v.get("x") == x_track and v.get("y") == pb[1]:
                         v["y"] = pa[1]
+        elif other_ya > enda[1] and other_yb > endb[1] and other_ya > other_yb:
+            x_shift = x_track - units
+            w_arr_b = next(
+                (
+                    w
+                    for w in n_b.get("wires", [])
+                    if w.get("layer") == "M1"
+                    and w["y1"] == other_yb
+                    and (w["x1"] == x_track or w["x2"] == x_track)
+                ),
+                None,
+            )
+            if w_arr_b:
+                if w_arr_b["x1"] == x_track:
+                    w_arr_b["x1"] = x_shift
+                else:
+                    w_arr_b["x2"] = x_shift
+                m2_b["x1"] = x_shift
+                m2_b["x2"] = x_shift
+                if m2_b["y1"] == other_yb:
+                    m2_b["y2"] = pa[1]
+                else:
+                    m2_b["y1"] = pa[1]
+                wb["x1"] = x_shift
+                wb["x2"] = pa[0]
+                wb["y1"] = pa[1]
+                wb["y2"] = pa[1]
+                m2_a["x1"] = x_track
+                m2_a["x2"] = x_track
+                if m2_a["y1"] == other_ya:
+                    m2_a["y2"] = pb[1]
+                else:
+                    m2_a["y1"] = pb[1]
+                wa["x1"] = x_track
+                wa["x2"] = pb[0]
+                wa["y1"] = pb[1]
+                wa["y2"] = pb[1]
+                conns_a = [
+                    (inst, "b" if inst == cname and p == "a" else p)
+                    for inst, p in n_a["connections"]
+                ]
+                conns_b = [
+                    (inst, "a" if inst == cname and p == "b" else p)
+                    for inst, p in n_b["connections"]
+                ]
+                n_a["connections"] = conns_a
+                n_b["connections"] = conns_b
+                for v in n_b.get("vias", []):
+                    if v.get("x") == x_track and v.get("y") == other_yb:
+                        v["x"] = x_shift
+                    elif v.get("x") == x_track and v.get("y") == pb[1]:
+                        v["x"] = x_shift
+                        v["y"] = pa[1]
+                for v in n_a.get("vias", []):
+                    if v.get("x") == x_track and v.get("y") == pa[1]:
+                        v["y"] = pb[1]
 
 
 def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> None:
@@ -1517,6 +1898,36 @@ def straighten_collinear_routes(def_data: dict[str, Any]) -> None:
                 continue
 
 
+FLUID_MATERIALS_NAMES = frozenset(
+    {
+        "crude_oil",
+        "crude-oil",
+        "water",
+        "petroleum_gas",
+        "petroleum-gas",
+        "heavy_oil",
+        "heavy-oil",
+        "light_oil",
+        "light-oil",
+        "sulfuric_acid",
+        "sulfuric-acid",
+        "lubricant",
+        "steam",
+    }
+)
+
+
+def _is_fluid_net(net: dict[str, Any]) -> bool:
+    name = net.get("name", "")
+    mat = name.split("__")[0]
+    return mat in FLUID_MATERIALS_NAMES or net.get("nondefaultrule") == "fluid_ndr"
+
+
+def _get_net_fluid(net: dict[str, Any]) -> str:
+    name = net.get("name", "")
+    return name.split("__")[0].replace("_", "-")
+
+
 def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
     """Eliminate unblocked intermediate staircase jogs on routing tracks.
 
@@ -1618,6 +2029,7 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
             if len(wires) < 4:
                 continue
 
+            is_fluid = _is_fluid_net(net)
             deg: dict[tuple[int, int], int] = collections.defaultdict(int)
             for w in wires:
                 deg[(w["x1"], w["y1"])] += 1
@@ -1675,26 +2087,36 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                                 or w3["x1"] != x2
                             ):
                                 continue
-                            if not (w3["y1"] == y2 or w3["y2"] == y2):
+                            min_w3 = min(w3["y1"], w3["y2"])
+                            max_w3 = max(w3["y1"], w3["y2"])
+                            w3_covers_both = (
+                                is_fluid and min_w3 <= min(y1, y2) and max_w3 >= max(y1, y2)
+                            )
+
+                            if not (w3["y1"] == y2 or w3["y2"] == y2 or w3_covers_both):
                                 continue
-                            y3 = w3["y1"] if w3["y2"] == y2 else w3["y2"]
-                            if (y1 < y2 and y3 <= y2) or (y1 > y2 and y3 >= y2):
-                                continue
+                            if not w3_covers_both:
+                                y3 = w3["y1"] if w3["y2"] == y2 else w3["y2"]
+                                if (y1 < y2 and y3 <= y2) or (y1 > y2 and y3 >= y2):
+                                    continue
 
                             if any(w not in (wj, w1, w2) and wires_touch(w, wj) for w in wires):
                                 continue
                             if any(w not in (wj, w2, w3) and wires_touch(w, w2) for w in wires):
                                 continue
 
-                            if _is_h_clear(y1, x1, x2, net) and _is_v_clear(x2, y1, y2, net):
+                            if _is_h_clear(y1, x1, x2, net) and (
+                                w3_covers_both or _is_v_clear(x2, y1, y2, net)
+                            ):
                                 if w1["x1"] == x1:
                                     w1["x1"] = x2
                                 else:
                                     w1["x2"] = x2
-                                if w3["y1"] == y2:
-                                    w3["y1"] = y1
-                                else:
-                                    w3["y2"] = y1
+                                if not w3_covers_both:
+                                    if w3["y1"] == y2:
+                                        w3["y1"] = y1
+                                    else:
+                                        w3["y2"] = y1
                                 wires.remove(wj)
                                 wires.remove(w2)
                                 net["vias"] = [
@@ -1724,11 +2146,18 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                                 or w0["x1"] != xa
                             ):
                                 continue
-                            if not (w0["y1"] == y1 or w0["y2"] == y1):
+                            min_w0 = min(w0["y1"], w0["y2"])
+                            max_w0 = max(w0["y1"], w0["y2"])
+                            w0_covers_both = (
+                                is_fluid and min_w0 <= min(y1, y2) and max_w0 >= max(y1, y2)
+                            )
+
+                            if not (w0["y1"] == y1 or w0["y2"] == y1 or w0_covers_both):
                                 continue
-                            y0 = w0["y1"] if w0["y2"] == y1 else w0["y2"]
-                            if (y1 < y2 and y0 >= y1) or (y1 > y2 and y0 <= y1):
-                                continue
+                            if not w0_covers_both:
+                                y0 = w0["y1"] if w0["y2"] == y1 else w0["y2"]
+                                if (y1 < y2 and y0 >= y1) or (y1 > y2 and y0 <= y1):
+                                    continue
                             if any(
                                 cx <= xa <= cx + cw and cy <= y1 <= cy + ch
                                 for cx, cy, cw, ch in comp_boxes
@@ -1740,11 +2169,14 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                             if any(w not in (wj, w1, w0) and wires_touch(w, w1) for w in wires):
                                 continue
 
-                            if _is_v_clear(xa, y1, y2, net) and _is_h_clear(y2, xa, x1, net):
-                                if w0["y1"] == y1:
-                                    w0["y1"] = y2
-                                else:
-                                    w0["y2"] = y2
+                            if (w0_covers_both or _is_v_clear(xa, y1, y2, net)) and _is_h_clear(
+                                y2, xa, x1, net
+                            ):
+                                if not w0_covers_both:
+                                    if w0["y1"] == y1:
+                                        w0["y1"] = y2
+                                    else:
+                                        w0["y2"] = y2
                                 if w2["x1"] == x1:
                                     w2["x1"] = xa
                                 else:
@@ -1826,26 +2258,36 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                                 or w3["y1"] != y2
                             ):
                                 continue
-                            if not (w3["x1"] == x2 or w3["x2"] == x2):
+                            min_w3 = min(w3["x1"], w3["x2"])
+                            max_w3 = max(w3["x1"], w3["x2"])
+                            w3_covers_both = (
+                                is_fluid and min_w3 <= min(x1, x2) and max_w3 >= max(x1, x2)
+                            )
+
+                            if not (w3["x1"] == x2 or w3["x2"] == x2 or w3_covers_both):
                                 continue
-                            x3 = w3["x1"] if w3["x2"] == x2 else w3["x2"]
-                            if (x1 < x2 and x3 <= x2) or (x1 > x2 and x3 >= x2):
-                                continue
+                            if not w3_covers_both:
+                                x3 = w3["x1"] if w3["x2"] == x2 else w3["x2"]
+                                if (x1 < x2 and x3 <= x2) or (x1 > x2 and x3 >= x2):
+                                    continue
 
                             if any(w not in (wj, w1, w2) and wires_touch(w, wj) for w in wires):
                                 continue
                             if any(w not in (wj, w2, w3) and wires_touch(w, w2) for w in wires):
                                 continue
 
-                            if _is_v_clear(x1, y1, y2, net) and _is_h_clear(y2, x1, x2, net):
+                            if _is_v_clear(x1, y1, y2, net) and (
+                                w3_covers_both or _is_h_clear(y2, x1, x2, net)
+                            ):
                                 if w1["y1"] == y1:
                                     w1["y1"] = y2
                                 else:
                                     w1["y2"] = y2
-                                if w3["x1"] == x2:
-                                    w3["x1"] = x1
-                                else:
-                                    w3["x2"] = x1
+                                if not w3_covers_both:
+                                    if w3["x1"] == x2:
+                                        w3["x1"] = x1
+                                    else:
+                                        w3["x2"] = x1
                                 wires.remove(wj)
                                 wires.remove(w2)
                                 net["vias"] = [
@@ -1875,11 +2317,18 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                                 or w0["y1"] != ya
                             ):
                                 continue
-                            if not (w0["x1"] == x1 or w0["x2"] == x1):
+                            min_w0 = min(w0["x1"], w0["x2"])
+                            max_w0 = max(w0["x1"], w0["x2"])
+                            w0_covers_both = (
+                                is_fluid and min_w0 <= min(x1, x2) and max_w0 >= max(x1, x2)
+                            )
+
+                            if not (w0["x1"] == x1 or w0["x2"] == x1 or w0_covers_both):
                                 continue
-                            x0 = w0["x1"] if w0["x2"] == x1 else w0["x2"]
-                            if (x1 < x2 and x0 >= x1) or (x1 > x2 and x0 <= x1):
-                                continue
+                            if not w0_covers_both:
+                                x0 = w0["x1"] if w0["x2"] == x1 else w0["x2"]
+                                if (x1 < x2 and x0 >= x1) or (x1 > x2 and x0 <= x1):
+                                    continue
                             if any(
                                 cx <= x1 <= cx + cw and cy <= ya <= cy + ch
                                 for cx, cy, cw, ch in comp_boxes
@@ -1891,11 +2340,14 @@ def eliminate_staircase_jogs(def_data: dict[str, Any]) -> None:
                             if any(w not in (wj, w1, w0) and wires_touch(w, w1) for w in wires):
                                 continue
 
-                            if _is_h_clear(ya, x1, x2, net) and _is_v_clear(x2, ya, y1, net):
-                                if w0["x1"] == x1:
-                                    w0["x1"] = x2
-                                else:
-                                    w0["x2"] = x2
+                            if (w0_covers_both or _is_h_clear(ya, x1, x2, net)) and _is_v_clear(
+                                x2, ya, y1, net
+                            ):
+                                if not w0_covers_both:
+                                    if w0["x1"] == x1:
+                                        w0["x1"] = x2
+                                    else:
+                                        w0["x2"] = x2
                                 if w2["y1"] == y1:
                                     w2["y1"] = ya
                                 else:
@@ -2781,36 +3233,6 @@ def untangle_interlocking_corners(def_data: dict[str, Any]) -> None:
                                 return
 
 
-FLUID_MATERIALS_NAMES = frozenset(
-    {
-        "crude_oil",
-        "crude-oil",
-        "water",
-        "petroleum_gas",
-        "petroleum-gas",
-        "heavy_oil",
-        "heavy-oil",
-        "light_oil",
-        "light-oil",
-        "sulfuric_acid",
-        "sulfuric-acid",
-        "lubricant",
-        "steam",
-    }
-)
-
-
-def _is_fluid_net(net: dict[str, Any]) -> bool:
-    name = net.get("name", "")
-    mat = name.split("__")[0]
-    return mat in FLUID_MATERIALS_NAMES or net.get("nondefaultrule") == "fluid_ndr"
-
-
-def _get_net_fluid(net: dict[str, Any]) -> str:
-    name = net.get("name", "")
-    return name.split("__")[0].replace("_", "-")
-
-
 def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
     """Separate parallel or conflicting nets that detailed router placed on colliding tracks.
 
@@ -3215,7 +3637,7 @@ def separate_overlapping_channel_routes(def_data: dict[str, Any]) -> None:
                         if x1 == x2:
                             overlap_min = max(w1_min_y, w2_min_y)
                             overlap_max = min(w1_max_y, w2_max_y)
-                            if overlap_min < overlap_max:
+                            if overlap_min <= overlap_max:
                                 is_conflict = True
                             elif different_fluids:
                                 gap = min(abs(w1_min_y - w2_max_y), abs(w2_min_y - w1_max_y))

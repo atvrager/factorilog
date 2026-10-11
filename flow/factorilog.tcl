@@ -486,6 +486,21 @@ if {[info exists DROUTE_END_ITER]} {
 }
 detailed_route -droute_end_iter $droute_iters -output_drc route_drc.rpt -verbose 1
 
+set unrouted_count 0
+foreach net [$block getNets] {
+    if {[$net getWire] == "NULL" || [$net getWire] == ""} {
+        incr unrouted_count
+        set it_info ""
+        foreach it [$net getITerms] {
+            set mterm [$it getMTerm]
+            lassign [[$it getInst] getLocation] ix iy
+            append it_info " ([[$mterm getMaster] getName]/[$mterm getName] at [expr {$ix/$dbu}],[expr {$iy/$dbu}])"
+        }
+        puts "factorilog: unrouted net [$net getName]$it_info"
+    }
+}
+puts "factorilog: total unrouted nets: $unrouted_count"
+
 write_def factory.def
 puts "factorilog: routed DEF written"
 

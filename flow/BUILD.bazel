@@ -288,6 +288,56 @@ factorilog_science_factory(
     ],
 )
 
+factorilog_science_factory(
+    name = "production_science",
+    block_fill = "0.005",
+    cell_pad_sites = 16,
+    channel_h = 48,
+    core_margin = 12,
+    demand = "production-science-pack 60.0",
+    density = "0.01",
+    do_untangle = False,
+    layer_adjustment = "",
+    routability_driven = True,
+    split_pad_sites = 12,
+    strict_drc = True,
+    synthesize_splitters = True,
+    use_row_placement = True,
+    test_expected_item = "production-science-pack",
+    test_min_active_ratio = "0.50",
+    test_ticks = 120000,
+    tags = [
+        "manual",
+        "science",
+        "production_science",
+    ],
+)
+
+factorilog_science_factory(
+    name = "utility_science",
+    block_fill = "0.005",
+    cell_pad_sites = 12,
+    channel_h = 48,
+    core_margin = 12,
+    demand = "utility-science-pack 60.0",
+    density = "0.01",
+    do_untangle = True,
+    layer_adjustment = "",
+    routability_driven = True,
+    split_pad_sites = 8,
+    strict_drc = True,
+    synthesize_splitters = True,
+    use_row_placement = True,
+    test_expected_item = "utility-science-pack",
+    test_min_active_ratio = "0.50",
+    test_ticks = 120000,
+    tags = [
+        "manual",
+        "science",
+        "utility_science",
+    ],
+)
+
 filegroup(
     name = "science",
     srcs = [
@@ -295,6 +345,8 @@ filegroup(
         ":chemical_science",
         ":logistic_science",
         ":military_science",
+        ":production_science",
+        ":utility_science",
     ],
     tags = [
         "manual",

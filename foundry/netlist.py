@@ -360,9 +360,20 @@ def build(
                         inst.rank = current_rank
                     current_rank += 1
         elif d == 2:
-            for inst in d_insts:
-                inst.rank = current_rank
-            current_rank += 1
+            if len(d_insts) <= 15:
+                for inst in d_insts:
+                    inst.rank = current_rank
+                current_rank += 1
+            else:
+                by_recipe = collections.defaultdict(list)
+                for inst in d_insts:
+                    by_recipe[inst.recipe].append(inst)
+                for r_name in sorted(by_recipe.keys()):
+                    r_insts = by_recipe[r_name]
+                    for chunk_start in range(0, len(r_insts), max_machines_per_row):
+                        for inst in r_insts[chunk_start : chunk_start + max_machines_per_row]:
+                            inst.rank = current_rank
+                        current_rank += 1
 
     higher_term: list[Instance] = []
     for d in sorted(instances_by_depth.keys()):

@@ -7,6 +7,7 @@ Supports multi-domain power gating when power switches are present.
 
 from __future__ import annotations
 
+import collections
 import heapq
 import math
 import sys
@@ -182,23 +183,62 @@ def generate_pdn(
             if c not in surface_occupied and not any(is_covered(fe, c) for fe in forbidden_entities)
         ]
 
+        cand_grid: dict[tuple[int, int], list[tuple[float, float]]] = collections.defaultdict(list)
+        for c in valid_cands:
+            cand_grid[(int(c[0] // 6), int(c[1] // 6))].append(c)
+
+        entity_cands: list[list[tuple[float, float]]] = [[] for _ in range(len(domain_powered))]
+        cand_covers: dict[tuple[float, float], set[int]] = collections.defaultdict(set)
+
+        for i, ent in enumerate(domain_powered):
+            ex = ent["position"]["x"]
+            ey = ent["position"]["y"]
+            cx, cy = entity_collision_half_size(ent.get("name", ""))
+            reach_x = cx + 3.5
+            reach_y = cy + 3.5
+            gx_min = int((ex - reach_x) // 6)
+            gx_max = int((ex + reach_x) // 6)
+            gy_min = int((ey - reach_y) // 6)
+            gy_max = int((ey + reach_y) // 6)
+            for gx in range(gx_min, gx_max + 1):
+                for gy in range(gy_min, gy_max + 1):
+                    for c in cand_grid.get((gx, gy), []):
+                        if is_covered(ent, c):
+                            entity_cands[i].append(c)
+                            cand_covers[c].add(i)
+
         uncovered = set(range(len(domain_powered)))
         chosen: set[tuple[float, float]] = set()
 
-        while uncovered:
-            best_cand = None
-            best_covers: set[int] = set()
-            for c in valid_cands:
-                if c in chosen:
-                    continue
-                covers = {i for i in uncovered if is_covered(domain_powered[i], c)}
-                if len(covers) > len(best_covers):
-                    best_covers = covers
-                    best_cand = c
-            if not best_cand:
+        cand_uncovered_count: dict[tuple[float, float], int] = {
+            c: len(cand_covers[c]) for c in cand_covers
+        }
+        count_buckets: dict[int, set[tuple[float, float]]] = collections.defaultdict(set)
+        for c, cnt in cand_uncovered_count.items():
+            if cnt > 0:
+                count_buckets[cnt].add(c)
+        max_count = max(count_buckets.keys(), default=0)
+
+        while uncovered and max_count > 0:
+            while max_count > 0 and not count_buckets[max_count]:
+                max_count -= 1
+            if max_count == 0:
                 break
+            best_cand = count_buckets[max_count].pop()
             chosen.add(best_cand)
-            uncovered -= best_covers
+            best_covered = cand_covers[best_cand] & uncovered
+            uncovered -= best_covered
+
+            for ent_idx in best_covered:
+                for other_c in entity_cands[ent_idx]:
+                    if other_c != best_cand and other_c in cand_uncovered_count:
+                        old_cnt = cand_uncovered_count[other_c]
+                        if old_cnt > 0:
+                            count_buckets[old_cnt].discard(other_c)
+                            new_cnt = old_cnt - 1
+                            cand_uncovered_count[other_c] = new_cnt
+                            if new_cnt > 0:
+                                count_buckets[new_cnt].add(other_c)
 
         for i in list(uncovered):
             px, py = domain_powered[i]["position"]["x"], domain_powered[i]["position"]["y"]
@@ -234,17 +274,19 @@ def generate_pdn(
 
         cand_list = list(valid_cands)
         cand_adj: dict[tuple[float, float], list[tuple[float, float]]] = {c: [] for c in cand_list}
-        for i in range(len(cand_list)):
-            for j in range(i + 1, len(cand_list)):
-                if (
-                    math.hypot(
-                        cand_list[i][0] - cand_list[j][0],
-                        cand_list[i][1] - cand_list[j][1],
-                    )
-                    <= 9.0
-                ):
-                    cand_adj[cand_list[i]].append(cand_list[j])
-                    cand_adj[cand_list[j]].append(cand_list[i])
+        cand_bucket: dict[tuple[int, int], list[tuple[float, float]]] = collections.defaultdict(
+            list
+        )
+        for c in cand_list:
+            cand_bucket[(int(c[0] // 9), int(c[1] // 9))].append(c)
+
+        for (bx, by), b_cands in cand_bucket.items():
+            for c1 in b_cands:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for c2 in cand_bucket.get((bx + dx, by + dy), []):
+                            if c1 != c2 and math.hypot(c1[0] - c2[0], c1[1] - c2[1]) <= 9.0:
+                                cand_adj[c1].append(c2)
 
         all_poles = set(chosen)
         if chosen:
@@ -278,15 +320,27 @@ def generate_pdn(
                 unconnected.remove(target)
 
         pole_list = sorted(all_poles)
+        pole_bucket: dict[tuple[int, int], list[int]] = collections.defaultdict(list)
+        for idx, p in enumerate(pole_list):
+            pole_bucket[(int(p[0] // 9), int(p[1] // 9))].append(idx)
+
         pole_edges: list[tuple[float, int, int]] = []
-        for i in range(len(pole_list)):
-            for j in range(i + 1, len(pole_list)):
-                d = math.hypot(
-                    pole_list[i][0] - pole_list[j][0],
-                    pole_list[i][1] - pole_list[j][1],
-                )
-                if d <= 9.0:
-                    pole_edges.append((d, i, j))
+        for (bx, by), p_indices in pole_bucket.items():
+            for i in p_indices:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nb = (bx + dx, by + dy)
+                        if nb < (bx, by):
+                            continue
+                        for j in pole_bucket.get(nb, []):
+                            if nb == (bx, by) and j <= i:
+                                continue
+                            d = math.hypot(
+                                pole_list[i][0] - pole_list[j][0],
+                                pole_list[i][1] - pole_list[j][1],
+                            )
+                            if d <= 9.0:
+                                pole_edges.append((d, i, j))
         pole_edges.sort()
         parent_mst = list(range(len(pole_list)))
 

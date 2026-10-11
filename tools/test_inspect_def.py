@@ -39,6 +39,14 @@ class TestInspectDef(unittest.TestCase):
         self.assertEqual(len(found_v), 1)
         self.assertEqual(found_v[0]["layer"], "M2")
 
+    def test_unrouted_nets(self) -> None:
+        nets = [
+            {"name": "n1", "wires": [{"layer": "M1"}]},
+            {"name": "n2", "wires": []},
+        ]
+        unrouted = [n["name"] for n in nets if not n.get("wires")]
+        self.assertEqual(unrouted, ["n2"])
+
 
 if __name__ == "__main__":
     unittest.main()
