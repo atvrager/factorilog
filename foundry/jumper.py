@@ -839,7 +839,8 @@ def route_and_resolve_jumpers(
                     allowed = in_pos in allowed_out and (
                         d == DIRECTION_EAST
                         or (
-                            in_pos in machine_output_pins
+                            not is_fluid
+                            and in_pos in machine_output_pins
                             and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
                         )
                     )
@@ -863,8 +864,17 @@ def route_and_resolve_jumpers(
                     ):
                         fail_in.append("perpendicular_belt_feed")
                         break
+                    if is_fluid and nb_nets and candidate in nb_nets:
+                        fail_in.append("perpendicular_fluid_branch")
+                        break
                 if in_pos in occupied_positions:
                     fail_in.append("in_occupied")
+                if (
+                    is_fluid
+                    and in_pos not in pin_tiles
+                    and prev_pos not in net_surface_tiles[candidate]
+                ):
+                    fail_in.append("in_prev_not_in_net")
                 if used_underground_endpoints.get(prev_pos) == opp_d:
                     fail_in.append("opp_prev")
                 if fail_in:
@@ -1071,7 +1081,8 @@ def route_and_resolve_jumpers(
                         allowed = out_pos in allowed_in and (
                             d == DIRECTION_EAST
                             or (
-                                out_pos in machine_input_pins
+                                not is_fluid
+                                and out_pos in machine_input_pins
                                 and d in (DIRECTION_SOUTH, DIRECTION_NORTH)
                             )
                         )
@@ -1091,6 +1102,9 @@ def route_and_resolve_jumpers(
                             if c_net != candidate
                         ):
                             fail_out.append("perpendicular_belt_feed")
+                            break
+                        if is_fluid and nb_nets and candidate in nb_nets:
+                            fail_out.append("perpendicular_fluid_branch")
                             break
                     rdx, rdy = DIR_STEPS[d]
                     rear_pos = (round(out_pos[0] - rdx, 2), round(out_pos[1] - rdy, 2))
@@ -1156,6 +1170,18 @@ def route_and_resolve_jumpers(
                             valid_span = False
                             invalid_reasons.append(f"it_used_span_v({it})")
                             break
+                        if is_fluid:
+                            has_branch = False
+                            for s_dir in side_dirs:
+                                sdx, sdy = DIR_STEPS[s_dir]
+                                nb_pos = (round(it[0] - sdx, 2), round(it[1] - sdy, 2))
+                                if candidate in tile_to_nets.get(nb_pos, set()):
+                                    has_branch = True
+                                    break
+                            if has_branch:
+                                valid_span = False
+                                invalid_reasons.append(f"it_fluid_branch({it})")
+                                break
                         if len(tile_to_nets.get(it, set())) > 1 or it in adjacent_fluid_conflicts:
                             conflicts_cleared += 1
                     if not valid_span:

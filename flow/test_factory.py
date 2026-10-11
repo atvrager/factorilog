@@ -169,12 +169,20 @@ script.on_event(defines.events.on_tick, function(event)
             for k, v in pairs(defines.entity_status) do
                 if v == a.status then sname = k break end
             end
-            log(string.format("ASM_INFO: at (%.1f,%.1f) recipe=%s status=%s finished=%d crafting=%s",
+            local fluid_info = ""
+            local fc = a.get_fluid_contents()
+            if fc then
+                for fname, famt in pairs(fc) do
+                    fluid_info = fluid_info .. string.format(" %s:%.1f", fname, famt)
+                end
+            end
+            log(string.format("ASM_INFO: at (%.1f,%.1f) recipe=%s status=%s finished=%d crafting=%s%s",
                 a.position.x, a.position.y,
                 tostring(rec and rec.name),
                 sname,
                 pf,
-                tostring(a.is_crafting())
+                tostring(a.is_crafting()),
+                fluid_info
             ))
             if pf > 0 then
                 productive_asms = productive_asms + 1
@@ -187,7 +195,22 @@ script.on_event(defines.events.on_tick, function(event)
                     a.energy
                 ))
             end
-            if (sname == "item_ingredient_shortage") or (pf == 0) then
+            if (sname == "fluid_ingredient_shortage") or (sname == "item_ingredient_shortage") or (pf == 0) then
+                if sname == "fluid_ingredient_shortage" then
+                    local pipes = surface.find_entities_filtered{{area = {{{{a.position.x - 4, a.position.y - 4}}, {{a.position.x + 4, a.position.y + 4}}}}}}
+                    for _, pe in ipairs(pipes) do
+                        if pe.name == "pipe" or pe.name == "pipe-to-ground" or pe.name == "infinity-pipe" then
+                            local f_str = "empty"
+                            local pfc = pe.get_fluid_contents()
+                            if pfc then
+                                for pfname, pfamt in pairs(pfc) do
+                                    f_str = string.format("%s:%.1f", pfname, pfamt)
+                                end
+                            end
+                            log(string.format("  PIPE at (%.1f,%.1f) name=%s fluid=%s", pe.position.x, pe.position.y, pe.name, f_str))
+                        end
+                    end
+                end
                 local inserters = surface.find_entities_filtered{{type = "inserter"}}
                 for _, ins in ipairs(inserters) do
                     if math.abs(ins.drop_position.x - a.position.x) <= 2.0 and math.abs(ins.drop_position.y - a.position.y) <= 2.0 then

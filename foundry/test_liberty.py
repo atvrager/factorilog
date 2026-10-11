@@ -41,7 +41,7 @@ class LibertyTest(unittest.TestCase):
         cell = self.pdk.cell("oil-refinery", "advanced-oil-processing")
         assert cell is not None
         text = liberty.write_liberty([cell], "/dev/null")
-        self.assertIn("area : 35.000 ;", text)
+        self.assertIn("area : 49.000 ;", text)
 
     def test_craft_delay_is_recipe_duration(self) -> None:
         # assembling-machine-3 has crafting speed 1.25.

@@ -50,6 +50,34 @@ py_binary(
     ],
 )
 
+py_binary(
+    name = "inspect_cell",
+    srcs = ["inspect_cell.py"],
+    data = [
+        "//test:data/dump-fixture.json",
+    ],
+    main = "inspect_cell.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "inspect_cell_test",
+    size = "small",
+    srcs = [
+        "inspect_cell.py",
+        "test_inspect_cell.py",
+    ],
+    data = [
+        "//test:data/dump-fixture.json",
+    ],
+    main = "test_inspect_cell.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
 py_test(
     name = "inspect_def_test",
     size = "small",
@@ -103,6 +131,25 @@ py_test(
         "//foundry:py_srcs",
     ],
     main = "test_check_no_recipe_heuristics.py",
+)
+
+py_binary(
+    name = "check_no_hardcoded_routing",
+    srcs = ["check_no_hardcoded_routing.py"],
+    main = "check_no_hardcoded_routing.py",
+)
+
+py_test(
+    name = "no_hardcoded_routing_test",
+    size = "small",
+    srcs = [
+        "check_no_hardcoded_routing.py",
+        "test_check_no_hardcoded_routing.py",
+    ],
+    data = [
+        "//foundry:py_srcs",
+    ],
+    main = "test_check_no_hardcoded_routing.py",
 )
 
 sh_test(

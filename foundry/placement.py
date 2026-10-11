@@ -242,11 +242,7 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             in_offset = 1.0 if (cw > m_w) else 0.0
             y_offset = 1.0 if (ch > m_h) else 0.0
 
-            direction = DIRECTION_NORTH
-            if machine == "chemical-plant":
-                direction = DIRECTION_WEST
-            elif machine == "oil-refinery":
-                direction = DIRECTION_EAST
+            direction = int(cell.get("direction", DIRECTION_NORTH))
             ent = add_entity(
                 machine,
                 gx + in_offset + m_w / 2.0,

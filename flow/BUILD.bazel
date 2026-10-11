@@ -278,6 +278,9 @@ factorilog_science_factory(
     strict_drc = True,
     synthesize_splitters = True,
     use_row_placement = True,
+    test_expected_item = "chemical-science-pack",
+    test_min_active_ratio = "0.50",
+    test_ticks = 100000,
     tags = [
         "manual",
         "science",

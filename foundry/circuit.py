@@ -28,7 +28,7 @@ def find_nearest_pole(
 ) -> dict[str, Any] | None:
     """Find the closest electric pole within maximum wire reach distance."""
     best_pole = None
-    best_dist = 1e9
+    best_dist = math.inf
     for p_pos, pole in pole_entities.items():
         d = math.hypot(p_pos[0] - pos[0], p_pos[1] - pos[1])
         if d <= max_reach and d < best_dist:
@@ -278,7 +278,7 @@ def wire_telemetry(
                 candidate_tiles.update(v.keys())
 
         best_ent = None
-        best_dist = 1e9
+        best_dist = math.inf
         for pos_tile in candidate_tiles:
             cand = grid_entities.get(pos_tile)
             if cand and "transport-belt" in cand.get("name", ""):

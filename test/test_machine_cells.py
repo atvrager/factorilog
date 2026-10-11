@@ -264,8 +264,9 @@ class TestMachineCells(unittest.TestCase):
             end
             {chr(10).join(prefill_lua_lines)}
 
-            -- Map input pin belts
+            -- Map input pin belts and pipes
             storage.in_belts = {{}}
+            storage.in_pipes = {{}}
             local input_pins_data = {serialize_lua(in_pins)}
             for _, pin in ipairs(input_pins_data) do
                 local px = pin.x + shift_x
@@ -275,21 +276,35 @@ class TestMachineCells(unittest.TestCase):
                     if ent.type == "transport-belt" or ent.type == "underground-belt" then
                         storage.in_belts[pin.name] = ent
                         break
+                    elseif ent.name == "pipe" or ent.name == "pipe-to-ground" then
+                        storage.in_pipes[pin.name] = ent
+                        break
                     end
                 end
             end
 
-            -- Map output pin belts
+            -- Map output pin belts and setup output infinity-pipes for fluid outputs
             storage.out_belts = {{}}
             local output_pins_data = {serialize_lua(out_pins)}
             for _, pin in ipairs(output_pins_data) do
                 local px = pin.x + shift_x
                 local py = pin.y + shift_y
-                local ents = surface.find_entities_filtered{{position = {{px, py}}}}
-                for _, ent in pairs(ents) do
-                    if ent.type == "transport-belt" or ent.type == "underground-belt" then
-                        storage.out_belts[pin.name] = ent
-                        break
+                if pin.type == "pipe" then
+                    local p = surface.create_entity{{
+                        name = "infinity-pipe",
+                        position = {{px + 1, py}},
+                        force = "player"
+                    }}
+                    if p then
+                        p.set_infinity_pipe_filter({{name = pin.name, percentage = 0.0, mode = "at-most"}})
+                    end
+                else
+                    local ents = surface.find_entities_filtered{{position = {{px, py}}}}
+                    for _, ent in pairs(ents) do
+                        if ent.type == "transport-belt" or ent.type == "underground-belt" then
+                            storage.out_belts[pin.name] = ent
+                            break
+                        end
                     end
                 end
             end
@@ -301,9 +316,9 @@ class TestMachineCells(unittest.TestCase):
             """
 
             is_fluid = expected_output_item in self.data.prototypes.get("fluid", {})
-            belt_drain_lua = ""
+            drain_lua = ""
             if not is_fluid:
-                belt_drain_lua = f"""
+                drain_lua = f"""
                 -- Drain output items at output pin
                 local out_belt = storage.out_belts["{expected_output_item}"]
                 if out_belt and out_belt.valid then
@@ -318,23 +333,8 @@ class TestMachineCells(unittest.TestCase):
                 end
                 """
 
-            extra_count_lua = ""
-            if is_fluid:
-                extra_count_lua = f"""
-                    if m.get_fluid_count then
-                        extra_count = extra_count + math.floor(m.get_fluid_count("{expected_output_item}"))
-                    end
-                """
-            else:
-                extra_count_lua = f"""
-                    local inv = m.get_output_inventory()
-                    if inv then
-                        extra_count = extra_count + inv.get_item_count("{expected_output_item}")
-                    end
-                """
-
             tick_lua = f"""
-            -- Feed items onto input belts
+            -- Feed items onto input belts or fluids into input pipes
             if event.tick % 10 == 0 then
                 for item_name, target in pairs(storage.feed_targets) do
                     local current = storage.fed_counts[item_name] or 0
@@ -346,26 +346,43 @@ class TestMachineCells(unittest.TestCase):
                                 line.insert_at_back({{name = item_name, count = 1}})
                                 storage.fed_counts[item_name] = current + 1
                             end
+                        else
+                            local pipe = storage.in_pipes[item_name]
+                            if pipe and pipe.valid then
+                                local amt = math.min(50, target - current)
+                                local inserted = pipe.insert_fluid{{name = item_name, amount = amt}}
+                                if inserted and inserted > 0 then
+                                    storage.fed_counts[item_name] = current + inserted
+                                end
+                            end
                         end
                     end
                 end
             end
 
-            {belt_drain_lua}
+            {drain_lua}
 
             if event.tick == {ticks} then
-                local extra_count = 0
                 local surface = game.surfaces[1]
-                local m_ents = surface.find_entities_filtered{{name = "{machine_name}"}}
-                for _, m in ipairs(m_ents) do
-                    if m.name == "rocket-silo" then
-                        extra_count = extra_count + m.rocket_parts
+                local total = 0
+                if {str(is_fluid).lower()} then
+                    local fstats = game.forces.player.get_fluid_production_statistics(surface)
+                    total = math.floor(fstats.get_input_count("{expected_output_item}"))
+                else
+                    local extra_count = 0
+                    local m_ents = surface.find_entities_filtered{{name = "{machine_name}"}}
+                    for _, m in ipairs(m_ents) do
+                        if m.name == "rocket-silo" then
+                            extra_count = extra_count + m.rocket_parts
+                        end
+                        local inv = m.get_output_inventory()
+                        if inv then
+                            extra_count = extra_count + inv.get_item_count("{expected_output_item}")
+                        end
                     end
-                    {extra_count_lua}
+                    total = (storage.drained_count or 0) + extra_count
                 end
-                local total = (storage.drained_count or 0) + extra_count
-                log(string.format("TEST_RESULT: {machine_name} total=%d drained=%d extra=%d revived=%d",
-                    total, storage.drained_count or 0, extra_count, storage.revived or 0))
+                log(string.format("TEST_RESULT: {machine_name} total=%d revived=%d", total, storage.revived or 0))
             end
             """
 
@@ -392,7 +409,8 @@ class TestMachineCells(unittest.TestCase):
             self.assertGreaterEqual(
                 total_count,
                 expected_output_count,
-                f"Expected at least {expected_output_count} {expected_output_item}, got {total_count}",
+                f"Expected at least {expected_output_count} {expected_output_item}, got {total_count}. All results:\n"
+                + "\n".join(results),
             )
 
     def test_cell_assembling_machine_1(self) -> None:
@@ -472,10 +490,9 @@ class TestMachineCells(unittest.TestCase):
         self.run_machine_cell_e2e(
             machine_name="chemical-plant",
             recipe_name="plastic-bar",
-            input_feeds={"coal": 5},
+            input_feeds={"coal": 5, "petroleum-gas": 200},
             expected_output_item="plastic-bar",
             expected_output_count=5,
-            prefill_fluids={"petroleum-gas": 200.0},
             demand_rate=60.0,
             ticks=1200,
         )
@@ -485,10 +502,9 @@ class TestMachineCells(unittest.TestCase):
         self.run_machine_cell_e2e(
             machine_name="oil-refinery",
             recipe_name="basic-oil-processing",
-            input_feeds={},
+            input_feeds={"crude-oil": 200},
             expected_output_item="petroleum-gas",
             expected_output_count=45,
-            prefill_fluids={"crude-oil": 200.0},
             demand_rate=60.0,
             ticks=1200,
         )

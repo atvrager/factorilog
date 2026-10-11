@@ -20,6 +20,7 @@ def merge_collinear_wires(
     wires: list[dict[str, Any]], vias: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     """Merge contiguous collinear wire segments on the same layer."""
+    wires = [w for w in wires if not (w["x1"] == w["x2"] and w["y1"] == w["y2"])]
     via_pts = {(v["x"], v["y"]) for v in (vias or [])}
     changed = True
     while changed:
@@ -75,7 +76,7 @@ def merge_collinear_wires(
             if not merged:
                 merged_wires.append(w1)
         wires = merged_wires
-    return wires
+    return [w for w in wires if not (w["x1"] == w["x2"] and w["y1"] == w["y2"])]
 
 
 def parse_def(text: str) -> dict[str, Any]:

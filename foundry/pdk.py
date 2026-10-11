@@ -18,8 +18,20 @@ from typing import Any
 
 try:
     from foundry import solve
+    from foundry.entity_helpers import (
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+    )
 except ImportError:
     import solve
+    from entity_helpers import (
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+    )
 
 # Items per second of one belt lane, from the prototype `speed` field:
 # speed * 60 ticks/s * 8 items per tile. Verified against the measurements
@@ -311,13 +323,178 @@ class Pdk:
         seconds = solve.Data.craft_seconds(recipe_proto)
         inputs = [solve.name_of(e) for e in solve.Data.ingredients_of(recipe_proto)]
         outputs = [solve.name_of(e) for e in solve.Data.results_of(recipe_proto)]
-        has_inputs = bool(inputs)
-        has_outputs = bool(outputs)
-        width = machine_width + (1 if has_inputs else 0) + (1 if has_outputs else 0)
-        height = machine_height
+        # Check for fluidboxes and compute port mapping
+        fluid_table = self.data.prototypes.get("fluid", {})
+        fluid_boxes = proto.get("fluid_boxes", [])
+        ingredients_raw = solve.Data.ingredients_of(recipe_proto)
+        results_raw = solve.Data.results_of(recipe_proto)
+        has_fluids = any(solve.name_of(e) in fluid_table for e in ingredients_raw) or any(
+            solve.name_of(e) in fluid_table for e in results_raw
+        )
+
+        direction = DIRECTION_NORTH
+        in_slots: dict[str, int] = {}
+        out_slots: dict[str, int] = {}
+        port_faces: dict[str, str] | None = None
+
+        if fluid_boxes and has_fluids:
+            in_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "input"]
+            out_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "output"]
+
+            # Choose orientation to place fluid inputs on West (x < 0) and outputs on East (x > 0)
+            target_conns: list[dict[str, Any]] = []
+            target_is_input = True
+            if in_fluidboxes and in_fluidboxes[0].get("pipe_connections"):
+                target_conns = in_fluidboxes[0]["pipe_connections"]
+                target_is_input = True
+            elif out_fluidboxes and out_fluidboxes[0].get("pipe_connections"):
+                target_conns = out_fluidboxes[0]["pipe_connections"]
+                target_is_input = False
+
+            if target_conns:
+                tpos = target_conns[0].get("position", [0, 0])
+                tx, ty = float(tpos[0]), float(tpos[1])
+                if target_is_input:
+                    if ty < 0:
+                        direction = DIRECTION_WEST
+                    elif ty > 0:
+                        direction = DIRECTION_EAST
+                    elif tx > 0:
+                        direction = DIRECTION_SOUTH
+                    else:
+                        direction = DIRECTION_NORTH
+                else:
+                    if ty > 0:
+                        direction = DIRECTION_WEST
+                    elif ty < 0:
+                        direction = DIRECTION_EAST
+                    elif tx < 0:
+                        direction = DIRECTION_SOUTH
+                    else:
+                        direction = DIRECTION_NORTH
+
+            if direction in (DIRECTION_EAST, DIRECTION_WEST):
+                placed_w = machine_height
+                placed_h = machine_width
+            else:
+                placed_w = machine_width
+                placed_h = machine_height
+
+            def _rotate_and_slot(bx: float, by: float) -> int:
+                if direction == DIRECTION_NORTH:
+                    ry = by
+                elif direction == DIRECTION_EAST:
+                    ry = bx
+                elif direction == DIRECTION_SOUTH:
+                    ry = -by
+                elif direction == DIRECTION_WEST:
+                    ry = -bx
+                else:
+                    ry = by
+                return math.floor(ry + placed_h / 2.0)
+
+            y_offset = 1
+            width = placed_w + 2
+            height = placed_h + 2
+
+            in_fb_slots = [
+                _rotate_and_slot(
+                    fb["pipe_connections"][0]["position"][0],
+                    fb["pipe_connections"][0]["position"][1],
+                )
+                + y_offset
+                for fb in in_fluidboxes
+                if fb.get("pipe_connections")
+            ]
+            out_fb_slots = [
+                _rotate_and_slot(
+                    fb["pipe_connections"][0]["position"][0],
+                    fb["pipe_connections"][0]["position"][1],
+                )
+                + y_offset
+                for fb in out_fluidboxes
+                if fb.get("pipe_connections")
+            ]
+
+            # Map input fluid ingredients
+            fluid_in_count = 0
+            item_inputs = []
+            for ing in ingredients_raw:
+                p = solve.name_of(ing)
+                if p in fluid_table:
+                    fb_idx = ing.get("fluidbox_index")
+                    slot_idx = (fb_idx - 1) if fb_idx is not None else fluid_in_count
+                    fluid_in_count += 1
+                    if 0 <= slot_idx < len(in_fb_slots):
+                        in_slots[p] = in_fb_slots[slot_idx]
+                    elif in_fb_slots:
+                        in_slots[p] = in_fb_slots[min(slot_idx, len(in_fb_slots) - 1)]
+                else:
+                    item_inputs.append(p)
+
+            # Map input item ingredients to non-pipe slots on West face (within machine span: y_offset to y_offset + placed_h - 1)
+            all_in_pipes = set(in_fb_slots)
+            avail_item_in = [
+                s for s in range(y_offset, y_offset + placed_h) if s not in all_in_pipes
+            ]
+            if not avail_item_in:
+                avail_item_in = [
+                    s for s in range(y_offset, y_offset + placed_h) if s not in in_slots.values()
+                ]
+            for idx, p in enumerate(item_inputs):
+                if idx < len(avail_item_in):
+                    in_slots[p] = avail_item_in[idx]
+                else:
+                    in_slots[p] = y_offset + (idx % placed_h)
+
+            # Map output fluid results
+            fluid_out_count = 0
+            item_outputs = []
+            for res in results_raw:
+                p = solve.name_of(res)
+                if p in fluid_table:
+                    fb_idx = res.get("fluidbox_index")
+                    slot_idx = (fb_idx - 1) if fb_idx is not None else fluid_out_count
+                    fluid_out_count += 1
+                    if 0 <= slot_idx < len(out_fb_slots):
+                        out_slots[p] = out_fb_slots[slot_idx]
+                    elif out_fb_slots:
+                        out_slots[p] = out_fb_slots[min(slot_idx, len(out_fb_slots) - 1)]
+                else:
+                    item_outputs.append(p)
+
+            # Map output item results to non-pipe slots on East face (within machine span: y_offset to y_offset + placed_h - 1)
+            all_out_pipes = set(out_fb_slots)
+            avail_item_out = [
+                s for s in range(y_offset, y_offset + placed_h) if s not in all_out_pipes
+            ]
+            if not avail_item_out:
+                avail_item_out = [
+                    s for s in range(y_offset, y_offset + placed_h) if s not in out_slots.values()
+                ]
+            for idx, p in enumerate(item_outputs):
+                if idx < len(avail_item_out):
+                    out_slots[p] = avail_item_out[idx]
+                else:
+                    out_slots[p] = y_offset + (idx % placed_h)
+
+            port_faces = dict.fromkeys(inputs, "W")
+            port_faces.update(dict.fromkeys(outputs, "E"))
+        else:
+            placed_w = machine_width
+            placed_h = machine_height
+            width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
+            height = machine_height
+            offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
+            for idx, p in enumerate(inputs):
+                in_slots[p] = offset_in + idx
+            offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
+            for idx, p in enumerate(outputs):
+                out_slots[p] = offset_out + idx
+
         # One machine crafts speed * 60 / craft_seconds per minute. The
         # solver's count formula is the inverse of this number.
-        return {
+        res_cell: dict[str, Any] = {
             "cell": f"{machine}.{recipe}",
             "machine": machine,
             "recipe": recipe,
@@ -325,11 +502,18 @@ class Pdk:
             "height": height,
             "machine_width": machine_width,
             "machine_height": machine_height,
+            "direction": direction,
+            "in_slots": in_slots,
+            "out_slots": out_slots,
+            "has_fluids": has_fluids,
             "watts": watts_of(proto.get("energy_usage", 0)),
             "crafts_per_minute": 60.0 * speed / seconds,
             "inputs": inputs,
             "outputs": outputs,
         }
+        if port_faces is not None:
+            res_cell["port_faces"] = port_faces
+        return res_cell
 
     def underground_tier_spans(self) -> dict[str, int]:
         """Map each underground belt entity to its maximum span in tiles."""

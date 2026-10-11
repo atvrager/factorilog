@@ -16,12 +16,16 @@ from typing import Any
 from foundry.belt_drc import BeltDrcChecker
 from foundry.def_parser import parse_def
 from foundry.def_untangle import (
+    eliminate_staircase_jogs,
+    eliminate_u_detours,
     fix_reverse_splitter_inputs,
     relocate_blocked_splitter_inputs,
     separate_overlapping_channel_routes,
+    shift_congested_pin_turns,
+    simplify_orthogonal_routes,
     straighten_collinear_routes,
-    straighten_stepped_feeder_routes,
     untangle_interlocking_corners,
+    untangle_machine_inputs,
     untangle_merger_inputs,
     untangle_shared_merger_tracks,
     untangle_splitter_outputs,
@@ -44,12 +48,110 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Optional specific tile coordinate to inspect, formatted as 'X,Y' (e.g. '53.5,54.5')",
     )
     parser.add_argument(
+        "--trace-reachability",
+        type=str,
+        default="",
+        help="Trace upstream belt supply backwards from 'X,Y' (e.g. '269,419')",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
         help="Print detailed evaluation logs for every attempted underground span",
     )
     return parser.parse_args(argv)
+
+
+def trace_upstream(
+    start_tile: tuple[int, int],
+    entities: list[dict[str, Any]],
+    max_steps: int = 500,
+) -> None:
+    """Trace backwards from a tile along upstream belts and splitters."""
+    import math
+
+    from foundry.entity_helpers import (
+        DIR_STEPS,
+        DIRECTION_EAST,
+        DIRECTION_NORTH,
+        DIRECTION_SOUTH,
+        DIRECTION_WEST,
+    )
+
+    tile_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for ent in entities:
+        pos = ent.get("position", {})
+        cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+        cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+        name = ent.get("name", "")
+        if "splitter" in name:
+            d = ent.get("direction", DIRECTION_NORTH)
+            if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                tile_map.setdefault((math.floor(cx - 0.5), math.floor(cy)), []).append(ent)
+                tile_map.setdefault((math.floor(cx + 0.5), math.floor(cy)), []).append(ent)
+            else:
+                tile_map.setdefault((math.floor(cx), math.floor(cy - 0.5)), []).append(ent)
+                tile_map.setdefault((math.floor(cx), math.floor(cy + 0.5)), []).append(ent)
+        else:
+            tile_map.setdefault((math.floor(cx), math.floor(cy)), []).append(ent)
+
+    print(f"\n[UPSTREAM TRACE FROM {start_tile}]")
+    curr = start_tile
+    visited_trace: set[tuple[int, int]] = set()
+    for step in range(max_steps):
+        visited_trace.add(curr)
+        ents = tile_map.get(curr, [])
+        ent_strs = [
+            f"{e.get('name')} (dir={e.get('direction')}, type={e.get('type')}, pos={e.get('position')})"
+            for e in ents
+        ]
+        print(f"  Step {step}: at {curr} -> {ent_strs}")
+        if not ents:
+            print("    STOP: No entity at tile.")
+            break
+
+        incoming: list[tuple[tuple[int, int], dict[str, Any]]] = []
+        for (dx, dy), d_towards in [
+            ((1, 0), DIRECTION_WEST),
+            ((-1, 0), DIRECTION_EAST),
+            ((0, 1), DIRECTION_NORTH),
+            ((0, -1), DIRECTION_SOUTH),
+        ]:
+            prev_tile = (curr[0] + dx, curr[1] + dy)
+            for pe in tile_map.get(prev_tile, []):
+                pname = pe.get("name", "")
+                pdir = pe.get("direction", 0)
+                if (
+                    "transport-belt" in pname
+                    or ("underground-belt" in pname and pe.get("type") == "output")
+                    or "splitter" in pname
+                ) and pdir == d_towards:
+                    incoming.append((prev_tile, pe))
+
+        for e in ents:
+            if "underground-belt" in e.get("name", "") and e.get("type") == "output":
+                edir = e.get("direction", 0)
+                edx, edy = DIR_STEPS.get(edir, (0, 0))
+                for span in range(1, 15):
+                    in_pos = (curr[0] - edx * span, curr[1] - edy * span)
+                    incoming.extend(
+                        (in_pos, cand)
+                        for cand in tile_map.get(in_pos, [])
+                        if cand.get("name") == e.get("name")
+                        and cand.get("direction") == edir
+                        and cand.get("type") == "input"
+                    )
+
+        if not incoming:
+            print("    STOP: No incoming belt/splitter/underground feeds into this tile.")
+            break
+        fed_strs = [f"{pe.get('name')} at {pt}" for pt, pe in incoming]
+        print(f"    Fed by: {fed_strs}")
+        next_pt = incoming[0][0]
+        if next_pt in visited_trace:
+            print(f"    STOP: Cycle detected at {next_pt}.")
+            break
+        curr = next_pt
 
 
 def format_nearby_components(
@@ -88,6 +190,7 @@ def run_diagnostics(
     netlist_path: Path,
     filter_tile: tuple[float, float] | None = None,
     verbose: bool = False,
+    trace_reachability: tuple[int, int] | None = None,
 ) -> int:
     """Run full physical DRC and routing conflict analysis."""
     import os
@@ -112,18 +215,23 @@ def run_diagnostics(
 
     def_data = parse_def(def_path.read_text(encoding="utf-8"))
     netlist_data = json.loads(netlist_path.read_text(encoding="utf-8"))
+    def_data["_netlist_data"] = netlist_data
 
     # 1. Pre-routing untangling
     untangle_shared_merger_tracks(def_data)
     untangle_merger_inputs(def_data)
-    straighten_stepped_feeder_routes(def_data)
+    # shortcut_backward_splitter_detours(def_data)
+    simplify_orthogonal_routes(def_data)
     straighten_collinear_routes(def_data)
+    eliminate_staircase_jogs(def_data)
+    eliminate_u_detours(def_data)
     untangle_splitter_outputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
+    shift_congested_pin_turns(def_data)
     separate_overlapping_channel_routes(def_data)
-    # untangle_machine_inputs(def_data, netlist_data)
+    untangle_machine_inputs(def_data, netlist_data)
 
     # 2. Placement
     placement = place_components(def_data, netlist_data)
@@ -219,6 +327,11 @@ def run_diagnostics(
                     a for a in attempts if a.get("candidate") == cand and a.get("action") is None
                 ]
                 print(f"  Candidate net: {cand} (travel direction: {d})")
+                net_match = next(
+                    (n for n in def_data.get("nets", []) if n.get("name") == cand), None
+                )
+                if net_match:
+                    print(f"    Wires: {net_match.get('wires')}")
                 reasons = summarize_failures(cand_attempts)
                 if reasons:
                     print("    Rejection summary:")
@@ -251,6 +364,11 @@ def run_diagnostics(
                 print(
                     f"  - {ent.get('name')} dir={ent.get('direction')}{u_type} at ({ex:.1f}, {ey:.1f})"
                 )
+        nearby = format_nearby_components(fx, fy, def_data.get("components", []))
+        if nearby:
+            print("  Nearby components:")
+            for n in nearby:
+                print(f"  {n}")
         if not found_near:
             print("  (no entities found within radius 3.0)")
 
@@ -259,6 +377,9 @@ def run_diagnostics(
         print("\n[DRC VIOLATIONS]")
         for v in violations:
             print(f"  - [{v.code}] at ({v.x:.1f}, {v.y:.1f}): {v.message}")
+
+    if trace_reachability:
+        trace_upstream(trace_reachability, entities)
 
     print("\n--------------------------------------------------------------------------------")
     if violations:
@@ -279,11 +400,17 @@ def main(argv: list[str] | None = None) -> int:
         parts = args.tile.split(",")
         if len(parts) == 2:
             filter_tile = (float(parts[0]), float(parts[1]))
+    trace_tile = None
+    if args.trace_reachability:
+        parts = args.trace_reachability.split(",")
+        if len(parts) == 2:
+            trace_tile = (int(parts[0]), int(parts[1]))
     return run_diagnostics(
         args.def_file,
         args.netlist_json,
         filter_tile=filter_tile,
         verbose=args.verbose,
+        trace_reachability=trace_tile,
     )
 
 

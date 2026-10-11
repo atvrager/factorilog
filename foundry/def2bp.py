@@ -19,11 +19,14 @@ try:
     from foundry.circuit import wire_telemetry
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
     from foundry.def_untangle import (
+        eliminate_staircase_jogs,
+        eliminate_u_detours,
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
         separate_overlapping_channel_routes,
+        shift_congested_pin_turns,
+        simplify_orthogonal_routes,
         straighten_collinear_routes,
-        straighten_stepped_feeder_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
         untangle_merger_inputs,
@@ -51,11 +54,14 @@ except ImportError:
     from circuit import wire_telemetry
     from def_parser import extract_pins, merge_collinear_wires, parse_def
     from def_untangle import (
+        eliminate_staircase_jogs,
+        eliminate_u_detours,
         fix_reverse_splitter_inputs,
         relocate_blocked_splitter_inputs,
         separate_overlapping_channel_routes,
+        shift_congested_pin_turns,
+        simplify_orthogonal_routes,
         straighten_collinear_routes,
-        straighten_stepped_feeder_routes,
         untangle_interlocking_corners,
         untangle_machine_inputs,
         untangle_merger_inputs,
@@ -96,7 +102,6 @@ __all__ = [
     "merge_collinear_wires",
     "parse_def",
     "prune_dead_end_belts",
-    "straighten_stepped_feeder_routes",
     "untangle_machine_inputs",
     "untangle_merger_inputs",
     "untangle_shared_merger_tracks",
@@ -110,16 +115,23 @@ def build_entities(
     strict_drc: bool = True,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
+    def_data["_netlist_data"] = netlist_data
+
     # 1. Untangle symmetric splitter outputs, inputs, and commutative machine inputs
     untangle_shared_merger_tracks(def_data)
     untangle_merger_inputs(def_data)
-    straighten_stepped_feeder_routes(def_data)
+    # shortcut_backward_splitter_detours(def_data)
+    simplify_orthogonal_routes(def_data)
     straighten_collinear_routes(def_data)
+    eliminate_staircase_jogs(def_data)
+    eliminate_u_detours(def_data)
     untangle_splitter_outputs(def_data)
     fix_reverse_splitter_inputs(def_data)
     relocate_blocked_splitter_inputs(def_data)
     untangle_interlocking_corners(def_data)
+    shift_congested_pin_turns(def_data)
     separate_overlapping_channel_routes(def_data)
+    untangle_machine_inputs(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 

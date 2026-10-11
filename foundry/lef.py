@@ -72,7 +72,9 @@ def get_macro_port_slots(
     cell: dict[str, Any],
 ) -> tuple[dict[str, int], dict[str, int]]:
     """Determine vertical tile slot (0-indexed) for each input and output port."""
-    machine = cell.get("machine", "")
+    if "in_slots" in cell and "out_slots" in cell:
+        return dict(cell["in_slots"]), dict(cell["out_slots"])
+
     inputs = list(cell.get("inputs", []))
     outputs = sorted(cell.get("outputs", []))
     height = int(cell.get("height", 3))
@@ -80,68 +82,15 @@ def get_macro_port_slots(
     in_slots: dict[str, int] = {}
     out_slots: dict[str, int] = {}
 
-    if machine == "chemical-plant":
-        # Chemical plant rotated CCW (dir=12):
-        # Fluid connection slots: tile 0 (cy=0.5) and tile 2 (cy=2.5).
-        # Item inserter slots: use tiles not occupied by fluids.
-        fluid_slots = [0, 2]
-        f_idx = 0
-        used_in = set()
-        for p in inputs:
-            if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
-                slot = fluid_slots[f_idx]
-                in_slots[p] = slot
-                used_in.add(slot)
-                f_idx += 1
-        available_in = [s for s in [1, 2, 0] if s not in used_in]
-        i_idx = 0
-        for p in inputs:
-            if p not in FLUID_MATERIALS:
-                if i_idx < len(available_in):
-                    in_slots[p] = available_in[i_idx]
-                    i_idx += 1
-                else:
-                    in_slots[p] = 0
+    total_in = len(inputs)
+    offset_in = (height - total_in) // 2 if total_in <= height else 0
+    for idx, p in enumerate(inputs):
+        in_slots[p] = offset_in + idx
 
-        f_idx = 0
-        used_out = set()
-        for p in outputs:
-            if p in FLUID_MATERIALS and f_idx < len(fluid_slots):
-                slot = fluid_slots[f_idx]
-                out_slots[p] = slot
-                used_out.add(slot)
-                f_idx += 1
-        available_out = [s for s in [1, 2, 0] if s not in used_out]
-        i_idx = 0
-        for p in outputs:
-            if p not in FLUID_MATERIALS:
-                if i_idx < len(available_out):
-                    out_slots[p] = available_out[i_idx]
-                    i_idx += 1
-                else:
-                    out_slots[p] = 0
-
-    elif machine == "oil-refinery":
-        # Oil refinery rotated CW (dir=4):
-        # Fluid inputs on West: tile 1 (cy=1.5, water) and tile 3 (cy=3.5, crude oil).
-        # Fluid outputs on East: tile 0 (cy=0.5, heavy oil), tile 2 (cy=2.5, light oil), tile 4 (cy=4.5, petroleum gas).
-        refinery_in_map = {"water": 1, "crude-oil": 3}
-        refinery_out_map = {"heavy-oil": 0, "light-oil": 2, "petroleum-gas": 4}
-        for idx, p in enumerate(inputs):
-            in_slots[p] = refinery_in_map.get(p, [1, 3][min(idx, 1)])
-        for idx, p in enumerate(outputs):
-            out_slots[p] = refinery_out_map.get(p, [4, 2, 0][min(idx, 2)])
-
-    else:
-        total_in = len(inputs)
-        offset_in = (height - total_in) // 2 if total_in <= height else 0
-        for idx, p in enumerate(inputs):
-            in_slots[p] = offset_in + idx
-
-        total_out = len(outputs)
-        offset_out = (height - total_out) // 2 if total_out <= height else 0
-        for idx, p in enumerate(outputs):
-            out_slots[p] = offset_out + idx
+    total_out = len(outputs)
+    offset_out = (height - total_out) // 2 if total_out <= height else 0
+    for idx, p in enumerate(outputs):
+        out_slots[p] = offset_out + idx
 
     return in_slots, out_slots
 
@@ -154,7 +103,6 @@ def get_macro_port_geometry(
     h = float(cell.get("height", 3))
     m_h = float(cell.get("machine_height", h - 2 if h > 2 else h))
     port_faces = cell.get("port_faces", {})
-    machine = cell.get("machine", "")
 
     face = port_faces.get(port, "E") if is_output else port_faces.get(port, "W")
 
@@ -163,11 +111,13 @@ def get_macro_port_geometry(
         red_layer, green_layer = circ[0], circ[1]
     else:
         red_layer, green_layer = pdk.circuit_layers()
+
     h_layer = red_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE
     v_layer = green_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
 
     if (
-        machine in ("chemical-plant", "oil-refinery")
+        cell.get("has_fluids")
+        or cell.get("direction", 0) != 0
         or cell.get("circuit_cell")
         or cell.get("compound")
     ):
