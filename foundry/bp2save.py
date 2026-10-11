@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -54,6 +55,52 @@ def generate_control_lua(blueprint_string: str, pins_data: dict[str, Any]) -> st
     pins_json = json.dumps(pins_data)
     bp_clean = blueprint_string.strip()
 
+    try:
+        from foundry.blueprint import decode
+    except ImportError:
+        from blueprint import decode
+
+    min_x, max_x = -150.0, 150.0
+    min_y, max_y = -150.0, 150.0
+
+    try:
+        doc = decode(bp_clean)
+        bp_ents = doc.get("blueprint", {}).get("entities", [])
+        if bp_ents:
+            xs = [e["position"]["x"] for e in bp_ents if "position" in e and "x" in e["position"]]
+            ys = [e["position"]["y"] for e in bp_ents if "position" in e and "y" in e["position"]]
+            for pin in pins_data.get("inputs", []) + pins_data.get("outputs", []):
+                if "x" in pin and "y" in pin:
+                    xs.append(pin["x"])
+                    ys.append(pin["y"])
+            if xs and ys:
+                min_x = min(xs)
+                max_x = max(xs)
+                min_y = min(ys)
+                max_y = max(ys)
+    except Exception as exc:
+        sys.stderr.write(f"Warning: could not decode blueprint bounds: {exc}\n")
+
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    half_w = max(span_x / 2.0, abs(min_x), abs(max_x)) + 64.0
+    half_h = max(span_y / 2.0, abs(min_y), abs(max_y)) + 64.0
+
+    chunk_min_x = math.floor(-half_w / 32.0) - 1
+    chunk_max_x = math.ceil(half_w / 32.0) + 1
+    chunk_min_y = math.floor(-half_h / 32.0) - 1
+    chunk_max_y = math.ceil(half_h / 32.0) + 1
+
+    chunk_min_x = min(chunk_min_x, -10)
+    chunk_max_x = max(chunk_max_x, 10)
+    chunk_min_y = min(chunk_min_y, -10)
+    chunk_max_y = max(chunk_max_y, 10)
+
+    clear_min_x = chunk_min_x * 32
+    clear_max_x = (chunk_max_x + 1) * 32
+    clear_min_y = chunk_min_y * 32
+    clear_max_y = (chunk_max_y + 1) * 32
+
     return f"""-- Control script for factorilog compiled factory save.
 local BP = [==[{bp_clean}]==]
 local PINS_JSON = [==[{pins_json}]==]
@@ -64,8 +111,8 @@ local function setup_player(player)
     local cy = storage.center_y or 0
     player.teleport({{cx, cy}})
     player.force.chart(player.surface, {{
-        {{cx - 120, cy - 120}},
-        {{cx + 120, cy + 120}}
+        {{{clear_min_x}, {clear_min_y}}},
+        {{{clear_max_x}, {clear_max_y}}}
     }})
     player.cheat_mode = true
     player.insert{{name = "power-armor", count = 1}}
@@ -84,32 +131,43 @@ script.on_init(function()
     local surface = game.surfaces[1]
 
     -- Request chunks around factory
-    for cx = -10, 10 do
-        for cy = -10, 10 do
+    for cx = {chunk_min_x}, {chunk_max_x} do
+        for cy = {chunk_min_y}, {chunk_max_y} do
             surface.request_to_generate_chunks({{cx * 32, cy * 32}}, 1)
         end
     end
     surface.force_generate_chunk_requests()
 
-    -- Fill water with landfill, then pave floor with concrete
-    local landfill_tiles = {{}}
-    for x = -250, 250 do
-        for y = -250, 250 do
-            landfill_tiles[#landfill_tiles + 1] = {{name = "landfill", position = {{x, y}}}}
+    -- Fill water with landfill
+    local water_tiles = surface.find_tiles_filtered{{
+        area = {{{{{clear_min_x}, {clear_min_y}}}, {{{clear_max_x}, {clear_max_y}}}}},
+        name = {{"water", "deepwater", "water-green", "deepwater-green", "water-shallow", "water-mud"}}
+    }}
+    if #water_tiles > 0 then
+        local landfill_tiles = {{}}
+        for _, t in ipairs(water_tiles) do
+            landfill_tiles[#landfill_tiles + 1] = {{name = "landfill", position = t.position}}
         end
+        surface.set_tiles(landfill_tiles)
     end
-    surface.set_tiles(landfill_tiles)
 
-    local concrete_tiles = {{}}
-    for x = -250, 250 do
-        for y = -250, 250 do
-            concrete_tiles[#concrete_tiles + 1] = {{name = "concrete", position = {{x, y}}}}
+    -- Pave floor with concrete in chunk column batches
+    for cx = {chunk_min_x}, {chunk_max_x} do
+        local concrete_tiles = {{}}
+        local bx = cx * 32
+        for cy = {chunk_min_y}, {chunk_max_y} do
+            local by = cy * 32
+            for tx = 0, 31 do
+                for ty = 0, 31 do
+                    concrete_tiles[#concrete_tiles + 1] = {{name = "concrete", position = {{bx + tx, by + ty}}}}
+                end
+            end
         end
+        surface.set_tiles(concrete_tiles)
     end
-    surface.set_tiles(concrete_tiles)
 
     -- Clear natural debris
-    for _, entity in pairs(surface.find_entities_filtered{{area = {{{{-250, -250}}, {{250, 250}}}}}}) do
+    for _, entity in pairs(surface.find_entities_filtered{{area = {{{{{clear_min_x}, {clear_min_y}}}, {{{clear_max_x}, {clear_max_y}}}}}}}) do
         if entity.name ~= "character" then
             entity.destroy()
         end
@@ -138,11 +196,13 @@ script.on_init(function()
         error(string.format("build_blueprint failed: 0 ghosts placed (import_res=%%s, bp_entities=%%d)", tostring(import_res), #bp_entities))
     end
 
-    local min_gx, min_bx = 1e9, 1e9
-    local min_gy, min_by = 1e9, 1e9
+    local min_gx, max_gx, min_bx = 1e9, -1e9, 1e9
+    local min_gy, max_gy, min_by = 1e9, -1e9, 1e9
     for _, g in pairs(ghosts) do
         if g.position.x < min_gx then min_gx = g.position.x end
+        if g.position.x > max_gx then max_gx = g.position.x end
         if g.position.y < min_gy then min_gy = g.position.y end
+        if g.position.y > max_gy then max_gy = g.position.y end
     end
     for _, e in pairs(bp_entities) do
         if e.position.x < min_bx then min_bx = e.position.x end
@@ -152,8 +212,8 @@ script.on_init(function()
     local shift_y = math.floor((min_gy - min_by) + 0.5)
     storage.shift_x = shift_x
     storage.shift_y = shift_y
-    storage.center_x = shift_x + 30
-    storage.center_y = shift_y + 15
+    storage.center_x = math.floor((min_gx + max_gx) / 2)
+    storage.center_y = math.floor((min_gy + max_gy) / 2)
 
     for _, g in ipairs(ghosts) do
         if g and g.valid then
