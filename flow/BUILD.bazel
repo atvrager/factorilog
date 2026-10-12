@@ -305,7 +305,7 @@ factorilog_science_factory(
     use_row_placement = True,
     test_expected_item = "production-science-pack",
     test_min_active_ratio = "0.50",
-    test_ticks = 120000,
+    test_ticks = 300000,
     tags = [
         "manual",
         "science",

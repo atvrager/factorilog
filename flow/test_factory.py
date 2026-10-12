@@ -312,7 +312,8 @@ script.on_event(defines.events.on_tick, function(event)
                             local cur_tx = ptx
                             local cur_ty = pty
                             local tr_steps = 0
-                            while tr_steps < 30 do
+                            local visited = {{}}
+                            while tr_steps < 2000 do
                                 tr_steps = tr_steps + 1
                                 local cur_b = nil
                                 for _, e in ipairs(surface.find_entities_filtered{{position = {{cur_tx, cur_ty}}}}) do
@@ -325,6 +326,13 @@ script.on_event(defines.events.on_tick, function(event)
                                     log(string.format("    UPSTREAM_GAP: after %d steps, no belt at (%.1f,%.1f)", tr_steps, cur_tx, cur_ty))
                                     break
                                 end
+                                local vkey = string.format("%.1f,%.1f", cur_tx, cur_ty)
+                                if visited[vkey] then
+                                    log(string.format("    UPSTREAM_CYCLE: after %d steps, cycle at %s (%s)", tr_steps, vkey, cur_b.name))
+                                    break
+                                end
+                                visited[vkey] = true
+
                                 local c_tot = 0
                                 local found_items = {{}}
                                 for li = 1, (cur_b.type == "splitter" and 8 or 2) do
@@ -367,10 +375,90 @@ script.on_event(defines.events.on_tick, function(event)
                                         log(string.format("    UPSTREAM_UG_UNPAIRED: output at (%.1f,%.1f) dir=%d", cur_tx, cur_ty, bdir))
                                         break
                                     end
+                                elseif cur_b.type == "splitter" then
+                                    local in_cands = {{}}
+                                    if bdir == 0 then
+                                        in_cands = {{{{cur_b.position.x - 0.5, cur_b.position.y + 1}}, {{cur_b.position.x + 0.5, cur_b.position.y + 1}}}}
+                                    elseif bdir == 8 then
+                                        in_cands = {{{{cur_b.position.x - 0.5, cur_b.position.y - 1}}, {{cur_b.position.x + 0.5, cur_b.position.y - 1}}}}
+                                    elseif bdir == 4 then
+                                        in_cands = {{{{cur_b.position.x - 1, cur_b.position.y - 0.5}}, {{cur_b.position.x - 1, cur_b.position.y + 0.5}}}}
+                                    elseif bdir == 12 then
+                                        in_cands = {{{{cur_b.position.x + 1, cur_b.position.y - 0.5}}, {{cur_b.position.x + 1, cur_b.position.y + 0.5}}}}
+                                    end
+                                    local best_in = nil
+                                    for _, ic in ipairs(in_cands) do
+                                        for _, ie in ipairs(surface.find_entities_filtered{{position = ic}}) do
+                                            if (ie.type == "transport-belt" or ie.type == "underground-belt" or ie.type == "splitter") and (ie.direction == bdir or ie.type == "splitter") then
+                                                local icnt = 0
+                                                for li = 1, (ie.type == "splitter" and 8 or 2) do
+                                                    local tl = ie.get_transport_line(li)
+                                                    if tl then icnt = icnt + tl.get_item_count() end
+                                                end
+                                                if icnt > 0 then
+                                                    best_in = ic
+                                                    break
+                                                elseif not best_in then
+                                                    best_in = ic
+                                                end
+                                            end
+                                        end
+                                        if best_in and best_in == ic then break end
+                                    end
+                                    if best_in then
+                                        cur_tx = best_in[1]
+                                        cur_ty = best_in[2]
+                                    else
+                                        cur_tx = cur_tx + dx
+                                        cur_ty = cur_ty + dy
+                                    end
                                 else
-                                    cur_tx = cur_tx + dx
-                                    cur_ty = cur_ty + dy
+                                    local straight_x = cur_tx + dx
+                                    local straight_y = cur_ty + dy
+                                    local next_b = nil
+                                    for _, e in ipairs(surface.find_entities_filtered{{position = {{straight_x, straight_y}}}}) do
+                                        if (e.type == "transport-belt" or e.type == "underground-belt" or e.type == "splitter") and (e.direction == bdir or e.type == "splitter") then
+                                            next_b = e
+                                            break
+                                        end
+                                    end
+                                    if next_b then
+                                        cur_tx = straight_x
+                                        cur_ty = straight_y
+                                    else
+                                        local turn_found = false
+                                        local candidates = {{
+                                            {{tdx = 0, tdy = -1, exp_dir = 8}}, -- from North, pointing South
+                                            {{tdx = 0, tdy = 1, exp_dir = 0}},  -- from South, pointing North
+                                            {{tdx = -1, tdy = 0, exp_dir = 4}}, -- from West, pointing East
+                                            {{tdx = 1, tdy = 0, exp_dir = 12}}, -- from East, pointing West
+                                        }}
+                                        -- Do not check the downstream direction
+                                        local ds_dx, ds_dy = -dx, -dy
+                                        for _, td in ipairs(candidates) do
+                                            if not (td.tdx == ds_dx and td.tdy == ds_dy) then
+                                                local tx = cur_tx + td.tdx
+                                                local ty = cur_ty + td.tdy
+                                                for _, te in ipairs(surface.find_entities_filtered{{position = {{tx, ty}}}}) do
+                                                    if (te.type == "transport-belt" or te.type == "underground-belt" or te.type == "splitter") and te.direction == td.exp_dir then
+                                                        cur_tx = tx
+                                                        cur_ty = ty
+                                                        turn_found = true
+                                                        break
+                                                    end
+                                                end
+                                                if turn_found then break end
+                                            end
+                                        end
+                                        if not turn_found then
+                                            cur_tx = straight_x
+                                            cur_ty = straight_y
+                                        end
+                                    end
                                 end
+                            end
+                            if tr_steps >= 2000 then
+                                log(string.format("    UPSTREAM_LIMIT: reached 2000 steps without items at (%.1f,%.1f)", cur_tx, cur_ty))
                             end
                         end
                     end
@@ -467,6 +555,27 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
 
+
+        local item_totals = {{}}
+        for _, e in ipairs(surface.find_entities_filtered{{type = {{"transport-belt", "underground-belt", "splitter"}}}}) do
+            for li = 1, (e.type == "splitter" and 8 or 2) do
+                local tl = e.get_transport_line(li)
+                if tl then
+                    local fc = format_tl_contents(tl)
+                    for _, entry in ipairs(fc) do
+                        local iname = entry:match("^([^:]+)")
+                        local icnt = tonumber(entry:match(":(%d+)$")) or 0
+                        if iname and icnt > 0 then
+                            item_totals[iname] = (item_totals[iname] or 0) + icnt
+                        end
+                    end
+                end
+            end
+        end
+        for iname, icnt in pairs(item_totals) do
+            log(string.format("BELT_INVENTORY: %s = %d", iname, icnt))
+        end
+
         local zero_prod_str = table.concat(zero_prod, "; ")
         log(string.format(
             "FACTORY_TEST_RESULT: item=%s produced=%d active=%d/%d ratio=%.3f productive=%d/%d unpowered=%d zero_prod=[%s]",
@@ -519,6 +628,8 @@ end)
             or "TRACE step" in line
             or "UPSTREAM_" in line
             or "PRODUCTION_STAT:" in line
+            or "CONSUMPTION_STAT:" in line
+            or "BELT_INVENTORY:" in line
             or "NEARBY_BELTS_WITH_ITEMS" in line
             or "UNPOWERED_ENT:" in line
         ):
@@ -610,6 +721,7 @@ def main() -> None:
     if args.def_file and args.def_file.is_file():
         width, height, area = check_def_area(args.def_file, max_area=args.max_area)
         print(f"factorilog: Area validation passed ({width:.0f}x{height:.0f} = {area:.1f} tiles)")
+
 
     # 4. Headless simulation
     try:
