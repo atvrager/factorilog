@@ -190,6 +190,8 @@ factorilog_science_factory(
     enable_display_readouts = True,
     routability_driven = True,
     telemetry_taps = "io",
+    test_min_active_ratio = "0.60",
+    test_ticks = 25200,
     use_row_placement = True,
     tags = [
         "science",
