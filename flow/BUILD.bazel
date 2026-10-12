@@ -348,7 +348,6 @@ filegroup(
         ":logistic_science",
         ":military_science",
         ":production_science",
-        ":utility_science",
     ],
     tags = [
         "manual",
