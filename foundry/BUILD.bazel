@@ -50,6 +50,7 @@ py_library(
         "jumper.py",
         "lef.py",
         "liberty.py",
+        "macro_floorplan.py",
         "netbuild.py",
         "netlist.py",
         "pdk.py",

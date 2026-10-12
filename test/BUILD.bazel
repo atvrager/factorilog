@@ -245,4 +245,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "macro_floorplan_test",
+    size = "small",
+    srcs = ["test_macro_floorplan.py"],
+    data = [
+        "//flow:automation_science_netlist.json",
+    ],
+    main = "test_macro_floorplan.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+
 
