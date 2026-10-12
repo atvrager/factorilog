@@ -49,6 +49,23 @@ class ChannelRouteSegment:
 
 
 @dataclass
+class BlockPort:
+    """A physical port on the boundary of a city block core connecting to the fabric."""
+
+    name: str
+    block: tuple[int, int]
+    net_name: str
+    port_type: str  # "export" or "import"
+    edge: str  # "N", "S", "E", "W"
+    position: tuple[float, float]
+    channel_id: str
+    lane_index: int
+    direction: int
+    tier: str = "fast-transport-belt"
+    internal_pos: tuple[float, float] | None = None
+
+
+@dataclass
 class InterBlockRoute:
     """Routing lane reservations and turn instructions for an inter-block net."""
 
@@ -59,6 +76,10 @@ class InterBlockRoute:
     turns: list[tuple[int, int, str, int, str, int]] = field(default_factory=list)
     is_fluid: bool = False
     tier: str = "fast-transport-belt"
+    source_instance: str | None = None
+    target_instances: list[str] = field(default_factory=list)
+    source_port: BlockPort | None = None
+    target_ports: list[BlockPort] = field(default_factory=list)
 
 
 class MacroFloorplan:
@@ -82,6 +103,7 @@ class MacroFloorplan:
         self.channels: dict[str, StreetChannel] = {}
         self.intersections: dict[tuple[int, int], RouterIntersection] = {}
         self.routes: dict[str, InterBlockRoute] = {}
+        self.ports: list[BlockPort] = []
 
         for c in clusters:
             if c.assigned_block is not None:
@@ -120,34 +142,268 @@ class MacroFloorplan:
     def emit_channel_entities(self) -> list[dict[str, Any]]:
         """Emit all physical belts, pipes, and router switchboxes for inter-block routes."""
         entities: list[dict[str, Any]] = []
-        seen_keys: set[tuple[float, float, str]] = set()
+        occupied_tiles: set[tuple[float, float]] = set()
 
-        # Emit straight belts and pipes for all allocated channel lanes
-        for channel in self.channels.values():
-            for ent in channel.emit_straight_belts():
-                pos = ent.get("position", {})
-                key = (
-                    round(float(pos.get("x", 0.0)), 2),
-                    round(float(pos.get("y", 0.0)), 2),
-                    ent.get("name", ""),
-                )
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    entities.append(ent)
-
-        # Emit intersection switchbox entities (crossings, undergrounds, turns, splitters)
+        # Emit intersection switchbox entities first (crossings, undergrounds, turns, splitters)
         for intersection in self.intersections.values():
             for ent in intersection.emit_intersection_entities():
                 pos = ent.get("position", {})
                 key = (
                     round(float(pos.get("x", 0.0)), 2),
                     round(float(pos.get("y", 0.0)), 2),
-                    ent.get("name", ""),
                 )
-                if key not in seen_keys:
-                    seen_keys.add(key)
+                if key not in occupied_tiles:
+                    occupied_tiles.add(key)
                     entities.append(ent)
 
+        # Emit straight belts and pipes for all allocated channel lanes where not blocked by intersection entities
+        for channel in self.channels.values():
+            for ent in channel.emit_straight_belts():
+                pos = ent.get("position", {})
+                key = (
+                    round(float(pos.get("x", 0.0)), 2),
+                    round(float(pos.get("y", 0.0)), 2),
+                )
+                if key not in occupied_tiles:
+                    occupied_tiles.add(key)
+                    entities.append(ent)
+
+        return entities
+
+    def emit_port_connections(self, placement: Any = None) -> list[dict[str, Any]]:
+        """Emit physical belts connecting block interiors to the street channel fabric."""
+        entities: list[dict[str, Any]] = []
+        if placement is None:
+            return entities
+
+        inst_to_ent = getattr(placement, "inst_to_entity", {})
+        if not inst_to_ent:
+            return entities
+
+        occupied_indices: dict[tuple[float, float], int] = {}
+
+        def add_belt(
+            name: str, x: float, y: float, direction: int, btype: str | None = None
+        ) -> None:
+            key = (round(float(x), 2), round(float(y), 2))
+            ent: dict[str, Any] = {
+                "name": name,
+                "position": {"x": key[0], "y": key[1]},
+                "direction": direction,
+            }
+            if btype:
+                ent["type"] = btype
+            if key in occupied_indices:
+                entities[occupied_indices[key]] = ent
+            else:
+                occupied_indices[key] = len(entities)
+                entities.append(ent)
+
+        def make_path(
+            waypoints: list[tuple[float, float]],
+            end_dir: int = DIRECTION_EAST,
+            tier: str = "fast-transport-belt",
+        ) -> None:
+            tiles: list[tuple[float, float]] = []
+            for i in range(len(waypoints) - 1):
+                x1, y1 = waypoints[i]
+                x2, y2 = waypoints[i + 1]
+                if abs(y1 - y2) < 0.01:
+                    dx = 1.0 if x2 > x1 else -1.0
+                    cx = x1
+                    while cx <= x2 if dx > 0 else cx >= x2:
+                        tiles.append((round(cx, 2), round(y1, 2)))
+                        cx += dx
+                elif abs(x1 - x2) < 0.01:
+                    dy = 1.0 if y2 > y1 else -1.0
+                    cy = y1
+                    while cy <= y2 if dy > 0 else cy >= y2:
+                        tiles.append((round(x1, 2), round(cy, 2)))
+                        cy += dy
+            dedup: list[tuple[float, float]] = []
+            for t in tiles:
+                if not dedup or dedup[-1] != t:
+                    dedup.append(t)
+            for i in range(len(dedup)):
+                curr = dedup[i]
+                if i < len(dedup) - 1:
+                    nxt = dedup[i + 1]
+                    dx = nxt[0] - curr[0]
+                    dy = nxt[1] - curr[1]
+                    if dx > 0.5:
+                        d = DIRECTION_EAST
+                    elif dx < -0.5:
+                        d = DIRECTION_WEST
+                    elif dy > 0.5:
+                        d = DIRECTION_SOUTH
+                    elif dy < -0.5:
+                        d = DIRECTION_NORTH
+                    else:
+                        d = end_dir
+                else:
+                    d = end_dir
+                add_belt(tier, curr[0], curr[1], d)
+
+        for route_idx, route in enumerate(self.routes.values()):
+            if route.source_block is None or not route.target_blocks:
+                continue
+            src_inst = route.source_instance
+            if not src_inst or src_inst not in inst_to_ent:
+                continue
+
+            src_ent = inst_to_ent[src_inst]
+            src_pos = src_ent.get("position", {})
+            sx = float(src_pos.get("x", 0.0))
+            sy = float(src_pos.get("y", 0.0))
+            tier = route.tier
+
+            if src_ent.get("name") == "splitter":
+                out_x = sx + 1.0
+                out_y = sy - 0.5
+            else:
+                out_x = sx + 3.0
+                out_y = sy
+
+            lane_idx = route_idx % 4
+            lane_off = lane_idx * 1.0
+
+            for tgt_block in route.target_blocks:
+                tgt_insts = [
+                    ti
+                    for ti in route.target_instances
+                    if self.instance_to_block.get(ti) == tgt_block
+                ]
+                if not tgt_insts:
+                    continue
+
+                tgt_inst = tgt_insts[0]
+                if tgt_inst not in inst_to_ent:
+                    continue
+
+                tgt_ent = inst_to_ent[tgt_inst]
+                tpos = tgt_ent.get("position", {})
+                tx = float(tpos.get("x", 0.0))
+                ty = float(tpos.get("y", 0.0))
+
+                if tgt_ent.get("name") == "splitter":
+                    in_x = tx - 1.0
+                    in_y = ty - 0.5
+                else:
+                    in_x = tx - 3.0
+                    in_y = ty
+
+                src_blk = route.source_block
+
+                # Case 1: Adjacent East on same row through vertical channel
+                if src_blk[0] + 1 == tgt_block[0] and src_blk[1] == tgt_block[1]:
+                    v_lane_x = (
+                        src_blk[0] * self.chassis.pitch_x
+                        + self.chassis.core_margin_x
+                        + self.chassis.core_width
+                        + 0.5
+                        + lane_off
+                    )
+                    waypoints = [
+                        (out_x, out_y),
+                        (v_lane_x, out_y),
+                        (v_lane_x, in_y),
+                        (in_x, in_y),
+                    ]
+                    make_path(waypoints, end_dir=DIRECTION_EAST, tier=tier)
+
+                # Case 2: Adjacent South on same column through horizontal channel
+                elif src_blk[0] == tgt_block[0] and src_blk[1] + 1 == tgt_block[1]:
+                    h_lane_y = (
+                        src_blk[1] * self.chassis.pitch_y
+                        + self.chassis.core_margin_y
+                        + self.chassis.core_height
+                        + 0.5
+                        + lane_off
+                    )
+                    p_lead = [
+                        (out_x, out_y),
+                        (out_x, h_lane_y),
+                        (in_x, h_lane_y),
+                        (in_x, in_y - 6.0),
+                    ]
+                    make_path(p_lead, end_dir=DIRECTION_SOUTH, tier=tier)
+                    add_belt("fast-underground-belt", in_x, in_y - 5.0, DIRECTION_SOUTH, "input")
+                    add_belt("fast-underground-belt", in_x, in_y, DIRECTION_SOUTH, "output")
+                    add_belt(tier, in_x, in_y + 1.0, DIRECTION_EAST)
+
+                # Case 3: Target block is East and South
+                elif src_blk[0] < tgt_block[0] and src_blk[1] < tgt_block[1]:
+                    h_lane_y = (
+                        src_blk[1] * self.chassis.pitch_y
+                        + self.chassis.core_margin_y
+                        + self.chassis.core_height
+                        + 0.5
+                        + lane_off
+                    )
+                    v_lane_x = (
+                        tgt_block[0] * self.chassis.pitch_x
+                        + self.chassis.core_margin_x
+                        - 3.5
+                        + lane_off
+                    )
+                    waypoints = [
+                        (out_x, out_y),
+                        (out_x, h_lane_y),
+                        (v_lane_x, h_lane_y),
+                        (v_lane_x, in_y),
+                        (in_x, in_y),
+                    ]
+                    make_path(waypoints, end_dir=DIRECTION_EAST, tier=tier)
+
+                # Fallback: general orthogonal routing
+                else:
+                    h_lane_y = (
+                        src_blk[1] * self.chassis.pitch_y
+                        + self.chassis.core_margin_y
+                        + self.chassis.core_height
+                        + 0.5
+                        + lane_off
+                    )
+                    turn_x = (
+                        tgt_block[0] * self.chassis.pitch_x
+                        + self.chassis.core_margin_x
+                        - 3.5
+                        + lane_off
+                    )
+                    waypoints = [
+                        (out_x, out_y),
+                        (out_x, h_lane_y),
+                        (turn_x, h_lane_y),
+                        (turn_x, in_y),
+                        (in_x, in_y),
+                    ]
+                    make_path(waypoints, end_dir=DIRECTION_EAST, tier=tier)
+
+        return entities
+
+    def emit_fabric_entities(self, placement: Any = None) -> list[dict[str, Any]]:
+        """Emit all physical belts, intersections, and port structures for the chassis fabric."""
+        entities = self.emit_channel_entities()
+        if placement is not None:
+            port_ents = self.emit_port_connections(placement=placement)
+            port_by_pos = {
+                (
+                    round(float(pe["position"]["x"]), 2),
+                    round(float(pe["position"]["y"]), 2),
+                ): pe
+                for pe in port_ents
+                if "position" in pe
+            }
+            result: list[dict[str, Any]] = []
+            for e in entities:
+                pos = e.get("position", {})
+                key = (round(float(pos.get("x", 0.0)), 2), round(float(pos.get("y", 0.0)), 2))
+                if key in port_by_pos:
+                    result.append(port_by_pos.pop(key))
+                else:
+                    result.append(e)
+            result.extend(port_by_pos.values())
+            return result
         return entities
 
 
@@ -428,6 +684,8 @@ class MacroFloorplanner:
         # Map each net to its driving block and consuming blocks
         net_producers: dict[str, tuple[int, int]] = {}
         net_consumers: dict[str, set[tuple[int, int]]] = {}
+        net_producer_inst: dict[str, str] = {}
+        net_consumer_insts: dict[str, list[str]] = {}
 
         for inst in netlist_data.get("instances", []):
             iname = inst.get("name", "")
@@ -439,10 +697,12 @@ class MacroFloorplanner:
             for out_net in cell_meta.get("outputs", []):
                 if out_net not in ("y", "y1", "y2"):
                     net_producers[out_net] = block
+                    net_producer_inst[out_net] = iname
 
             for in_net in cell_meta.get("inputs", []):
                 if in_net not in ("a", "b", "a1", "a2"):
                     net_consumers.setdefault(in_net, set()).add(block)
+                    net_consumer_insts.setdefault(in_net, []).append(iname)
 
         # Route every net that connects different blocks
         all_nets = set(net_producers.keys()) | set(net_consumers.keys())
@@ -467,6 +727,8 @@ class MacroFloorplanner:
                 target_blocks=target_blocks,
                 is_fluid=is_fluid,
                 tier=tier,
+                source_instance=net_producer_inst.get(net_name),
+                target_instances=net_consumer_insts.get(net_name, []),
             )
 
             # Route from source_block to each target_block

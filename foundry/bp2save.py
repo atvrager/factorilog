@@ -63,9 +63,15 @@ def generate_control_lua(blueprint_string: str, pins_data: dict[str, Any]) -> st
     min_x, max_x = -150.0, 150.0
     min_y, max_y = -150.0, 150.0
 
+    has_custom_tiles = False
+    tiles_json = "[]"
     try:
         doc = decode(bp_clean)
         bp_ents = doc.get("blueprint", {}).get("entities", [])
+        bp_tiles = doc.get("blueprint", {}).get("tiles", [])
+        if bp_tiles:
+            has_custom_tiles = True
+            tiles_json = json.dumps(bp_tiles)
         if bp_ents:
             xs = [e["position"]["x"] for e in bp_ents if "position" in e and "x" in e["position"]]
             ys = [e["position"]["y"] for e in bp_ents if "position" in e and "y" in e["position"]]
@@ -104,6 +110,8 @@ def generate_control_lua(blueprint_string: str, pins_data: dict[str, Any]) -> st
     return f"""-- Control script for factorilog compiled factory save.
 local BP = [==[{bp_clean}]==]
 local PINS_JSON = [==[{pins_json}]==]
+local TILES_JSON = [==[{tiles_json}]==]
+local HAS_CUSTOM_TILES = {str(has_custom_tiles).lower()}
 
 local function setup_player(player)
     if not (player and player.valid) then return end
@@ -151,19 +159,21 @@ script.on_init(function()
         surface.set_tiles(landfill_tiles)
     end
 
-    -- Pave floor with concrete in chunk column batches
-    for cx = {chunk_min_x}, {chunk_max_x} do
-        local concrete_tiles = {{}}
-        local bx = cx * 32
-        for cy = {chunk_min_y}, {chunk_max_y} do
-            local by = cy * 32
-            for tx = 0, 31 do
-                for ty = 0, 31 do
-                    concrete_tiles[#concrete_tiles + 1] = {{name = "concrete", position = {{bx + tx, by + ty}}}}
+    -- Pave floor with concrete in chunk column batches if no custom blueprint tiles
+    if not HAS_CUSTOM_TILES then
+        for cx = {chunk_min_x}, {chunk_max_x} do
+            local concrete_tiles = {{}}
+            local bx = cx * 32
+            for cy = {chunk_min_y}, {chunk_max_y} do
+                local by = cy * 32
+                for tx = 0, 31 do
+                    for ty = 0, 31 do
+                        concrete_tiles[#concrete_tiles + 1] = {{name = "concrete", position = {{bx + tx, by + ty}}}}
+                    end
                 end
             end
+            surface.set_tiles(concrete_tiles)
         end
-        surface.set_tiles(concrete_tiles)
     end
 
     -- Clear natural debris
@@ -218,6 +228,32 @@ script.on_init(function()
     for _, g in ipairs(ghosts) do
         if g and g.valid then
             g.silent_revive()
+        end
+    end
+
+    -- Explicitly set blueprint pavement tiles and revive/clean tile ghosts
+    local TILES_DATA = helpers.json_to_table(TILES_JSON) or {{}}
+    if #TILES_DATA > 0 then
+        local tiles_to_set = {{}}
+        for _, t in ipairs(TILES_DATA) do
+            tiles_to_set[#tiles_to_set + 1] = {{
+                name = t.name,
+                position = {{t.position.x + shift_x, t.position.y + shift_y}}
+            }}
+        end
+        surface.set_tiles(tiles_to_set)
+    end
+
+    local tile_ghosts = surface.find_entities_filtered{{name = "tile-ghost"}}
+    for _, tg in ipairs(tile_ghosts) do
+        if tg and tg.valid then
+            tg.silent_revive()
+        end
+    end
+    local remaining_tg = surface.find_entities_filtered{{name = "tile-ghost"}}
+    for _, tg in ipairs(remaining_tg) do
+        if tg and tg.valid then
+            tg.destroy()
         end
     end
 

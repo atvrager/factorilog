@@ -470,7 +470,7 @@ def prune_dead_end_belts(
     belt_map: dict[tuple[float, float], dict[str, Any]] = {
         (round(e["position"]["x"], 1), round(e["position"]["y"], 1)): e
         for e in entities
-        if e.get("name") == "transport-belt"
+        if "transport-belt" in e.get("name", "") and "underground" not in e.get("name", "")
     }
 
     while True:
@@ -497,6 +497,10 @@ def prune_dead_end_belts(
         for pos in to_remove:
             del belt_map[pos]
 
-    clean_entities = [e for e in entities if e.get("name") != "transport-belt"]
+    clean_entities = [
+        e
+        for e in entities
+        if not ("transport-belt" in e.get("name", "") and "underground" not in e.get("name", ""))
+    ]
     clean_entities.extend(belt_map.values())
     return clean_entities

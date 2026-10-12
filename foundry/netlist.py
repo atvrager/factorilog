@@ -512,13 +512,11 @@ def split_net(
     count = [0]
     bal_count = [0]
     inst_by_name = {inst.name: inst for inst in nl.instances}
-    is_primary = (net.material in nl.inputs) or any(
-        "furnace" in nl.cells.get(inst.cell_key, {}).get("machine", "")
-        and inst.recipe == net.material
-        for inst in nl.instances
-    )
     sink_ranks = [inst_by_name[s].rank for s in net.sinks if s in inst_by_name]
     driver_ranks = [inst_by_name[d].rank for d in net.drivers if d in inst_by_name]
+    is_primary = (net.material in nl.inputs) or (
+        sink_ranks and driver_ranks and min(driver_ranks) < min(sink_ranks)
+    )
     if is_primary and sink_ranks and min(sink_ranks) > 0:
         rank = min(sink_ranks)
     elif driver_ranks:

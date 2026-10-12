@@ -96,9 +96,111 @@ def build_entities(
     # 2. Place components, machines, and inserters
     placement = place_components(def_data, netlist_data)
 
+    fabric_entities: list[dict[str, Any]] = []
+    floorplan = None
+    if def_data.get("blockages"):
+        try:
+            from foundry.chassis import CityBlockChassis
+            from foundry.macro_floorplan import InterBlockRoute, MacroFloorplanner
+        except ImportError:
+            from chassis import CityBlockChassis
+            from macro_floorplan import InterBlockRoute, MacroFloorplanner
+
+        units = float(def_data.get("units", 1000))
+        die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
+        die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
+        grid_w = max(1, round(die_w / 100.0))
+        grid_h = max(1, round(die_h / 100.0))
+
+        bp_candidates = [
+            Path("cityblock.bp"),
+            Path(__file__).resolve().parent.parent / "cityblock.bp",
+            Path("/home/atv/src/factorilog/cityblock.bp"),
+        ]
+        chassis: CityBlockChassis | None = None
+        for bp_cand in bp_candidates:
+            if bp_cand.is_file():
+                try:
+                    chassis = CityBlockChassis.from_blueprint_file(bp_cand)
+                    break
+                except Exception:
+                    pass
+        if chassis is None:
+            chassis = CityBlockChassis(pitch=100, core_width=94, core_height=94, channel_width=6)
+
+        macro_planner = MacroFloorplanner(chassis=chassis)
+        floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
+        floorplan.routes.clear()
+        for ch in floorplan.channels.values():
+            ch.allocated_lanes.clear()
+        for inter in floorplan.intersections.values():
+            inter.turns.clear()
+            inter.switches.clear()
+
+        inst_to_block: dict[str, tuple[int, int]] = {}
+        for iname, ent in placement.inst_to_entity.items():
+            pos = ent.get("position", {})
+            bx = int(float(pos.get("x", 0.0)) // 100.0)
+            by = int(float(pos.get("y", 0.0)) // 100.0)
+            inst_to_block[iname] = (bx, by)
+            floorplan.instance_to_block[iname] = (bx, by)
+
+        inst_to_cell = {i["name"]: i.get("cell", "") for i in netlist_data.get("instances", [])}
+        cell_table = netlist_data.get("cells", {})
+
+        for net in def_data.get("nets", []):
+            nname = net.get("name", "")
+            conns = net.get("connections", [])
+            blocks = {inst_to_block[iname] for iname, _ in conns if iname in inst_to_block}
+            if len(blocks) > 1:
+                # Inter-block net: remove flat OpenROAD routing wires
+                net["wires"] = []
+                net["vias"] = []
+
+                driver_inst = None
+                sink_insts = []
+                for iname, pin in conns:
+                    cell_id = inst_to_cell.get(iname, "")
+                    cell_meta = cell_table.get(cell_id, {})
+                    outs = cell_meta.get("outputs", [])
+                    clean_outs = {o.replace("_", "-") for o in outs} | set(outs)
+                    if (
+                        pin in clean_outs
+                        or pin.replace("_", "-") in clean_outs
+                        or pin in ("y", "y1", "y2", "out")
+                    ):
+                        driver_inst = iname
+                    else:
+                        sink_insts.append(iname)
+
+                if driver_inst and sink_insts:
+                    s_blk = inst_to_block[driver_inst]
+                    t_blks = [inst_to_block[si] for si in sink_insts if si in inst_to_block]
+                    route = InterBlockRoute(
+                        net_name=nname,
+                        source_block=s_blk,
+                        target_blocks=t_blks,
+                        source_instance=driver_inst,
+                        target_instances=sink_insts,
+                    )
+                    floorplan.routes[nname] = route
+        fabric_entities = floorplan.emit_fabric_entities(placement=placement)
+        for fe in fabric_entities:
+            placement.entities.append(fe)
+            fpos = fe.get("position", {})
+            placement.occupied_positions.add(
+                (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
+            )
+
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
     debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
     routes = route_and_resolve_jumpers(def_data, netlist_data, placement, debug_trace=debug_trace)
+
+    if floorplan:
+        for fe in fabric_entities:
+            fpos = fe.get("position", {})
+            k = (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
+            routes.tile_to_nets.setdefault(k, set())
 
     # 3b. Insert inline pumps to segment overextended pipelines (<= 320 tiles)
     insert_pipeline_pumps(placement, routes, def_data, netlist_data)
@@ -116,7 +218,7 @@ def build_entities(
     collision_pairs = check_collisions(placement.entities)
     if collision_pairs:
         raise RuntimeError(
-            f"Collision check failed: {len(collision_pairs)} overlapping entity pairs detected"
+            f"Collision check failed: {len(collision_pairs)} overlapping entity pairs detected: {collision_pairs[:10]}"
         )
 
     unpaired_hoods = check_underground_pairing(placement.entities)
@@ -417,10 +519,8 @@ def main() -> int:
     if def_data.get("blockages"):
         try:
             from foundry.chassis import CityBlockChassis
-            from foundry.macro_floorplan import MacroFloorplanner
         except ImportError:
             from chassis import CityBlockChassis
-            from macro_floorplan import MacroFloorplanner
 
         units = float(def_data.get("units", 1000))
         die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
@@ -448,10 +548,6 @@ def main() -> int:
         base_entities = base_bp.get("blueprint", {}).get("entities", [])
         tiles = base_bp.get("blueprint", {}).get("tiles", [])
 
-        # Emit channel entities from macro floorplanner
-        macro_planner = MacroFloorplanner(chassis=chassis)
-        floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
-        channel_entities = floorplan.emit_channel_entities()
         entities = jumper_belts_across_chassis_poles(entities, base_entities)
 
         occupied_tiles: set[tuple[float, float]] = set()
@@ -484,7 +580,7 @@ def main() -> int:
             else:
                 occupied_tiles.add((round(ex, 2), round(ey, 2)))
 
-        for be in base_entities + channel_entities:
+        for be in base_entities:
             if "position" not in be:
                 continue
             bpos = be.get("position", {})
