@@ -311,22 +311,41 @@ class MacroFloorplan:
                     ]
                     make_path(waypoints, end_dir=DIRECTION_EAST, tier=tier)
 
-                # Case 2: Adjacent South on same column through horizontal channel
+                # Case 2: Adjacent South on same column through vertical corridor and crossroad intersection
                 elif src_blk[0] == tgt_block[0] and src_blk[1] + 1 == tgt_block[1]:
-                    h_lane_y = (
-                        src_blk[1] * self.chassis.pitch_y
-                        + self.chassis.core_margin_y
-                        + self.chassis.core_height
-                        + 0.5
-                        + lane_off
+                    ix = src_blk[0]
+                    iy = tgt_block[1]
+                    center_x = ix * self.chassis.pitch_x
+                    center_y = iy * self.chassis.pitch_y
+                    v_lane_x = center_x + 1.5
+                    h_lane_y = center_y - 0.5
+
+                    lead_y = min(
+                        out_y - 2.0,
+                        src_blk[1] * self.chassis.pitch_y + self.chassis.core_margin_y + 8.5,
                     )
+                    cross_y = out_y
                     p_lead = [
                         (out_x, out_y),
-                        (out_x, h_lane_y),
-                        (in_x, h_lane_y),
-                        (in_x, in_y - 6.0),
+                        (out_x, lead_y),
+                        (v_lane_x, lead_y),
+                        (v_lane_x, cross_y - 1.0),
                     ]
                     make_path(p_lead, end_dir=DIRECTION_SOUTH, tier=tier)
+                    add_belt(
+                        "fast-underground-belt", v_lane_x, cross_y - 1.0, DIRECTION_SOUTH, "input"
+                    )
+                    add_belt(
+                        "fast-underground-belt", v_lane_x, cross_y + 1.0, DIRECTION_SOUTH, "output"
+                    )
+
+                    p_to_tgt = [
+                        (v_lane_x, cross_y + 2.0),
+                        (v_lane_x, h_lane_y),
+                        (in_x, h_lane_y),
+                        (in_x, in_y - 5.0),
+                    ]
+                    make_path(p_to_tgt, end_dir=DIRECTION_SOUTH, tier=tier)
                     add_belt("fast-underground-belt", in_x, in_y - 5.0, DIRECTION_SOUTH, "input")
                     add_belt("fast-underground-belt", in_x, in_y, DIRECTION_SOUTH, "output")
                     add_belt(tier, in_x, in_y + 1.0, DIRECTION_EAST)
@@ -337,23 +356,42 @@ class MacroFloorplan:
                         src_blk[1] * self.chassis.pitch_y
                         + self.chassis.core_margin_y
                         + self.chassis.core_height
-                        + 0.5
-                        + lane_off
+                        + 1.5
                     )
-                    v_lane_x = (
-                        tgt_block[0] * self.chassis.pitch_x
-                        + self.chassis.core_margin_x
-                        - 3.5
-                        + lane_off
+                    v_lane_x = tgt_block[0] * self.chassis.pitch_x - 1.5
+
+                    # 1. Lead from source to horizontal channel
+                    make_path(
+                        [(out_x, out_y), (out_x, h_lane_y)], end_dir=DIRECTION_EAST, tier=tier
                     )
-                    waypoints = [
-                        (out_x, out_y),
-                        (out_x, h_lane_y),
-                        (v_lane_x, h_lane_y),
-                        (v_lane_x, in_y),
-                        (in_x, in_y),
-                    ]
-                    make_path(waypoints, end_dir=DIRECTION_EAST, tier=tier)
+
+                    # 2. Traverse horizontal channel, adding underground jumpers across intermediate intersections
+                    curr_x = out_x
+                    for col in range(src_blk[0] + 1, tgt_block[0]):
+                        cx = col * self.chassis.pitch_x
+                        make_path(
+                            [(curr_x, h_lane_y), (cx - 4.5, h_lane_y)],
+                            end_dir=DIRECTION_EAST,
+                            tier=tier,
+                        )
+                        add_belt(
+                            "fast-underground-belt", cx - 3.5, h_lane_y, DIRECTION_EAST, "input"
+                        )
+                        add_belt(
+                            "fast-underground-belt", cx + 3.5, h_lane_y, DIRECTION_EAST, "output"
+                        )
+                        curr_x = cx + 4.5
+
+                    # 3. Approach and turn inside target intersection
+                    make_path(
+                        [(curr_x, h_lane_y), (v_lane_x, h_lane_y)],
+                        end_dir=DIRECTION_EAST,
+                        tier=tier,
+                    )
+                    make_path(
+                        [(v_lane_x, h_lane_y), (v_lane_x, in_y)], end_dir=DIRECTION_SOUTH, tier=tier
+                    )
+                    make_path([(v_lane_x, in_y), (in_x, in_y)], end_dir=DIRECTION_EAST, tier=tier)
 
                 # Fallback: general orthogonal routing
                 else:

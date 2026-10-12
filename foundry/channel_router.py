@@ -153,6 +153,11 @@ class StreetChannel:
         lane.item_type = None
         lane.tier = self.default_tier
 
+    def clear_allocations(self) -> None:
+        """Deallocate all lanes in this street channel."""
+        for i in range(len(self.lanes)):
+            self.free_lane(i)
+
     def emit_straight_belts(
         self,
         start_coord: float | None = None,
@@ -217,6 +222,11 @@ class RouterIntersection:
         self.turns: list[tuple[str, int, str, int]] = []
         # Lane switches: (orientation, lane_a, lane_b, filter_item, approach_offset)
         self.switches: list[tuple[str, int, int, str | None, int]] = []
+
+    def clear(self) -> None:
+        """Clear all turn configurations and lane switches."""
+        self.turns.clear()
+        self.switches.clear()
 
     def add_turn(
         self,

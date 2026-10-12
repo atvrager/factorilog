@@ -132,10 +132,9 @@ def build_entities(
         floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
         floorplan.routes.clear()
         for ch in floorplan.channels.values():
-            ch.allocated_lanes.clear()
+            ch.clear_allocations()
         for inter in floorplan.intersections.values():
-            inter.turns.clear()
-            inter.switches.clear()
+            inter.clear()
 
         inst_to_block: dict[str, tuple[int, int]] = {}
         for iname, ent in placement.inst_to_entity.items():
@@ -184,6 +183,75 @@ def build_entities(
                         target_instances=sink_insts,
                     )
                     floorplan.routes[nname] = route
+
+        # Route external inputs entering chassis grid
+        input_channel_entities: list[dict[str, Any]] = []
+        input_pin_nets = {
+            pin.get("net", pin.get("name", ""))
+            for pin in def_data.get("pins", [])
+            if pin.get("direction") == "INPUT"
+        }
+        for net in def_data.get("nets", []):
+            nname = net.get("name", "")
+            if nname not in input_pin_nets:
+                continue
+            conns = net.get("connections", [])
+            has_pin = any(iname == "PIN" for iname, _ in conns)
+            if not has_pin:
+                continue
+            sink_insts = [iname for iname, _ in conns if iname in inst_to_block]
+            if not sink_insts:
+                continue
+            target_block = inst_to_block[sink_insts[0]]
+            if target_block[0] > 0:
+                net["wires"] = []
+                net["vias"] = []
+                net_name = net.get("name", "")
+                ch_x = target_block[0] * 100.0 - 1.5
+
+                # Update pin position in def_data
+                for pin in def_data.get("pins", []):
+                    if pin.get("net") == net_name or pin.get("name") == net_name:
+                        dbu = float(def_data.get("units", 1000))
+                        pin["x"] = int(ch_x * dbu - 500)
+                        pin["y"] = 0
+
+                sink_ent = placement.inst_to_entity.get(sink_insts[0])
+                if sink_ent:
+                    spos = sink_ent.get("position", {})
+                    sx = float(spos.get("x", 0.0))
+                    sy = float(spos.get("y", 0.0))
+                    target_x = sx - 1.0 if sink_ent.get("name") == "splitter" else sx - 0.5
+                    target_y = sy - 0.5 if sink_ent.get("name") == "splitter" else sy
+
+                    # Vertical channel belt from entrance to sink row
+                    cur_y = 0.5
+                    while cur_y < target_y:
+                        pos = {"x": ch_x, "y": cur_y}
+                        b_ent = {
+                            "name": "transport-belt",
+                            "position": pos,
+                            "direction": DIRECTION_SOUTH,
+                        }
+                        input_channel_entities.append(b_ent)
+                        placement.entities.append(b_ent)
+                        placement.occupied_positions.add((ch_x, cur_y))
+                        cur_y += 1.0
+
+                    # Turn East into target block
+                    cur_x = ch_x
+                    while cur_x <= target_x:
+                        pos = {"x": cur_x, "y": target_y}
+                        b_ent = {
+                            "name": "transport-belt",
+                            "position": pos,
+                            "direction": DIRECTION_EAST,
+                        }
+                        input_channel_entities.append(b_ent)
+                        placement.entities.append(b_ent)
+                        placement.occupied_positions.add((cur_x, target_y))
+                        cur_x += 1.0
+
         fabric_entities = floorplan.emit_fabric_entities(placement=placement)
         for fe in fabric_entities:
             placement.entities.append(fe)
@@ -200,6 +268,10 @@ def build_entities(
         for fe in fabric_entities:
             fpos = fe.get("position", {})
             k = (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
+            routes.tile_to_nets.setdefault(k, set())
+        for ie in input_channel_entities:
+            ipos = ie.get("position", {})
+            k = (round(float(ipos.get("x", 0.0)), 2), round(float(ipos.get("y", 0.0)), 2))
             routes.tile_to_nets.setdefault(k, set())
 
     # 3b. Insert inline pumps to segment overextended pipelines (<= 320 tiles)
