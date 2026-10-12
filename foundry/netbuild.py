@@ -114,6 +114,7 @@ def build_all(
     sidecar = {
         "demand": demand,
         "fluids": sorted(data.prototypes.get("fluid", {}).keys()),
+        "underground_spans": tech.underground_tier_spans(),
         "inputs": nl.inputs,
         "outputs": nl.outputs,
         "raw_rates_per_min": {m: nl.nets[m].rate_per_min for m in nl.inputs},

@@ -48,6 +48,7 @@ BELT_TABLE = "transport-belt"
 UNDERGROUND_TABLE = "underground-belt"
 INSERTER_TABLE = "inserter"
 POLE_TABLE = "electric-pole"
+PIPE_TO_GROUND_TABLE = "pipe-to-ground"
 
 
 def inserter_spec(proto: dict[str, Any]) -> dict[str, Any]:
@@ -188,9 +189,9 @@ def power_switch_cell() -> dict[str, Any]:
     }
 
 
-# Pipe-to-ground span, tiles. The prototype dump carries no max_distance
-# for it, unlike underground belts. One measurement in game fills this.
-PIPE_TO_GROUND_SPAN = 11
+# Pipe-to-ground default span in tiles.
+DEFAULT_PIPE_TO_GROUND_SPAN = 10
+PIPE_TO_GROUND_SPAN = DEFAULT_PIPE_TO_GROUND_SPAN
 
 
 def items_per_second(speed: float | str) -> float:
@@ -227,6 +228,7 @@ class Pdk:
         self.data = data
         self.belts = data.prototypes.get(BELT_TABLE, {})
         self.undergrounds = data.prototypes.get(UNDERGROUND_TABLE, {})
+        self.underground_pipes = data.prototypes.get(PIPE_TO_GROUND_TABLE, {})
         self.inserters = data.prototypes.get(INSERTER_TABLE, {})
         self.poles = data.prototypes.get(POLE_TABLE, {})
         self.machines: dict[str, dict[str, Any]] = {}
@@ -515,13 +517,27 @@ class Pdk:
             res_cell["port_faces"] = port_faces
         return res_cell
 
+    def pipe_span(self, name: str = "pipe-to-ground") -> int:
+        """Get maximum underground span for pipe-to-ground entity from prototype data."""
+        proto = self.underground_pipes.get(name, {})
+        fluid_box = proto.get("fluid_box", {})
+        for conn in fluid_box.get("pipe_connections", []):
+            if conn.get("connection_type") == "underground" and "max_underground_distance" in conn:
+                return int(conn["max_underground_distance"])
+        return DEFAULT_PIPE_TO_GROUND_SPAN
+
     def underground_tier_spans(self) -> dict[str, int]:
-        """Map each underground belt entity to its maximum span in tiles."""
-        return {
+        """Return dictionary of maximum spans for underground belts and pipes."""
+        spans = {
             tier["underground"]: int(tier["span"])
             for tier in self.belt_tiers()
             if tier.get("underground")
         }
+        for name in self.underground_pipes:
+            spans[name] = self.pipe_span(name)
+        if "pipe-to-ground" not in spans:
+            spans["pipe-to-ground"] = self.pipe_span("pipe-to-ground")
+        return spans
 
     def circuit_layers(self) -> tuple[str, str]:
         """Derive horizontal red and vertical green layers after all active underground tiers."""
@@ -588,7 +604,7 @@ class Pdk:
             layers_dict[h_layer] = {
                 "via": "tunnel-pair",
                 "tiers": self.belt_tiers(),
-                "span": PIPE_TO_GROUND_SPAN if idx == 0 else tier.get("span", 5),
+                "span": self.pipe_span() if idx == 0 else tier.get("span", 5),
             }
             layers_dict[v_layer] = {"via": "tunnel-turn"}
         red_layer, green_layer = self.circuit_layers()

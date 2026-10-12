@@ -33,9 +33,9 @@ except ImportError:
     )
 
 try:
-    from foundry.entity_helpers import entity_size
+    from foundry.entity_helpers import entity_size, get_underground_span
 except ImportError:
-    from entity_helpers import entity_size
+    from entity_helpers import entity_size, get_underground_span
 
 try:
     from foundry.pump_insertion import (
@@ -1168,7 +1168,7 @@ class BeltDrcChecker:
         violations: list[DrcViolation] = []
         pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
         matched: set[int] = set()
-        max_span = 11
+        max_span = get_underground_span("pipe-to-ground", 10)
 
         for p in pipes:
             if id(p) in matched:
@@ -1221,7 +1221,7 @@ class BeltDrcChecker:
         """Detect pipe-to-ground hoods inside active underground spans or parallel span overlaps (Rule DRC-15)."""
         violations: list[DrcViolation] = []
         pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
-        max_span = 11
+        max_span = get_underground_span("pipe-to-ground", 10)
         matched: set[int] = set()
 
         spans: list[tuple[tuple[int, int], tuple[int, int], int, list[tuple[int, int]]]] = []

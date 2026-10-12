@@ -42,6 +42,7 @@ DEFAULT_UNDERGROUND_SPANS: dict[str, int] = {
     "underground-belt": 5,
     "fast-underground-belt": 7,
     "express-underground-belt": 9,
+    "pipe-to-ground": 10,
 }
 
 
@@ -497,7 +498,11 @@ def route_and_resolve_jumpers(
                         tile_to_nets[(cur, cy)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
+                    max_pipe_span = tier_spans.get("pipe-to-ground", 10)
+                    max_belt_span = max(
+                        (v for k, v in tier_spans.items() if "belt" in k), default=5
+                    )
+                    max_allowed_span = max_pipe_span if is_fluid else max_belt_span
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cy, True, nname=nname)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(h_start, cy)].add(nname)
@@ -593,7 +598,11 @@ def route_and_resolve_jumpers(
                         tile_to_nets[(cx, cur)].add(nname)
                         cur = round(cur + step, 2)
                 else:
-                    max_allowed_span = 10 if is_fluid else max(tier_spans.values(), default=5)
+                    max_pipe_span = tier_spans.get("pipe-to-ground", 10)
+                    max_belt_span = max(
+                        (v for k, v in tier_spans.items() if "belt" in k), default=5
+                    )
+                    max_allowed_span = max_pipe_span if is_fluid else max_belt_span
                     hops = segment_run(ug_start, ug_end, max_allowed_span, cx, False, nname=nname)
                     for h_start, h_end, h_span in hops:
                         tile_to_nets[(cx, h_start)].add(nname)
@@ -665,7 +674,7 @@ def route_and_resolve_jumpers(
         dx, dy = DIR_STEPS[ug_d]
         ix = round(u_in["position"]["x"], 2)
         iy = round(u_in["position"]["y"], 2)
-        max_s = 11 if is_pipe else 10
+        max_s = tier_spans.get(u_in.get("name", "pipe-to-ground"), 10) if is_pipe else 10
         expected_out_dir = ug_d if is_pipe else d
         for s in range(1, max_s + 1):
             chk_pos = (round(ix + dx * s, 2), round(iy + dy * s, 2))
@@ -812,10 +821,9 @@ def route_and_resolve_jumpers(
                 continue
             dx, dy = DIR_STEPS[d]
             opp_d = OPPOSITE_DIR[d]
-            max_belt_span = (
-                max(v for k, v in tier_spans.items() if "belt" in k) if tier_spans else 5
-            )
-            max_allowed_span = 11 if is_fluid else max_belt_span
+            max_belt_span = max((v for k, v in tier_spans.items() if "belt" in k), default=5)
+            max_pipe_span = tier_spans.get("pipe-to-ground", 10)
+            max_allowed_span = max_pipe_span if is_fluid else max_belt_span
 
             for bspan in range(1, max_allowed_span):
                 in_pos = (round(cx - dx * bspan, 2), round(cy - dy * bspan, 2))

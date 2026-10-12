@@ -66,6 +66,12 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertEqual(tiers[-1]["span"], 9)
         self.assertAlmostEqual(tiers[-1]["items_per_lane"], 22.5)
 
+    def test_pipe_span_derived_from_prototype(self) -> None:
+        span = self.pdk.pipe_span()
+        self.assertEqual(span, 10)
+        spans = self.pdk.underground_tier_spans()
+        self.assertEqual(spans["pipe-to-ground"], 10)
+
     def test_tech_json(self) -> None:
         tech = self.pdk.tech_json()
         self.assertIn("M2", tech["layers"])

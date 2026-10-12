@@ -46,6 +46,18 @@ def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
 
 _PROTOTYPE_BOXES: dict[str, tuple[float, float]] = {}
 _PROTOTYPE_COLLISIONS: dict[str, tuple[float, float]] = {}
+_PROTOTYPE_SPANS: dict[str, int] = {}
+
+
+def _extract_proto_span(proto: dict[str, Any]) -> int | None:
+    if "max_distance" in proto:
+        return int(proto["max_distance"])
+    fluid_box = proto.get("fluid_box")
+    if isinstance(fluid_box, dict):
+        for conn in fluid_box.get("pipe_connections", []):
+            if conn.get("connection_type") == "underground" and "max_underground_distance" in conn:
+                return int(conn["max_underground_distance"])
+    return None
 
 
 def entity_bounding_box(proto: dict[str, Any]) -> tuple[float, float]:
@@ -57,7 +69,7 @@ def entity_bounding_box(proto: dict[str, Any]) -> tuple[float, float]:
 
 
 def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
-    """Register prototype dimensions and collision half-sizes from prototype data."""
+    """Register prototype dimensions and spans from prototype data."""
     for key, value in prototypes.items():
         if isinstance(value, dict):
             if "collision_box" in value:
@@ -69,9 +81,12 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
                         abs(float(box[1][0])),
                         abs(float(box[1][1])),
                     )
-            else:
-                for sub_key, sub_val in value.items():
-                    if isinstance(sub_val, dict) and "collision_box" in sub_val:
+            span = _extract_proto_span(value)
+            if span is not None:
+                _PROTOTYPE_SPANS[key] = span
+            for sub_key, sub_val in value.items():
+                if isinstance(sub_val, dict):
+                    if "collision_box" in sub_val:
                         box = sub_val["collision_box"]
                         if len(box) >= 2:
                             w, h = entity_bounding_box(sub_val)
@@ -80,6 +95,14 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
                                 abs(float(box[1][0])),
                                 abs(float(box[1][1])),
                             )
+                    sub_span = _extract_proto_span(sub_val)
+                    if sub_span is not None:
+                        _PROTOTYPE_SPANS[sub_key] = sub_span
+
+
+def get_underground_span(name: str = "pipe-to-ground", default: int = 10) -> int:
+    """Return maximum underground span for named entity from prototype data."""
+    return _PROTOTYPE_SPANS.get(name, default)
 
 
 def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
@@ -270,8 +293,8 @@ def check_underground_pairing(
         pd = p.get("direction", 0)
         ug_d = OPPOSITE_DIR.get(pd, pd)
         dx, dy = DIR_STEPS.get(ug_d, (0, 0))
-        found = None
-        for s in range(1, 12):
+        max_pipe_span = get_underground_span("pipe-to-ground", 10)
+        for s in range(1, max_pipe_span + 1):
             tx, ty = round(px + dx * s, 2), round(py + dy * s, 2)
             for other in pipes:
                 if id(other) in matched_pipes or id(other) == id(p):

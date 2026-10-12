@@ -796,6 +796,17 @@ END DESIGN
         pipe_violations = [v for v in violations if v.code in ("DRC-14", "DRC-15")]
         self.assertEqual(pipe_violations, [])
 
+    def test_drc_pipe_to_ground_max_span_ten_passes(self) -> None:
+        """Matching pipe-to-ground entities separated by exactly 10 tiles pass DRC."""
+        entities = [
+            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 10.0, "y": 0.0}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        pipe_violations = [v for v in violations if v.code in ("DRC-14", "DRC-15")]
+        self.assertEqual(pipe_violations, [])
+
     def test_drc_pipe_to_ground_unpaired(self) -> None:
         """Rule DRC-14 flags pipe-to-ground with no matching pair."""
         entities = [
@@ -805,11 +816,11 @@ END DESIGN
         violations = checker.check_entities(entities)
         self.assertTrue(any(v.code == "DRC-14" for v in violations))
 
-    def test_drc_pipe_to_ground_span_exceeded(self) -> None:
-        """Rule DRC-14 flags pipe-to-ground pairs exceeding maximum span (10 tiles between)."""
+    def test_drc_pipe_to_ground_span_eleven_exceeded(self) -> None:
+        """Rule DRC-14 flags pipe-to-ground pairs separated by 11 tiles."""
         entities = [
             {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 15.0, "y": 0.0}},
+            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 11.0, "y": 0.0}},
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)

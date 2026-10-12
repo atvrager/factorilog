@@ -18,6 +18,7 @@ try:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
         OPPOSITE_DIR,
+        get_underground_span,
     )
     from foundry.jumper import RouteResult
     from foundry.lef import get_macro_port_geometry
@@ -30,6 +31,7 @@ except ImportError:
         DIRECTION_SOUTH,
         DIRECTION_WEST,
         OPPOSITE_DIR,
+        get_underground_span,
     )
     from jumper import RouteResult
     from lef import get_macro_port_geometry
@@ -146,8 +148,9 @@ def build_conduit_graph(
         node = ("pipe-to-ground", px, py)
         adj.setdefault(node, set())
 
-        # Underground connection to facing pair within span 10 (step 1..11)
-        for span in range(1, 12):
+        # Underground connection to facing pair within maximum span
+        max_pipe_span = get_underground_span("pipe-to-ground", 10)
+        for span in range(1, max_pipe_span + 1):
             chk_pos = (px + dx * span, py + dy * span)
             candidates = tile_map.get(chk_pos, [])
             for c in candidates:
