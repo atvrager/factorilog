@@ -83,8 +83,8 @@ def generate_control_lua(blueprint_string: str, pins_data: dict[str, Any]) -> st
 
     span_x = max_x - min_x
     span_y = max_y - min_y
-    half_w = max(span_x / 2.0, abs(min_x), abs(max_x)) + 64.0
-    half_h = max(span_y / 2.0, abs(min_y), abs(max_y)) + 64.0
+    half_w = (span_x / 2.0) + 32.0
+    half_h = (span_y / 2.0) + 32.0
 
     chunk_min_x = math.floor(-half_w / 32.0) - 1
     chunk_max_x = math.ceil(half_w / 32.0) + 1
