@@ -156,6 +156,25 @@ script.on_event(defines.events.on_tick, function(event)
         for iname, icount in pairs(stats.input_counts) do
             log(string.format("PRODUCTION_STAT: %s = %d", iname, icount))
         end
+        for iname, icount in pairs(stats.output_counts) do
+            log(string.format("CONSUMPTION_STAT: %s = %d", iname, icount))
+        end
+
+        local function format_tl_contents(tl, li)
+            local res = {{}}
+            if tl then
+                for k, item in pairs(tl.get_contents()) do
+                    local iname = (type(item) == "table" and item.name) or tostring(k)
+                    local icount = (type(item) == "table" and item.count) or tostring(item)
+                    if li then
+                        table.insert(res, string.format("%s:L%d:%s", iname, li, icount))
+                    else
+                        table.insert(res, string.format("%s:%s", iname, icount))
+                    end
+                end
+            end
+            return res
+        end
 
         local asms = surface.find_entities_filtered{{type = "assembling-machine"}}
         local active_asms = 0
@@ -208,6 +227,46 @@ script.on_event(defines.events.on_tick, function(event)
                                 end
                             end
                             log(string.format("  PIPE at (%.1f,%.1f) name=%s fluid=%s", pe.position.x, pe.position.y, pe.name, f_str))
+                            if f_str == "empty" then
+                                local visited_pipes = {{}}
+                                local q = {{pe}}
+                                local found_source_or_fluid = false
+                                local trace_step = 0
+                                visited_pipes[string.format("%.1f,%.1f", pe.position.x, pe.position.y)] = true
+                                while #q > 0 and trace_step < 100 do
+                                    trace_step = trace_step + 1
+                                    local cur = table.remove(q, 1)
+                                    for _, d in ipairs({{{{0, 1}}, {{0, -1}}, {{1, 0}}, {{-1, 0}}}}) do
+                                        local npos = {{cur.position.x + d[1], cur.position.y + d[2]}}
+                                        local nkey = string.format("%.1f,%.1f", npos[1], npos[2])
+                                        if not visited_pipes[nkey] then
+                                            local nents = surface.find_entities_filtered{{position = npos}}
+                                            for _, ne in ipairs(nents) do
+                                                if ne.name == "pipe" or ne.name == "pipe-to-ground" or ne.name == "pump" or ne.name == "infinity-pipe" then
+                                                    visited_pipes[nkey] = true
+                                                    local nfc = ne.get_fluid_contents()
+                                                    local has_fluid = false
+                                                    local nf_str = "empty"
+                                                    if nfc then
+                                                        for nfn, nfa in pairs(nfc) do
+                                                            if nfa > 0 then has_fluid = true end
+                                                            nf_str = string.format("%s:%.1f", nfn, nfa)
+                                                        end
+                                                    end
+                                                    log(string.format("    TRACE step %d: %s at (%.1f,%.1f) dir=%s fluid=%s energy=%.1f",
+                                                        trace_step, ne.name, ne.position.x, ne.position.y, tostring(ne.direction), nf_str, ne.energy or 0))
+                                                    if has_fluid or ne.name == "pump" or ne.name == "infinity-pipe" then
+                                                        found_source_or_fluid = true
+                                                    else
+                                                        table.insert(q, ne)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                    if found_source_or_fluid then break end
+                                end
+                            end
                         end
                     end
                 end
@@ -219,23 +278,104 @@ script.on_event(defines.events.on_tick, function(event)
                         local pty = math.floor(ins.pickup_position.y) + 0.5
                         local belt_ents = surface.find_entities_filtered{{position = {{ptx, pty}}}}
                         local b_info = "no_belt"
+                        local c1 = 0
+                        local c2 = 0
+                        local item_names = {{}}
                         for _, be in ipairs(belt_ents) do
                             if be.type == "transport-belt" then
-                                local c1 = be.get_transport_line(1).get_item_count()
-                                local c2 = be.get_transport_line(2).get_item_count()
+                                c1 = be.get_transport_line(1).get_item_count()
+                                c2 = be.get_transport_line(2).get_item_count()
+                                for li = 1, 2 do
+                                    for _, s in ipairs(format_tl_contents(be.get_transport_line(li), li)) do
+                                        table.insert(item_names, s)
+                                    end
+                                end
                                 b_info = string.format("belt dir=%s items=%d+%d", tostring(be.direction), c1, c2)
                             elseif be.type == "underground-belt" then
-                                local c1 = be.get_transport_line(1).get_item_count()
-                                local c2 = be.get_transport_line(2).get_item_count()
+                                c1 = be.get_transport_line(1).get_item_count()
+                                c2 = be.get_transport_line(2).get_item_count()
+                                for li = 1, 2 do
+                                    for _, s in ipairs(format_tl_contents(be.get_transport_line(li), li)) do
+                                        table.insert(item_names, s)
+                                    end
+                                end
                                 b_info = string.format("ug_belt dir=%s type=%s items=%d+%d", tostring(be.direction), be.belt_to_ground_type, c1, c2)
                             end
+                        end
+                        if #item_names > 0 then
+                            b_info = b_info .. " [" .. table.concat(item_names, ",") .. "]"
                         end
                         log(string.format("  INSERTER at (%.1f,%.1f) dir=%s held=%s pickup=(%.1f,%.1f) %s",
                             ins.position.x, ins.position.y, tostring(ins.direction), held, ptx, pty, b_info
                         ))
+                        if (c1 + c2 == 0) or (b_info == "no_belt") then
+                            local cur_tx = ptx
+                            local cur_ty = pty
+                            local tr_steps = 0
+                            while tr_steps < 30 do
+                                tr_steps = tr_steps + 1
+                                local cur_b = nil
+                                for _, e in ipairs(surface.find_entities_filtered{{position = {{cur_tx, cur_ty}}}}) do
+                                    if e.type == "transport-belt" or e.type == "underground-belt" or e.type == "splitter" then
+                                        cur_b = e
+                                        break
+                                    end
+                                end
+                                if not cur_b then
+                                    log(string.format("    UPSTREAM_GAP: after %d steps, no belt at (%.1f,%.1f)", tr_steps, cur_tx, cur_ty))
+                                    break
+                                end
+                                local c_tot = 0
+                                local found_items = {{}}
+                                for li = 1, (cur_b.type == "splitter" and 8 or 2) do
+                                    local tl = cur_b.get_transport_line(li)
+                                    if tl then
+                                        c_tot = c_tot + tl.get_item_count()
+                                        for _, s in ipairs(format_tl_contents(tl)) do
+                                            table.insert(found_items, s)
+                                        end
+                                    end
+                                end
+                                if c_tot > 0 then
+                                    log(string.format("    UPSTREAM_ITEMS: found %d items [%s] after %d steps at (%.1f,%.1f) %s",
+                                        c_tot, table.concat(found_items, ","), tr_steps, cur_tx, cur_ty, cur_b.name))
+                                    break
+                                end
+                                local bdir = cur_b.direction
+                                local dx, dy = 0, 0
+                                if bdir == 0 then dy = 1
+                                elseif bdir == 4 then dx = -1
+                                elseif bdir == 8 then dy = -1
+                                elseif bdir == 12 then dx = 1
+                                end
+                                if cur_b.type == "underground-belt" and cur_b.belt_to_ground_type == "output" then
+                                    local found_in = false
+                                    for ustep = 1, 11 do
+                                        local unx = cur_tx + dx * ustep
+                                        local uny = cur_ty + dy * ustep
+                                        for _, ue in ipairs(surface.find_entities_filtered{{position = {{unx, uny}}}}) do
+                                            if ue.type == "underground-belt" and ue.belt_to_ground_type == "input" and ue.direction == bdir then
+                                                cur_tx = unx
+                                                cur_ty = uny
+                                                found_in = true
+                                                break
+                                            end
+                                        end
+                                        if found_in then break end
+                                    end
+                                    if not found_in then
+                                        log(string.format("    UPSTREAM_UG_UNPAIRED: output at (%.1f,%.1f) dir=%d", cur_tx, cur_ty, bdir))
+                                        break
+                                    end
+                                else
+                                    cur_tx = cur_tx + dx
+                                    cur_ty = cur_ty + dy
+                                end
+                            end
+                        end
                     end
                 end
-                local splitters = surface.find_entities_filtered{{type = "splitter"}}
+                local splitters = surface.find_entities_filtered{{area = {{{{a.position.x - 4, a.position.y - 4}}, {{a.position.x + 4, a.position.y + 4}}}}, type = "splitter"}}
                 for _, sp in ipairs(splitters) do
                     local lines_info = {{}}
                     for li = 1, 8 do
@@ -248,7 +388,7 @@ script.on_event(defines.events.on_tick, function(event)
                         sp.position.x, sp.position.y, tostring(sp.direction), table.concat(lines_info, ",")
                     ))
                 end
-                local belts = surface.find_entities_filtered{{type = "transport-belt"}}
+                local belts = surface.find_entities_filtered{{area = {{{{a.position.x - 4, a.position.y - 4}}, {{a.position.x + 4, a.position.y + 4}}}}, type = "transport-belt"}}
                 local belts_with_items = {{}}
                 for _, b in ipairs(belts) do
                     local c1 = b.get_transport_line(1).get_item_count()
@@ -257,7 +397,9 @@ script.on_event(defines.events.on_tick, function(event)
                         table.insert(belts_with_items, string.format("(%.1f,%.1f:d=%d:%d+%d)", b.position.x, b.position.y, b.direction, c1, c2))
                     end
                 end
-                log(string.format("BELTS_WITH_ITEMS (%d total): %s", #belts_with_items, table.concat(belts_with_items, " ")))
+                if #belts_with_items > 0 then
+                    log(string.format("NEARBY_BELTS_WITH_ITEMS (%d): %s", #belts_with_items, table.concat(belts_with_items, " ")))
+                end
             end
         end
 
@@ -271,6 +413,41 @@ script.on_event(defines.events.on_tick, function(event)
                 productive_furnaces = productive_furnaces + 1
             else
                 table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", f.name, f.position.x, f.position.y))
+                log(string.format("ZERO_PROD_FURNACE: at (%.1f,%.1f) energy=%.1f", f.position.x, f.position.y, f.energy))
+                local inv_in = f.get_inventory(1)
+                local inv_out = f.get_inventory(2)
+                local in_str = (inv_in and not inv_in.is_empty()) and string.format("%s x%d", inv_in[1].name, inv_in[1].count) or "empty"
+                local out_str = (inv_out and not inv_out.is_empty()) and string.format("%s x%d", inv_out[1].name, inv_out[1].count) or "empty"
+                log(string.format("  FURNACE_INV: in=%s out=%s status=%s", in_str, out_str, tostring(f.status)))
+                local f_inserters = surface.find_entities_filtered{{type = "inserter"}}
+                for _, ins in ipairs(f_inserters) do
+                    if math.abs(ins.drop_position.x - f.position.x) <= 2.0 and math.abs(ins.drop_position.y - f.position.y) <= 2.0 then
+                        local held = ins.held_stack.valid_for_read and ins.held_stack.name or "empty"
+                        local ptx = math.floor(ins.pickup_position.x) + 0.5
+                        local pty = math.floor(ins.pickup_position.y) + 0.5
+                        local belt_ents = surface.find_entities_filtered{{position = {{ptx, pty}}}}
+                        local b_info = "no_belt"
+                        local f_item_names = {{}}
+                        for _, be in ipairs(belt_ents) do
+                            if be.type == "transport-belt" then
+                                local c1 = be.get_transport_line(1).get_item_count()
+                                local c2 = be.get_transport_line(2).get_item_count()
+                                for li = 1, 2 do
+                                    for _, s in ipairs(format_tl_contents(be.get_transport_line(li), li)) do
+                                        table.insert(f_item_names, s)
+                                    end
+                                end
+                                b_info = string.format("belt dir=%s items=%d+%d", tostring(be.direction), c1, c2)
+                            end
+                        end
+                        if #f_item_names > 0 then
+                            b_info = b_info .. " [" .. table.concat(f_item_names, ",") .. "]"
+                        end
+                        log(string.format("  FURNACE_INSERTER at (%.1f,%.1f) dir=%s held=%s pickup=(%.1f,%.1f) %s",
+                            ins.position.x, ins.position.y, tostring(ins.direction), held, ptx, pty, b_info
+                        ))
+                    end
+                end
             end
         end
 
@@ -333,10 +510,16 @@ end)
         if (
             "ASM_INFO:" in line
             or "ZERO_PROD_ASM:" in line
+            or "ZERO_PROD_FURNACE:" in line
+            or "FURNACE_INV:" in line
+            or "FURNACE_INSERTER" in line
             or "INSERTER at" in line
             or "SPLITTER at" in line
+            or "PIPE at" in line
+            or "TRACE step" in line
+            or "UPSTREAM_" in line
             or "PRODUCTION_STAT:" in line
-            or "BELTS_WITH_ITEMS" in line
+            or "NEARBY_BELTS_WITH_ITEMS" in line
             or "UNPOWERED_ENT:" in line
         ):
             print(f"factorilog: {line.strip()}")

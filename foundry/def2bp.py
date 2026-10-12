@@ -18,21 +18,7 @@ try:
     from foundry.belt_drc import BeltDrcChecker
     from foundry.circuit import wire_telemetry
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
-    from foundry.def_untangle import (
-        eliminate_staircase_jogs,
-        eliminate_u_detours,
-        fix_reverse_splitter_inputs,
-        relocate_blocked_splitter_inputs,
-        separate_overlapping_channel_routes,
-        shift_congested_pin_turns,
-        simplify_orthogonal_routes,
-        straighten_collinear_routes,
-        untangle_interlocking_corners,
-        untangle_machine_inputs,
-        untangle_merger_inputs,
-        untangle_shared_merger_tracks,
-        untangle_splitter_outputs,
-    )
+    from foundry.def_untangle import untangle_def
     from foundry.entity_helpers import (
         DIRECTION_EAST,
         DIRECTION_NORTH,
@@ -48,26 +34,13 @@ try:
     from foundry.jumper import route_and_resolve_jumpers
     from foundry.pdn import generate_pdn
     from foundry.placement import place_components
+    from foundry.pump_insertion import insert_pipeline_pumps
 except ImportError:
     import blueprint
     from belt_drc import BeltDrcChecker
     from circuit import wire_telemetry
     from def_parser import extract_pins, merge_collinear_wires, parse_def
-    from def_untangle import (
-        eliminate_staircase_jogs,
-        eliminate_u_detours,
-        fix_reverse_splitter_inputs,
-        relocate_blocked_splitter_inputs,
-        separate_overlapping_channel_routes,
-        shift_congested_pin_turns,
-        simplify_orthogonal_routes,
-        straighten_collinear_routes,
-        untangle_interlocking_corners,
-        untangle_machine_inputs,
-        untangle_merger_inputs,
-        untangle_shared_merger_tracks,
-        untangle_splitter_outputs,
-    )
+    from def_untangle import untangle_def
     from entity_helpers import (
         DIRECTION_EAST,
         DIRECTION_NORTH,
@@ -83,6 +56,7 @@ except ImportError:
     from jumper import route_and_resolve_jumpers
     from pdn import generate_pdn
     from placement import place_components
+    from pump_insertion import insert_pipeline_pumps
 
 __all__ = [
     "DIRECTION_EAST",
@@ -97,15 +71,11 @@ __all__ = [
     "entity_collision_half_size",
     "entity_size",
     "extract_pins",
-    "fix_reverse_splitter_inputs",
     "main",
     "merge_collinear_wires",
     "parse_def",
     "prune_dead_end_belts",
-    "untangle_machine_inputs",
-    "untangle_merger_inputs",
-    "untangle_shared_merger_tracks",
-    "untangle_splitter_outputs",
+    "untangle_def",
 ]
 
 
@@ -117,21 +87,8 @@ def build_entities(
     """Build Factorio entities and wire connections from DEF and netlist data."""
     def_data["_netlist_data"] = netlist_data
 
-    # 1. Untangle symmetric splitter outputs, inputs, and commutative machine inputs
-    untangle_shared_merger_tracks(def_data)
-    untangle_merger_inputs(def_data)
-    # shortcut_backward_splitter_detours(def_data)
-    simplify_orthogonal_routes(def_data)
-    straighten_collinear_routes(def_data)
-    eliminate_staircase_jogs(def_data)
-    eliminate_u_detours(def_data)
-    untangle_splitter_outputs(def_data)
-    fix_reverse_splitter_inputs(def_data)
-    relocate_blocked_splitter_inputs(def_data)
-    untangle_interlocking_corners(def_data)
-    shift_congested_pin_turns(def_data)
-    separate_overlapping_channel_routes(def_data, netlist_data)
-    untangle_machine_inputs(def_data, netlist_data)
+    # 1. Untangle routing tracks (topological pin swaps and iterative geometric/physical loop)
+    untangle_def(def_data, netlist_data)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 
@@ -141,6 +98,9 @@ def build_entities(
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
     debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
     routes = route_and_resolve_jumpers(def_data, netlist_data, placement, debug_trace=debug_trace)
+
+    # 3b. Insert inline pumps to segment overextended pipelines (<= 320 tiles)
+    insert_pipeline_pumps(placement, routes, def_data, netlist_data)
 
     # 4. Generate power distribution network (PDN)
     pole_entities, mst_connections = generate_pdn(

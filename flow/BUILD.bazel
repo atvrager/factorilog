@@ -296,7 +296,7 @@ factorilog_science_factory(
     core_margin = 12,
     demand = "production-science-pack 60.0",
     density = "0.01",
-    do_untangle = False,
+    do_untangle = True,
     layer_adjustment = "",
     routability_driven = True,
     split_pad_sites = 12,

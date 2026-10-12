@@ -671,8 +671,11 @@ def eliminate_u_detours(def_data: dict[str, Any]) -> None:
                             if any(w not in (wj, w2, w3) and wires_touch(w, w2) for w in wires):
                                 continue
 
-                            # Check if y1 is clear between x1 and x2, and x2 is clear between y1 and y2
-                            if not _is_h_clear(y1, x1, x2, net) or not _is_v_clear(x2, y1, y2, net):
+                            w3_min_y, w3_max_y = min(y2, y3), max(y2, y3)
+                            w3_extends = not (w3_min_y <= y1 <= w3_max_y)
+                            if not _is_h_clear(y1, x1, x2, net):
+                                continue
+                            if w3_extends and not _is_v_clear(x2, min(y1, y2), max(y1, y2), net):
                                 continue
 
                             # Extend w1 to x2 at y1
@@ -773,8 +776,11 @@ def eliminate_u_detours(def_data: dict[str, Any]) -> None:
                             if any(w not in (wj, w2, w3) and wires_touch(w, w2) for w in wires):
                                 continue
 
-                            # Check if x1 is clear between y1 and y2, and y2 is clear between x1 and x2
-                            if not _is_v_clear(x1, y1, y2, net) or not _is_h_clear(y2, x1, x2, net):
+                            w3_min_x, w3_max_x = min(x2, x3), max(x2, x3)
+                            w3_extends = not (w3_min_x <= x1 <= w3_max_x)
+                            if not _is_v_clear(x1, y1, y2, net):
+                                continue
+                            if w3_extends and not _is_h_clear(y2, min(x1, x2), max(x1, x2), net):
                                 continue
 
                             # Extend w1 to y2 at x1

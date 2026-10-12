@@ -278,7 +278,7 @@ proc get_net_sink_center_y {net dbu} {
     foreach bterm [$net getBTerms] {
         if {[$bterm getIoType] == "OUTPUT"} {
             foreach bpin [$bterm getBPins] {
-                set box [$bpin getBox]
+                set box [$bpin getBBox]
                 set cent_y [expr {([$box yMin] + [$box yMax]) / 2.0 / double($dbu)}]
                 set sum_y [expr {$sum_y + $cent_y}]
                 incr count
@@ -307,7 +307,7 @@ proc get_net_sink_center_x {net dbu} {
     foreach bterm [$net getBTerms] {
         if {[$bterm getIoType] == "OUTPUT"} {
             foreach bpin [$bterm getBPins] {
-                set box [$bpin getBox]
+                set box [$bpin getBBox]
                 set cent_x [expr {([$box xMin] + [$box xMax]) / 2.0 / double($dbu)}]
                 set sum_x [expr {$sum_x + $cent_x}]
                 incr count
@@ -336,7 +336,7 @@ proc get_net_driver_center_y {net dbu} {
     foreach bterm [$net getBTerms] {
         if {[$bterm getIoType] == "INPUT"} {
             foreach bpin [$bterm getBPins] {
-                set box [$bpin getBox]
+                set box [$bpin getBBox]
                 set cent_y [expr {([$box yMin] + [$box yMax]) / 2.0 / double($dbu)}]
                 set sum_y [expr {$sum_y + $cent_y}]
                 incr count
@@ -365,7 +365,7 @@ proc get_net_driver_center_x {net dbu} {
     foreach bterm [$net getBTerms] {
         if {[$bterm getIoType] == "INPUT"} {
             foreach bpin [$bterm getBPins] {
-                set box [$bpin getBox]
+                set box [$bpin getBBox]
                 set cent_x [expr {([$box xMin] + [$box xMax]) / 2.0 / double($dbu)}]
                 set sum_x [expr {$sum_x + $cent_x}]
                 incr count
@@ -383,7 +383,7 @@ proc do_untangle {block dbu} {
     for {set pass 0} {$pass < 2} {incr pass} {
         foreach inst [$block getInsts] {
             set mname [[$inst getMaster] getName]
-            if {[string match "*split2" $mname]} {
+            if {[string match "*split2" $mname] || [string match "*balancer2" $mname]} {
                 set it1 [$inst findITerm "y1"]
                 set it2 [$inst findITerm "y2"]
                 if {$it1 != "NULL" && $it2 != "NULL"} {
@@ -414,9 +414,34 @@ proc do_untangle {block dbu} {
                     }
                 }
             }
-            if {[string match "*merge2" $mname]} {
+            if {[string match "*split2" $mname]} {
                 set ita [$inst findITerm "a"]
                 set itb [$inst findITerm "b"]
+                if {$ita != "NULL" && $itb != "NULL"} {
+                    set na [$ita getNet]
+                    set nb [$itb getNet]
+                    lassign [$inst getLocation] sx_dbu sy_dbu
+                    set sy [expr {$sy_dbu / double($dbu)}]
+                    if {$na != "NULL" && ($nb == "NULL" || $nb == "")} {
+                        set y_drv [get_net_driver_center_y $na $dbu]
+                        if {[expr {abs($y_drv - ($sy + 1.5))}] < [expr {abs($y_drv - ($sy + 0.5))}]} {
+                            odb::dbITerm_disconnect $ita
+                            odb::dbITerm_connect $itb $na
+                        }
+                    } elseif {$nb != "NULL" && ($na == "NULL" || $na == "")} {
+                        set y_drv [get_net_driver_center_y $nb $dbu]
+                        if {[expr {abs($y_drv - ($sy + 0.5))}] < [expr {abs($y_drv - ($sy + 1.5))}]} {
+                            odb::dbITerm_disconnect $itb
+                            odb::dbITerm_connect $ita $nb
+                        }
+                    }
+                }
+            }
+            if {[string match "*merge2" $mname] || [string match "*balancer2" $mname]} {
+                set ita [$inst findITerm "a"]
+                if {$ita == "NULL"} { set ita [$inst findITerm "a1"] }
+                set itb [$inst findITerm "b"]
+                if {$itb == "NULL"} { set itb [$inst findITerm "a2"] }
                 if {$ita != "NULL" && $itb != "NULL"} {
                     set na [$ita getNet]
                     set nb [$itb getNet]
@@ -424,7 +449,7 @@ proc do_untangle {block dbu} {
                         set ya [get_net_driver_center_y $na $dbu]
                         set yb [get_net_driver_center_y $nb $dbu]
                         lassign [$inst getLocation] ix_dbu iy_dbu
-                        set my [expr {$iy_dbu / double($dbu) + 1.0}]
+                        set mx [expr {$ix_dbu / double($dbu)}]
                         if {[expr {abs($ya - $yb)}] < 0.5} {
                             set xa [get_net_driver_center_x $na $dbu]
                             set xb [get_net_driver_center_x $nb $dbu]

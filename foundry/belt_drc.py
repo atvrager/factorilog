@@ -37,6 +37,19 @@ try:
 except ImportError:
     from entity_helpers import entity_size
 
+try:
+    from foundry.pump_insertion import (
+        build_conduit_graph,
+        component_extent,
+        find_fluid_components,
+    )
+except ImportError:
+    from pump_insertion import (
+        build_conduit_graph,
+        component_extent,
+        find_fluid_components,
+    )
+
 
 @dataclass(frozen=True)
 class DrcViolation:
@@ -61,6 +74,7 @@ class BeltDrcChecker:
     ) -> None:
         self.allow_peeling = allow_peeling
         self.span_limits = dict(MAX_UNDERGROUND_SPAN)
+        self.max_pipeline_extent = 320
         if rules_database is not None:
             self._apply_rules_database(rules_database)
         elif rules_path is not None and Path(rules_path).is_file():
@@ -80,6 +94,8 @@ class BeltDrcChecker:
                 spans = r.get("max_span_tiles", {})
                 for k, v in spans.items():
                     self.span_limits[k] = int(v)
+            elif r.get("rule_id") == "RULE-16-PIPELINE_EXTENT":
+                self.max_pipeline_extent = int(r.get("max_extent_tiles", 320))
 
     def check_entities(
         self,
@@ -114,6 +130,14 @@ class BeltDrcChecker:
                 else:
                     tile_map.setdefault((math.floor(cx), math.floor(cy - 0.5)), []).append(ent)
                     tile_map.setdefault((math.floor(cx), math.floor(cy + 0.5)), []).append(ent)
+            elif "pump" in name:
+                d = ent.get("direction", DIRECTION_NORTH)
+                if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                    tile_map.setdefault((math.floor(cx), math.floor(cy - 0.5)), []).append(ent)
+                    tile_map.setdefault((math.floor(cx), math.floor(cy + 0.5)), []).append(ent)
+                else:
+                    tile_map.setdefault((math.floor(cx - 0.5), math.floor(cy)), []).append(ent)
+                    tile_map.setdefault((math.floor(cx + 0.5), math.floor(cy)), []).append(ent)
             else:
                 tile_map.setdefault((math.floor(cx), math.floor(cy)), []).append(ent)
 
@@ -170,6 +194,9 @@ class BeltDrcChecker:
 
         # 12. Check pipe-to-ground underground span overlaps and collisions (Rule DRC-15)
         violations.extend(self._check_pipe_span_overlap(entities, tile_map))
+
+        # 13. Check pipeline extent limit (Rule DRC-16)
+        violations.extend(self._check_pipeline_extent(entities, tile_map))
 
         return violations
 
@@ -1275,5 +1302,35 @@ class BeltDrcChecker:
                     )
                 else:
                     axis_map[st] = ((ix, iy), (ox, oy))
+
+        return violations
+
+    def _check_pipeline_extent(
+        self,
+        entities: list[dict[str, Any]],
+        _tile_map: dict[tuple[int, int], list[dict[str, Any]]],
+    ) -> list[DrcViolation]:
+        """Verify that every connected fluid network does not exceed maximum pipeline extent (Rule DRC-16)."""
+        violations: list[DrcViolation] = []
+        max_limit = getattr(self, "max_pipeline_extent", 320)
+        adj, _, _ = build_conduit_graph(entities)
+        components = find_fluid_components(adj)
+
+        for comp in components:
+            ext, min_x, max_x, min_y, max_y = component_extent(comp)
+            if ext > max_limit:
+                violations.append(
+                    DrcViolation(
+                        code="DRC-16",
+                        message=(
+                            f"Pipeline extent {ext:.1f} tiles exceeds maximum allowed extent "
+                            f"{max_limit} tiles for connected fluid network (span: "
+                            f"x=[{min_x:.1f}, {max_x:.1f}], y=[{min_y:.1f}, {max_y:.1f}], "
+                            f"nodes={len(comp)})"
+                        ),
+                        x=min_x,
+                        y=min_y,
+                    )
+                )
 
         return violations

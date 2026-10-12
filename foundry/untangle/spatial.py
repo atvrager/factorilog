@@ -57,6 +57,8 @@ def get_component_box(
         cw, ch = (2 * units, units) if orient in ("W", "E") else (units, 2 * units)
     elif "refinery" in macro or "chemical_plant" in macro or "assembling_machine" in macro:
         cw, ch = 5 * units, 5 * units
+    elif "furnace" in macro:
+        cw, ch = 5 * units, 3 * units
     else:
         cw, ch = 3 * units, 3 * units
     return cx, cy, cw, ch

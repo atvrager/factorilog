@@ -5,9 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 try:
+    from foundry.def_parser import merge_collinear_wires
     from foundry.lef import get_macro_port_slots
+    from foundry.untangle.spatial import get_component_box
 except ImportError:
+    from def_parser import merge_collinear_wires
     from lef import get_macro_port_slots
+
+    from untangle.spatial import get_component_box
 
 
 def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
@@ -92,8 +97,14 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
         )
         if not m2_1 and m2_2:
             other_y2 = m2_2["y2"] if m2_2["y1"] == end2[1] else m2_2["y1"]
-            min_w1_x = min(w1["x1"], w1["x2"])
-            max_w1_x = max(w1["x1"], w1["x2"])
+            m1_w1_xs = [
+                x
+                for w in n_y1.get("wires", [])
+                if w.get("layer") == "M1" and w["y1"] == py1[1] and w["y2"] == py1[1]
+                for x in (w["x1"], w["x2"])
+            ]
+            min_w1_x = min(m1_w1_xs) if m1_w1_xs else min(w1["x1"], w1["x2"])
+            max_w1_x = max(m1_w1_xs) if m1_w1_xs else max(w1["x1"], w1["x2"])
             if other_y2 < py1[1] and min_w1_x <= end2[0] <= max_w1_x:
                 dst_inst, dst_pin = next(
                     ((inst, pin) for inst, pin in n_y1.get("connections", []) if inst != name),
@@ -149,8 +160,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             (name, "y1") if (inst == name and p == "y2") else (inst, p)
                             for inst, p in n_y2.get("connections", [])
                         ]
-                        w1["y1"] = py2[1]
-                        w1["y2"] = py2[1]
+                        for w in n_y1.get("wires", []):
+                            if w.get("layer") == "M1" and w["y1"] == py1[1] and w["y2"] == py1[1]:
+                                w["y1"] = py2[1]
+                                w["y2"] = py2[1]
                         for v in n_y1.get("vias", []):
                             if v.get("y") == py1[1]:
                                 v["y"] = py2[1]
@@ -162,12 +175,24 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             else (inst, p)
                             for inst, p in n_y1.get("connections", [])
                         ]
+                        n_y1["wires"] = merge_collinear_wires(
+                            n_y1.get("wires", []), n_y1.get("vias", [])
+                        )
+                        n_y2["wires"] = merge_collinear_wires(
+                            n_y2.get("wires", []), n_y2.get("vias", [])
+                        )
                         continue
 
         if not m2_2 and m2_1:
             other_y1 = m2_1["y2"] if m2_1["y1"] == end1[1] else m2_1["y1"]
-            min_w2_x = min(w2["x1"], w2["x2"])
-            max_w2_x = max(w2["x1"], w2["x2"])
+            m1_w2_xs = [
+                x
+                for w in n_y2.get("wires", [])
+                if w.get("layer") == "M1" and w["y1"] == py2[1] and w["y2"] == py2[1]
+                for x in (w["x1"], w["x2"])
+            ]
+            min_w2_x = min(m1_w2_xs) if m1_w2_xs else min(w2["x1"], w2["x2"])
+            max_w2_x = max(m1_w2_xs) if m1_w2_xs else max(w2["x1"], w2["x2"])
             if other_y1 > py2[1] and min_w2_x <= end1[0] <= max_w2_x:
                 dst_inst, dst_pin = next(
                     ((inst, pin) for inst, pin in n_y2.get("connections", []) if inst != name),
@@ -223,8 +248,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             (name, "y2") if (inst == name and p == "y1") else (inst, p)
                             for inst, p in n_y1.get("connections", [])
                         ]
-                        w2["y1"] = py1[1]
-                        w2["y2"] = py1[1]
+                        for w in n_y2.get("wires", []):
+                            if w.get("layer") == "M1" and w["y1"] == py2[1] and w["y2"] == py2[1]:
+                                w["y1"] = py1[1]
+                                w["y2"] = py1[1]
                         for v in n_y2.get("vias", []):
                             if v.get("y") == py2[1]:
                                 v["y"] = py1[1]
@@ -236,6 +263,12 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             else (inst, p)
                             for inst, p in n_y2.get("connections", [])
                         ]
+                        n_y1["wires"] = merge_collinear_wires(
+                            n_y1.get("wires", []), n_y1.get("vias", [])
+                        )
+                        n_y2["wires"] = merge_collinear_wires(
+                            n_y2.get("wires", []), n_y2.get("vias", [])
+                        )
                         continue
 
         if not m2_1 or not m2_2:
@@ -477,6 +510,39 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                                 break
                 if blocked:
                     break
+
+            if not blocked:
+                netlist = def_data.get("_netlist_data")
+                units = int(def_data.get("units", 1000))
+                y_min_in = min(py_in[1], other_y_in)
+                y_max_in = max(py_in[1], other_y_in)
+                y_min_out = min(py_out[1], other_y_out)
+                y_max_out = max(py_out[1], other_y_out)
+                for comp in def_data.get("components", []):
+                    if comp.get("name") == name:
+                        continue
+                    cx, cy, cw, ch = get_component_box(comp, units, netlist)
+                    if cx <= x_inner <= cx + cw and not (cy + ch <= y_min_in or cy >= y_max_in):
+                        blocked = True
+                        break
+                    if cx <= x_outer <= cx + cw and not (cy + ch <= y_min_out or cy >= y_max_out):
+                        blocked = True
+                        break
+                    x_min_pin_in = min(py_in[0], x_inner)
+                    x_max_pin_in = max(py_in[0], x_inner)
+                    if cy <= py_in[1] <= cy + ch and not (
+                        cx + cw <= x_min_pin_in or cx >= x_max_pin_in
+                    ):
+                        blocked = True
+                        break
+                    x_min_pin_out = min(py_out[0], x_outer)
+                    x_max_pin_out = max(py_out[0], x_outer)
+                    if cy <= py_out[1] <= cy + ch and not (
+                        cx + cw <= x_min_pin_out or cx >= x_max_pin_out
+                    ):
+                        blocked = True
+                        break
+
             if not blocked:
                 if w_pin_in["x1"] == py_in[0]:
                     w_pin_in["x2"] = x_inner
@@ -664,13 +730,9 @@ def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
 
 
 def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
-    """Untangle symmetric merger inputs whose initial routing segments cross.
-
-    Merger inputs a and b receive identical items from upstream drivers.
-    When the router connects inputs a and b such that their incoming segments cross,
-    swapping the initial segments and net connections eliminates the crossing.
-    """
+    """Untangle symmetric merger and balancer inputs whose routing segments cross."""
     scale = 1.0 / float(def_data.get("units", 1000))
+    units = int(def_data.get("units", 1000))
     for c in def_data.get("components", []):
         macro = c.get("macro", "")
         if macro not in ("belt_merge2", "belt_balancer2"):
@@ -690,8 +752,8 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
                     n_b = n
         if not n_a or not n_b or n_a is n_b:
             continue
-        pa = (round((gx + 0.25) * 1000), round((gy + 0.5) * 1000))
-        pb = (round((gx + 0.25) * 1000), round((gy + 1.5) * 1000))
+        pa = (round((gx + 0.25) * units), round((gy + 0.5) * units))
+        pb = (round((gx + 0.25) * units), round((gy + 1.5) * units))
         wa = next(
             (
                 w
@@ -753,14 +815,16 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         other_yb = m2_b["y2"] if m2_b["y1"] == endb[1] else m2_b["y1"]
         dy_b = "N" if other_yb > endb[1] else "S"
 
-        cross = dy_a == "N" and dy_b == "S"
+        # Check for entrance crossing (trunks cross near pins)
+        entrance_cross = dy_a == "N" and dy_b == "S"
         if (
             dy_a == "N" and dy_b == "N" and (min(endb[0], pb[0]) < enda[0] < max(endb[0], pb[0]))
         ) or (
             dy_a == "S" and dy_b == "S" and (min(enda[0], pa[0]) < endb[0] < max(enda[0], pa[0]))
         ):
-            cross = True
+            entrance_cross = True
 
+        # Check for approach crossing (M1 approach wire crosses the other net's M2 trunk)
         m1_app_a = next(
             (
                 w
@@ -783,6 +847,7 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
             ),
             None,
         )
+        approach_cross = False
         if (
             m1_app_a
             and (min(other_yb, pb[1]) <= other_ya <= max(other_yb, pb[1]))
@@ -790,7 +855,7 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
                 min(m1_app_a["x1"], m1_app_a["x2"]) < endb[0] < max(m1_app_a["x1"], m1_app_a["x2"])
             )
         ):
-            cross = True
+            approach_cross = True
         if (
             m1_app_b
             and (min(other_ya, pa[1]) <= other_yb <= max(other_ya, pa[1]))
@@ -798,19 +863,100 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
                 min(m1_app_b["x1"], m1_app_b["x2"]) < enda[0] < max(m1_app_b["x1"], m1_app_b["x2"])
             )
         ):
-            cross = True
+            approach_cross = True
 
-        if not cross:
+        if not entrance_cross and not approach_cross:
             continue
 
-        x_min_a = min(pa[0], endb[0])
-        x_max_a = max(pa[0], endb[0])
-        x_min_b = min(pb[0], enda[0])
-        x_max_b = max(pb[0], enda[0])
-        y_min_a = min(pb[1], other_ya)
-        y_max_a = max(pb[1], other_ya)
-        y_min_b = min(pa[1], other_yb)
-        y_max_b = max(pa[1], other_yb)
+        # If approach cross and trunks are adjacent (<= 2 units apart), swap tracks and pins
+        if approach_cross and abs(enda[0] - endb[0]) <= 2 * units and m1_app_a and m1_app_b:
+            x_min_a = min(enda[0], endb[0])
+            x_max_a = max(enda[0], endb[0])
+            blocked = False
+            for other_net in def_data.get("nets", []):
+                if other_net is n_a or other_net is n_b:
+                    continue
+                for ow in other_net.get("wires", []):
+                    layer = ow.get("layer")
+                    if layer == "M1":
+                        if ow["y1"] == other_ya and not (
+                            max(ow["x1"], ow["x2"]) <= x_min_a or min(ow["x1"], ow["x2"]) >= x_max_a
+                        ):
+                            blocked = True
+                            break
+                        if ow["y1"] == other_yb and not (
+                            max(ow["x1"], ow["x2"]) <= x_min_a or min(ow["x1"], ow["x2"]) >= x_max_a
+                        ):
+                            blocked = True
+                            break
+                    elif layer == "M2":
+                        if ow["x1"] == endb[0] and not (
+                            max(ow["y1"], ow["y2"]) <= min(other_ya, pb[1])
+                            or min(ow["y1"], ow["y2"]) >= max(other_ya, pb[1])
+                        ):
+                            blocked = True
+                            break
+                        if ow["x1"] == enda[0] and not (
+                            max(ow["y1"], ow["y2"]) <= min(other_yb, pa[1])
+                            or min(ow["y1"], ow["y2"]) >= max(other_yb, pa[1])
+                        ):
+                            blocked = True
+                            break
+                if blocked:
+                    break
+            if not blocked:
+                if m1_app_a["x1"] == enda[0]:
+                    m1_app_a["x1"] = endb[0]
+                else:
+                    m1_app_a["x2"] = endb[0]
+                if m1_app_b["x1"] == endb[0]:
+                    m1_app_b["x1"] = enda[0]
+                else:
+                    m1_app_b["x2"] = enda[0]
+
+                m2_a["x1"] = endb[0]
+                m2_a["x2"] = endb[0]
+                if m2_a["y1"] == other_ya:
+                    m2_a["y2"] = pb[1]
+                else:
+                    m2_a["y1"] = pb[1]
+
+                m2_b["x1"] = enda[0]
+                m2_b["x2"] = enda[0]
+                if m2_b["y1"] == other_yb:
+                    m2_b["y2"] = pa[1]
+                else:
+                    m2_b["y1"] = pa[1]
+
+                wa["y1"] = pb[1]
+                wa["y2"] = pb[1]
+                wa["x1"] = min(endb[0], pb[0])
+                wa["x2"] = max(endb[0], pb[0])
+
+                wb["y1"] = pa[1]
+                wb["y2"] = pa[1]
+                wb["x1"] = min(enda[0], pa[0])
+                wb["x2"] = max(enda[0], pa[0])
+
+                n_a["connections"] = [
+                    (inst, pin_b_name if inst == name and p == pin_a_name else p)
+                    for inst, p in n_a.get("connections", [])
+                ]
+                n_b["connections"] = [
+                    (inst, pin_a_name if inst == name and p == pin_b_name else p)
+                    for inst, p in n_b.get("connections", [])
+                ]
+                continue
+
+        # Otherwise, direct pin swap: keep M2 trunks on their tracks, adjust trunk Y-end and stubs
+        y_min_a = min(other_ya, pb[1])
+        y_max_a = max(other_ya, pb[1])
+        y_min_b = min(other_yb, pa[1])
+        y_max_b = max(other_yb, pa[1])
+        x_min_a = min(enda[0], pb[0])
+        x_max_a = max(enda[0], pb[0])
+        x_min_b = min(endb[0], pa[0])
+        x_max_b = max(endb[0], pa[0])
 
         blocked = False
         for other_net in def_data.get("nets", []):
@@ -819,40 +965,24 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
             for ow in other_net.get("wires", []):
                 layer = ow.get("layer")
                 if layer == "M1":
-                    if (
-                        ow["y1"] == pa[1]
-                        and ow["y2"] == pa[1]
-                        and not (
-                            max(ow["x1"], ow["x2"]) <= x_min_a or min(ow["x1"], ow["x2"]) >= x_max_a
-                        )
+                    if ow["y1"] == pb[1] and not (
+                        max(ow["x1"], ow["x2"]) <= x_min_a or min(ow["x1"], ow["x2"]) >= x_max_a
                     ):
                         blocked = True
                         break
-                    if (
-                        ow["y1"] == pb[1]
-                        and ow["y2"] == pb[1]
-                        and not (
-                            max(ow["x1"], ow["x2"]) <= x_min_b or min(ow["x1"], ow["x2"]) >= x_max_b
-                        )
+                    if ow["y1"] == pa[1] and not (
+                        max(ow["x1"], ow["x2"]) <= x_min_b or min(ow["x1"], ow["x2"]) >= x_max_b
                     ):
                         blocked = True
                         break
                 elif layer == "M2":
-                    if (
-                        ow["x1"] == enda[0]
-                        and ow["x2"] == enda[0]
-                        and not (
-                            max(ow["y1"], ow["y2"]) <= y_min_a or min(ow["y1"], ow["y2"]) >= y_max_a
-                        )
+                    if ow["x1"] == enda[0] and not (
+                        max(ow["y1"], ow["y2"]) <= y_min_a or min(ow["y1"], ow["y2"]) >= y_max_a
                     ):
                         blocked = True
                         break
-                    if (
-                        ow["x1"] == endb[0]
-                        and ow["x2"] == endb[0]
-                        and not (
-                            max(ow["y1"], ow["y2"]) <= y_min_b or min(ow["y1"], ow["y2"]) >= y_max_b
-                        )
+                    if ow["x1"] == endb[0] and not (
+                        max(ow["y1"], ow["y2"]) <= y_min_b or min(ow["y1"], ow["y2"]) >= y_max_b
                     ):
                         blocked = True
                         break
@@ -861,33 +991,34 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         if blocked:
             continue
 
-        if (wa["x1"], wa["y1"]) == pa:
-            wa["x2"] = endb[0]
-        else:
-            wa["x1"] = endb[0]
-        if (wb["x1"], wb["y1"]) == pb:
-            wb["x2"] = enda[0]
-        else:
-            wb["x1"] = enda[0]
-
-        if (m2_a["x1"], m2_a["y1"]) == enda:
-            m2_a["y1"] = pb[1]
-        else:
+        if m2_a["y1"] == other_ya:
             m2_a["y2"] = pb[1]
-        if (m2_b["x1"], m2_b["y1"]) == endb:
-            m2_b["y1"] = pa[1]
         else:
+            m2_a["y1"] = pb[1]
+
+        if m2_b["y1"] == other_yb:
             m2_b["y2"] = pa[1]
+        else:
+            m2_b["y1"] = pa[1]
 
-        wires_a = [w for w in n_a["wires"] if w is not wa]
-        wires_b = [w for w in n_b["wires"] if w is not wb]
-        n_a["wires"] = [wa, *wires_b]
-        n_b["wires"] = [wb, *wires_a]
+        wa["y1"] = pb[1]
+        wa["y2"] = pb[1]
+        wa["x1"] = min(enda[0], pb[0])
+        wa["x2"] = max(enda[0], pb[0])
 
-        conns_a = [conn for conn in n_a.get("connections", []) if conn[0] != name]
-        conns_b = [conn for conn in n_b.get("connections", []) if conn[0] != name]
-        n_a["connections"] = [(name, pin_a_name), *conns_b]
-        n_b["connections"] = [(name, pin_b_name), *conns_a]
+        wb["y1"] = pa[1]
+        wb["y2"] = pa[1]
+        wb["x1"] = min(endb[0], pa[0])
+        wb["x2"] = max(endb[0], pa[0])
+
+        n_a["connections"] = [
+            (inst, pin_b_name if inst == name and p == pin_a_name else p)
+            for inst, p in n_a.get("connections", [])
+        ]
+        n_b["connections"] = [
+            (inst, pin_a_name if inst == name and p == pin_b_name else p)
+            for inst, p in n_b.get("connections", [])
+        ]
 
 
 def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:

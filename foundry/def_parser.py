@@ -16,7 +16,17 @@ def merge_collinear_wires(
 ) -> list[dict[str, Any]]:
     """Merge contiguous collinear wire segments on the same layer."""
     wires = [w for w in wires if not (w["x1"] == w["x2"] and w["y1"] == w["y2"])]
-    via_pts = {(v["x"], v["y"]) for v in (vias or [])}
+    m1_pts = {(w["x1"], w["y1"]) for w in wires if w.get("layer") == "M1"} | {
+        (w["x2"], w["y2"]) for w in wires if w.get("layer") == "M1"
+    }
+    m2_pts = {(w["x1"], w["y1"]) for w in wires if w.get("layer") == "M2"} | {
+        (w["x2"], w["y2"]) for w in wires if w.get("layer") == "M2"
+    }
+    via_pts = {
+        (v["x"], v["y"])
+        for v in (vias or [])
+        if (v["x"], v["y"]) in m1_pts and (v["x"], v["y"]) in m2_pts
+    }
     changed = True
     while changed:
         changed = False

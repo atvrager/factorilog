@@ -53,6 +53,7 @@ py_library(
         "pdk.py",
         "pdn.py",
         "placement.py",
+        "pump_insertion.py",
         "render_bp.py",
         "solve.py",
         "untangle/__init__.py",

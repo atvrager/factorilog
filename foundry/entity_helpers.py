@@ -82,7 +82,7 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
                             )
 
 
-def entity_size(name: str) -> tuple[float, float]:
+def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
     """Return width and height of named entity."""
     if name in _PROTOTYPE_BOXES:
         return _PROTOTYPE_BOXES[name]
@@ -109,6 +109,8 @@ def entity_size(name: str) -> tuple[float, float]:
     ):
         return 2.0, 2.0
     if "pump" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 2.0, 1.0
         return 1.0, 2.0
     return 1.0, 1.0
 
@@ -204,6 +206,18 @@ def check_collisions(
                 tiles.append((round(epos["x"] + 1.0, 2), round(epos["y"], 2)))
             else:
                 tiles.append((round(epos["x"], 2), round(epos["y"] + 1.0, 2)))
+        elif ename == "pump":
+            d = ent.get("direction", DIRECTION_NORTH)
+            if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                tiles = [
+                    (round(epos["x"], 2), round(epos["y"] - 0.5, 2)),
+                    (round(epos["x"], 2), round(epos["y"] + 0.5, 2)),
+                ]
+            else:
+                tiles = [
+                    (round(epos["x"] - 0.5, 2), round(epos["y"], 2)),
+                    (round(epos["x"] + 0.5, 2), round(epos["y"], 2)),
+                ]
         for t in tiles:
             if t in occupied:
                 collisions.append((occupied[t], ent))

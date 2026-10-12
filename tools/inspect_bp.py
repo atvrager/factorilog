@@ -108,6 +108,10 @@ def print_single_report(metrics: dict[str, Any], path: str) -> None:
         f"Dimensions        : {metrics['width']:.1f} x {metrics['height']:.1f} tiles "
         f"(area = {metrics['area']:.1f} tiles)"
     )
+    if "min_x" in metrics:
+        print(
+            f"Bounds            : ({metrics['min_x']:.1f}, {metrics['min_y']:.1f}) to ({metrics['max_x']:.1f}, {metrics['max_y']:.1f})"
+        )
     print(f"Total entities    : {metrics['entity_count']}")
     print(
         f"Machine entities  : {metrics['machine_count']} machines "

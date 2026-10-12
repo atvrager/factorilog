@@ -197,3 +197,13 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "pump_insertion_test",
+    size = "small",
+    srcs = ["test_pump_insertion.py"],
+    main = "test_pump_insertion.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)

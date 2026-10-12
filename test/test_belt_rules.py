@@ -826,6 +826,45 @@ END DESIGN
         violations = checker.check_entities(entities)
         self.assertTrue(any(v.code == "DRC-15" for v in violations))
 
+    def test_drc_pipeline_extent_clean(self) -> None:
+        """Rule DRC-16 passes when pipeline extent does not exceed 320 tiles."""
+        entities = [
+            {"name": "pipe", "position": {"x": float(i), "y": 0.0}}
+            for i in range(50)
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        self.assertFalse(any(v.code == "DRC-16" for v in violations))
+
+    def test_drc_pipeline_extent_exceeded(self) -> None:
+        """Rule DRC-16 flags pipeline networks exceeding maximum allowed extent (320 tiles)."""
+        entities = [
+            {"name": "pipe", "position": {"x": float(i), "y": 0.0}}
+            for i in range(350)
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        drc16 = [v for v in violations if v.code == "DRC-16"]
+        self.assertEqual(len(drc16), 1)
+        self.assertIn("exceeds maximum allowed extent 320", drc16[0].message)
+
+    def test_drc_pipeline_extent_pump_isolated(self) -> None:
+        """Inline pump divides pipeline into separate segments, passing DRC-16."""
+        entities = []
+        # First 175 tiles: x in [0..174], y = 0
+        for i in range(175):
+            entities.append({"name": "pipe", "position": {"x": float(i) + 0.5, "y": 0.5}})
+        # Pump at tiles 175, 176 facing East (direction 4), center = (176.0, 0.5)
+        entities.append({"name": "pump", "position": {"x": 176.0, "y": 0.5}, "direction": DIRECTION_EAST})
+        # Remaining 175 tiles: x in [177..351], y = 0
+        for i in range(177, 352):
+            entities.append({"name": "pipe", "position": {"x": float(i) + 0.5, "y": 0.5}})
+
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        drc16 = [v for v in violations if v.code == "DRC-16"]
+        self.assertEqual(drc16, [])
+
 
 if __name__ == "__main__":
     unittest.main()

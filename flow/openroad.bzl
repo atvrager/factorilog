@@ -226,6 +226,7 @@ def _factorilog_pnr_impl(ctx):
         "set USE_ROW_PLACEMENT %s" % ("1" if ctx.attr.use_row_placement else "0"),
         "set CHANNEL_H %d" % ctx.attr.channel_h,
         "set DO_UNTANGLE %s" % ("1" if ctx.attr.do_untangle else "0"),
+        "set DROUTE_END_ITER 50",
         "source [file join [file dirname [info script]] factorilog.tcl]",
         "EOF",
         "START_NS=$(date +%s%N)",
