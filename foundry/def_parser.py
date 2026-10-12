@@ -207,12 +207,31 @@ def parse_def(text: str) -> dict[str, Any]:
                 }
             )
 
+    # Parse BLOCKAGES section
+    blockages: list[dict[str, Any]] = []
+    blockages_match = re.search(r"BLOCKAGES\s+\d+\s*;(.*?)END\s+BLOCKAGES", text, re.DOTALL)
+    if blockages_match:
+        rect_pat = re.compile(
+            r"RECT\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)",
+            re.MULTILINE,
+        )
+        blockages.extend(
+            {
+                "x1": int(m.group(1)),
+                "y1": int(m.group(2)),
+                "x2": int(m.group(3)),
+                "y2": int(m.group(4)),
+            }
+            for m in rect_pat.finditer(blockages_match.group(1))
+        )
+
     return {
         "units": units,
         "die_area": die_area,
         "components": components,
         "pins": pins,
         "nets": nets,
+        "blockages": blockages,
     }
 
 

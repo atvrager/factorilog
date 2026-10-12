@@ -1,6 +1,6 @@
 # Flow scripts and OpenROAD automation.
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
-load("//flow:openroad.bzl", "factorilog_blueprint", "factorilog_science_factory", "factorilog_synth", "openroad_stage")
+load("//flow:openroad.bzl", "factorilog_blueprint", "factorilog_pnr", "factorilog_science_factory", "factorilog_synth", "openroad_stage")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -177,6 +177,31 @@ factorilog_science_factory(
         "automation_science",
     ],
 )
+
+factorilog_pnr(
+    name = "automation_science_chassis_pnr",
+    block_fill = "0.05",
+    cell_pad_sites = 4,
+    chassis_grid_h = 1,
+    chassis_grid_w = 1,
+    core_margin = 8,
+    def_file = "automation_science_chassis.def",
+    density = "0.15",
+    do_untangle = True,
+    log_file = "automation_science_chassis_pnr.log",
+    netlist_v = ":automation_science_netlist.v",
+    ranks_tcl = ":automation_science_ranks.tcl",
+    routability_driven = True,
+    route_drc = "automation_science_chassis_route_drc.rpt",
+    split_pad_sites = 5,
+    tech_lef = ":automation_science_tech.lef",
+    tech_lib = ":automation_science_tech.lib",
+    time_json = "automation_science_chassis_pnr_time.json",
+    timing_rpt = "automation_science_chassis_sta.rpt",
+    use_chassis = True,
+    use_row_placement = False,
+)
+
 
 factorilog_science_factory(
     name = "automation_controlled_science",

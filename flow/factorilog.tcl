@@ -186,6 +186,84 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
         error "factorilog: placement check failed: $problem"
     }
 
+} elseif {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"} {
+    if {![info exists CHASSIS_GRID_W]} { set CHASSIS_GRID_W 1 }
+    if {![info exists CHASSIS_GRID_H]} { set CHASSIS_GRID_H 1 }
+    if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
+    if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
+    if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }
+    if {![info exists CHASSIS_CHANNEL_W]} { set CHASSIS_CHANNEL_W 6 }
+
+    set margin_x [expr {($CHASSIS_PITCH - $CHASSIS_CORE_W) / 2}]
+    set margin_y [expr {($CHASSIS_PITCH - $CHASSIS_CORE_H) / 2}]
+    set die_w [expr {$CHASSIS_GRID_W * $CHASSIS_PITCH}]
+    set die_h [expr {$CHASSIS_GRID_H * $CHASSIS_PITCH}]
+    set core_lo_x $margin_x
+    set core_lo_y $margin_y
+    set core_hi_x [expr {$die_w - $margin_x}]
+    set core_hi_y [expr {$die_h - $margin_y}]
+
+    puts "factorilog: chassis floorplan ${CHASSIS_GRID_W}x${CHASSIS_GRID_H} (die ${die_w}x${die_h}, core margin ${margin_x}x${margin_y})"
+
+    initialize_floorplan -die_area [list 0 0 $die_w $die_h] \
+        -core_area [list $core_lo_x $core_lo_y $core_hi_x $core_hi_y] \
+        -site tile
+
+    # Create placement blockages on street channels and outer margins
+    create_blockage -region [list 0 0 $die_w $margin_y]
+    set top_y [expr {($CHASSIS_GRID_H - 1) * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+    create_blockage -region [list 0 $top_y $die_w $die_h]
+    create_blockage -region [list 0 0 $margin_x $die_h]
+    set right_x [expr {($CHASSIS_GRID_W - 1) * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+    create_blockage -region [list $right_x 0 $die_w $die_h]
+
+    # Internal horizontal street channels
+    for {set by 0} {$by < [expr {$CHASSIS_GRID_H - 1}]} {incr by} {
+        set y1 [expr {$by * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+        set y2 [expr {$y1 + $CHASSIS_CHANNEL_W}]
+        create_blockage -region [list 0 $y1 $die_w $y2]
+    }
+
+    # Internal vertical street channels
+    for {set bx 0} {$bx < [expr {$CHASSIS_GRID_W - 1}]} {incr bx} {
+        set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+        set x2 [expr {$x1 + $CHASSIS_CHANNEL_W}]
+        create_blockage -region [list $x1 0 $x2 $die_h]
+    }
+
+    make_tracks
+
+    # Place pins on the die edge: inputs on left, outputs on right
+    set_io_pin_constraint -direction input -region left:*
+    set_io_pin_constraint -direction output -region right:*
+    place_pins -hor_layers M1 -ver_layers M2
+
+    puts "factorilog: placement density [format %.3f $density]"
+    if {![info exists SPLIT_PAD_SITES]} {
+        set SPLIT_PAD_SITES 5
+    }
+    set split_pad [expr {max($CELL_PAD_SITES, $SPLIT_PAD_SITES)}]
+    set_placement_padding -global -left $CELL_PAD_SITES -right $CELL_PAD_SITES
+    set_placement_padding -masters {belt_merge2 belt_split2 belt_balancer2} -left $split_pad -right $split_pad
+
+    if {[info exists ROUTABILITY_DRIVEN] && $ROUTABILITY_DRIVEN == "1"} {
+        global_placement -density $density \
+            -pad_left $CELL_PAD_SITES \
+            -pad_right $CELL_PAD_SITES \
+            -routability_driven
+    } else {
+        global_placement -density $density \
+            -pad_left $CELL_PAD_SITES \
+            -pad_right $CELL_PAD_SITES
+    }
+
+    place_pins -hor_layers M1 -ver_layers M2
+    detailed_placement
+
+    if {[catch {check_placement} problem]} {
+        error "factorilog: placement check failed: $problem"
+    }
+
 } else {
     set core_side [expr {int(ceil(sqrt($block_area / $BLOCK_FILL)))}]
     set die_side [expr {$core_side + 2 * $CORE_MARGIN}]

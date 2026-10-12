@@ -231,3 +231,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "chassis_floorplan_test",
+    size = "small",
+    srcs = ["test_chassis_floorplan.py"],
+    data = [
+        "//flow:automation_science_chassis.def",
+        "//flow:automation_science_netlist.json",
+    ],
+    main = "test_chassis_floorplan.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+

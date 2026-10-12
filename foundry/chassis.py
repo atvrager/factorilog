@@ -7,12 +7,14 @@ orthogonal CityBlockChassis reference implementation.
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 from foundry.blueprint import decode, encode
 from foundry.channel_router import RouterIntersection, StreetChannel
+from foundry.entity_helpers import entity_size
 
 
 class ChassisTemplate(ABC):
@@ -171,6 +173,128 @@ class CityBlockChassis(ChassisTemplate):
             blockages.append((x_start, 0, x_width, total_h))
 
         return blockages
+
+    def emit_floorplan_tcl(self, grid_w: int, grid_h: int) -> str:
+        """Emit OpenROAD floorplan commands with chassis die area and blockages."""
+        die_w = grid_w * self.pitch_x
+        die_h = grid_h * self.pitch_y
+        core_lo_x = self.core_margin_x
+        core_lo_y = self.core_margin_y
+        core_hi_x = die_w - self.core_margin_x
+        core_hi_y = die_h - self.core_margin_y
+
+        lines = [
+            f"# Floorplan for {grid_w}x{grid_h} city block chassis ({die_w}x{die_h} tiles)",
+            f"initialize_floorplan -die_area [list 0 0 {die_w} {die_h}] \\",
+            f"    -core_area [list {core_lo_x} {core_lo_y} {core_hi_x} {core_hi_y}] \\",
+            "    -site tile",
+            "",
+            "# Placement blockages covering street transit channels",
+        ]
+        for x, y, w, h in self.get_placement_blockages(grid_w, grid_h):
+            x2 = x + w
+            y2 = y + h
+            lines.append(f"create_blockage -region [list {x} {y} {x2} {y2}]")
+
+        return "\n".join(lines) + "\n"
+
+    def emit_def_blockages(self, grid_w: int, grid_h: int, dbu: int = 1000) -> str:
+        """Emit DEF BLOCKAGES section covering all street transit channels."""
+        blockages = self.get_placement_blockages(grid_w, grid_h)
+        lines = [f"BLOCKAGES {len(blockages)} ;"]
+        for x, y, w, h in blockages:
+            x1 = x * dbu
+            y1 = y * dbu
+            x2 = (x + w) * dbu
+            y2 = (y + h) * dbu
+            lines.append(f"    - PLACEMENT RECT ( {x1} {y1} ) ( {x2} {y2} ) ;")
+        lines.append("END BLOCKAGES")
+        return "\n".join(lines) + "\n"
+
+    def apply_floorplan_to_def(self, def_text: str, grid_w: int, grid_h: int) -> str:
+        """Update DIEAREA and insert BLOCKAGES for chassis grid in DEF text."""
+        m_units = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", def_text)
+        dbu = int(m_units.group(1)) if m_units else 1000
+
+        total_w = grid_w * self.pitch_x * dbu
+        total_h = grid_h * self.pitch_y * dbu
+        new_die = f"DIEAREA ( 0 0 ) ( {total_w} {total_h} ) ;"
+
+        if re.search(r"DIEAREA.*?;", def_text):
+            def_text = re.sub(r"DIEAREA.*?;", new_die, def_text, count=1)
+        else:
+            def_text = re.sub(r"(DESIGN\s+\S+\s*;)", r"\1\n" + new_die, def_text, count=1)
+
+        blockages_text = self.emit_def_blockages(grid_w, grid_h, dbu=dbu)
+        def_text = re.sub(
+            r"BLOCKAGES\s+\d+\s*;.*?END\s+BLOCKAGES\s*",
+            "",
+            def_text,
+            flags=re.DOTALL,
+        )
+
+        if re.search(r"(NETS\s+\d+\s*;)", def_text):
+            def_text = re.sub(r"(NETS\s+\d+\s*;)", blockages_text + r"\1", def_text, count=1)
+        elif re.search(r"(END\s+DESIGN)", def_text):
+            def_text = re.sub(r"(END\s+DESIGN)", blockages_text + r"\1", def_text, count=1)
+        else:
+            def_text += "\n" + blockages_text
+
+        return def_text
+
+    def verify_cells_in_cores(
+        self,
+        def_data: dict[str, Any],
+        grid_w: int = 1,
+        grid_h: int = 1,
+        netlist_data: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Verify that all placed components sit strictly within chassis machine cores.
+
+        Returns list of violating components that spill into street channels or margins.
+        """
+        scale = 1.0 / float(def_data.get("units", 1000))
+        violations: list[dict[str, Any]] = []
+
+        cell_dims: dict[str, tuple[float, float]] = {}
+        if netlist_data:
+            for cname, cinfo in netlist_data.get("cells", {}).items():
+                w = float(cinfo.get("width", 1))
+                h = float(cinfo.get("height", 1))
+                cell_dims[cname] = (w, h)
+
+        core_boxes = [self.get_core_bounds(bx, by) for bx in range(grid_w) for by in range(grid_h)]
+
+        for comp in def_data.get("components", []):
+            cx = comp["x"] * scale
+            cy = comp["y"] * scale
+            macro = comp.get("macro", "")
+            cw, ch = cell_dims.get(macro, entity_size(macro))
+
+            in_any_core = False
+            for min_x, min_y, w, h in core_boxes:
+                if (
+                    cx >= min_x - 1e-4
+                    and (cx + cw) <= (min_x + w) + 1e-4
+                    and cy >= min_y - 1e-4
+                    and (cy + ch) <= (min_y + h) + 1e-4
+                ):
+                    in_any_core = True
+                    break
+
+            if not in_any_core:
+                violations.append(
+                    {
+                        "component": comp["name"],
+                        "macro": macro,
+                        "x": cx,
+                        "y": cy,
+                        "width": cw,
+                        "height": ch,
+                    }
+                )
+
+        return violations
 
     def emit_base_blueprint(self, grid_w: int, grid_h: int) -> dict[str, Any]:
         """Emit tiled base entities and pavement for an N x M grid.
