@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from foundry.blueprint import decode, encode
+from foundry.channel_router import RouterIntersection, StreetChannel
 
 
 class ChassisTemplate(ABC):
@@ -236,4 +237,61 @@ class CityBlockChassis(ChassisTemplate):
             tiles=bp.get("tiles", []),
             snap_to_grid=bp.get("snap-to-grid"),
             absolute_snapping=bp.get("absolute-snapping"),
+        )
+
+    def get_horizontal_channel(
+        self,
+        block_x: int,
+        block_y: int,
+        default_tier: str = "fast-transport-belt",
+    ) -> StreetChannel:
+        """Return the horizontal street channel corridor north of (block_x, block_y)."""
+        base_y = float(block_y * self.pitch_y + self.core_margin_y + self.core_height)
+        span_min = float(block_x * self.pitch_x + self.core_margin_x)
+        span_max = float(span_min + self.core_width)
+        return StreetChannel(
+            channel_id=f"h_channel_{block_x}_{block_y}",
+            orientation="H",
+            base_coord=base_y,
+            span_min=span_min,
+            span_max=span_max,
+            default_tier=default_tier,
+        )
+
+    def get_vertical_channel(
+        self,
+        block_x: int,
+        block_y: int,
+        default_tier: str = "fast-transport-belt",
+    ) -> StreetChannel:
+        """Return the vertical street channel corridor east of (block_x, block_y)."""
+        base_x = float(block_x * self.pitch_x + self.core_margin_x + self.core_width)
+        span_min = float(block_y * self.pitch_y + self.core_margin_y)
+        span_max = float(span_min + self.core_height)
+        return StreetChannel(
+            channel_id=f"v_channel_{block_x}_{block_y}",
+            orientation="V",
+            base_coord=base_x,
+            span_min=span_min,
+            span_max=span_max,
+            default_tier=default_tier,
+        )
+
+    def get_intersection(
+        self,
+        intersection_x: int,
+        intersection_y: int,
+        h_channel: StreetChannel | None = None,
+        v_channel: StreetChannel | None = None,
+    ) -> RouterIntersection:
+        """Return the router intersection junction at grid index (intersection_x, intersection_y)."""
+        cx = float(intersection_x * self.pitch_x)
+        cy = float(intersection_y * self.pitch_y)
+        h_ch = h_channel or self.get_horizontal_channel(intersection_x - 1, intersection_y - 1)
+        v_ch = v_channel or self.get_vertical_channel(intersection_x - 1, intersection_y - 1)
+        return RouterIntersection(
+            center_x=cx,
+            center_y=cy,
+            h_channel=h_ch,
+            v_channel=v_ch,
         )

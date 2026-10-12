@@ -220,3 +220,14 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "channel_router_test",
+    size = "small",
+    srcs = ["test_channel_router.py"],
+    main = "test_channel_router.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+

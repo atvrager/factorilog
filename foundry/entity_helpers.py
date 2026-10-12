@@ -46,7 +46,44 @@ def _segment_direction(x1: int, y1: int, x2: int, y2: int) -> int:
 
 _PROTOTYPE_BOXES: dict[str, tuple[float, float]] = {}
 _PROTOTYPE_COLLISIONS: dict[str, tuple[float, float]] = {}
-_PROTOTYPE_SPANS: dict[str, int] = {}
+_PROTOTYPE_SPANS: dict[str, int] = {
+    "underground-belt": 5,
+    "fast-underground-belt": 7,
+    "express-underground-belt": 9,
+    "turbo-underground-belt": 11,
+    "pipe-to-ground": 10,
+}
+
+
+def register_underground_span(name: str, span: int) -> None:
+    """Register or override maximum underground span for named entity."""
+    _PROTOTYPE_SPANS[name] = span
+
+
+def get_underground_span(name: str, default: int = 5) -> int:
+    """Return maximum underground span for named entity from prototype data."""
+    return _PROTOTYPE_SPANS.get(name, default)
+
+
+def get_compatible_underground_belt(min_span: int, preferred_name: str | None = None) -> str:
+    """Find an underground belt entity meeting the minimum required span.
+
+    If preferred_name meets min_span, returns preferred_name.
+    Otherwise returns the registered underground belt entity with the smallest span >= min_span.
+    """
+    if preferred_name and get_underground_span(preferred_name) >= min_span:
+        return preferred_name
+
+    candidates = [
+        (name, span)
+        for name, span in _PROTOTYPE_SPANS.items()
+        if "pipe" not in name and span >= min_span
+    ]
+    if candidates:
+        candidates.sort(key=lambda item: item[1])
+        return candidates[0][0]
+
+    return preferred_name or "fast-underground-belt"
 
 
 def _extract_proto_span(proto: dict[str, Any]) -> int | None:
@@ -98,11 +135,6 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
                     sub_span = _extract_proto_span(sub_val)
                     if sub_span is not None:
                         _PROTOTYPE_SPANS[sub_key] = sub_span
-
-
-def get_underground_span(name: str = "pipe-to-ground", default: int = 10) -> int:
-    """Return maximum underground span for named entity from prototype data."""
-    return _PROTOTYPE_SPANS.get(name, default)
 
 
 def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
@@ -223,12 +255,18 @@ def check_collisions(
         epos = ent["position"]
         tiles = [(round(epos["x"], 2), round(epos["y"], 2))]
         ename = ent.get("name", "")
-        if ename == "splitter":
+        if "splitter" in ename:
             d = ent.get("direction", 0)
             if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
-                tiles.append((round(epos["x"] + 1.0, 2), round(epos["y"], 2)))
+                tiles = [
+                    (round(epos["x"] - 0.5, 2), round(epos["y"], 2)),
+                    (round(epos["x"] + 0.5, 2), round(epos["y"], 2)),
+                ]
             else:
-                tiles.append((round(epos["x"], 2), round(epos["y"] + 1.0, 2)))
+                tiles = [
+                    (round(epos["x"], 2), round(epos["y"] - 0.5, 2)),
+                    (round(epos["x"], 2), round(epos["y"] + 0.5, 2)),
+                ]
         elif ename == "pump":
             d = ent.get("direction", DIRECTION_NORTH)
             if d in (DIRECTION_NORTH, DIRECTION_SOUTH):
@@ -250,10 +288,10 @@ def check_collisions(
 
 
 def check_underground_pairing(
-    entities: list[dict[str, Any]], max_span: int = 6
+    entities: list[dict[str, Any]], max_span: int | None = None
 ) -> list[dict[str, Any]]:
     """Verify that all underground belt entities pair correctly."""
-    ugs = [e for e in entities if e.get("name") == "underground-belt"]
+    ugs = [e for e in entities if "underground-belt" in e.get("name", "")]
     inputs = [e for e in ugs if e.get("type") == "input"]
     outputs = [e for e in ugs if e.get("type") == "output"]
     matched_outputs = set()
@@ -261,19 +299,26 @@ def check_underground_pairing(
     for inp in inputs:
         ix, iy = inp["position"]["x"], inp["position"]["y"]
         d = inp.get("direction", 0)
+        tier_span = (
+            max_span
+            if max_span is not None
+            else get_underground_span(inp.get("name", ""), default=5)
+        )
         found = None
         for o in outputs:
             if id(o) in matched_outputs:
+                continue
+            if o.get("name") != inp.get("name"):
                 continue
             ox, oy = o["position"]["x"], o["position"]["y"]
             od = o.get("direction", 0)
             if od != d:
                 continue
             if (
-                (d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= max_span)
-                or (d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= max_span)
-                or (d == DIRECTION_SOUTH and ix == ox and 1 <= oy - iy <= max_span)
-                or (d == DIRECTION_NORTH and ix == ox and 1 <= iy - oy <= max_span)
+                (d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= tier_span)
+                or (d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= tier_span)
+                or (d == DIRECTION_SOUTH and ix == ox and 1 <= oy - iy <= tier_span)
+                or (d == DIRECTION_NORTH and ix == ox and 1 <= iy - oy <= tier_span)
             ):
                 found = o
                 break
@@ -294,6 +339,7 @@ def check_underground_pairing(
         ug_d = OPPOSITE_DIR.get(pd, pd)
         dx, dy = DIR_STEPS.get(ug_d, (0, 0))
         max_pipe_span = get_underground_span("pipe-to-ground", 10)
+        found: dict[str, Any] | None = None
         for s in range(1, max_pipe_span + 1):
             tx, ty = round(px + dx * s, 2), round(py + dy * s, 2)
             for other in pipes:
