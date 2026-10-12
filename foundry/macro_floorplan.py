@@ -78,6 +78,7 @@ class MacroFloorplan:
 
         self.instance_to_block: dict[str, tuple[int, int]] = {}
         self.block_to_clusters: dict[tuple[int, int], list[RecipeCluster]] = {}
+        self.empty_blocks: set[tuple[int, int]] = set()
         self.channels: dict[str, StreetChannel] = {}
         self.intersections: dict[tuple[int, int], RouterIntersection] = {}
         self.routes: dict[str, InterBlockRoute] = {}
@@ -106,11 +107,15 @@ class MacroFloorplan:
 
     def emit_floorplan_tcl(self) -> str:
         """Emit OpenROAD floorplan TCL commands with blockages for this grid."""
-        return self.chassis.emit_floorplan_tcl(self.grid_w, self.grid_h)
+        return self.chassis.emit_floorplan_tcl(
+            self.grid_w, self.grid_h, empty_blocks=self.empty_blocks
+        )
 
     def emit_def_blockages(self, dbu: int = 1000) -> str:
         """Emit DEF BLOCKAGES section covering all street channels."""
-        return self.chassis.emit_def_blockages(self.grid_w, self.grid_h, dbu=dbu)
+        return self.chassis.emit_def_blockages(
+            self.grid_w, self.grid_h, dbu=dbu, empty_blocks=self.empty_blocks
+        )
 
     def emit_channel_entities(self) -> list[dict[str, Any]]:
         """Emit all physical belts, pipes, and router switchboxes for inter-block routes."""
@@ -153,13 +158,83 @@ class MacroFloorplanner:
         self,
         chassis: CityBlockChassis | None = None,
         max_block_area: float = 8836.0,
+        max_block_width: float = 80.0,
         default_belt_tier: str = "fast-transport-belt",
     ) -> None:
         self.chassis = chassis or CityBlockChassis(
             pitch=100, core_width=94, core_height=94, channel_width=6
         )
         self.max_block_area = max_block_area
+        self.max_block_width = max_block_width
         self.default_belt_tier = default_belt_tier
+
+    def _cluster_width(
+        self,
+        inst_list: list[dict[str, Any]],
+        cell_table: dict[str, Any],
+    ) -> float:
+        """Calculate total linear row placement width for a list of instances."""
+        total_w = 0.0
+        for inst in inst_list:
+            cell_id = inst.get("cell", "")
+            cell_meta = cell_table.get(cell_id, {})
+            cw = float(cell_meta.get("width", 0))
+            if cw <= 0:
+                cw, _ = entity_size(cell_id)
+            iname = inst.get("name", "")
+            if "merge" in iname:
+                pad = 16.0
+            elif "split" in iname or "bal" in iname:
+                pad = 10.0
+            elif any(
+                k in iname for k in ("disp", "acc", "comb", "dec", "latch", "switch", "params")
+            ):
+                pad = 2.0
+            else:
+                pad = 8.0
+            total_w += cw + pad
+        return total_w
+
+    def _cluster_area(
+        self,
+        inst_list: list[dict[str, Any]],
+        cell_table: dict[str, Any],
+    ) -> float:
+        """Calculate total machine footprint area for a list of instances."""
+        total_a = 0.0
+        for inst in inst_list:
+            cell_id = inst.get("cell", "")
+            cell_meta = cell_table.get(cell_id, {})
+            cw = float(cell_meta.get("width", 0))
+            ch = float(cell_meta.get("height", 0))
+            if cw <= 0 or ch <= 0:
+                cw, ch = entity_size(cell_id)
+            total_a += cw * ch
+        return total_a
+
+    def _split_cluster_recursive(
+        self,
+        inst_list: list[dict[str, Any]],
+        cell_table: dict[str, Any],
+        max_area: float,
+        max_width: float,
+    ) -> list[list[dict[str, Any]]]:
+        """Recursively bisect cluster instances until both area and row width fit."""
+        area = self._cluster_area(inst_list, cell_table)
+        width = self._cluster_width(inst_list, cell_table)
+
+        # Base case: return list if it fits or if only one instance remains
+        if (area <= max_area and width <= max_width) or len(inst_list) <= 1:
+            return [inst_list]
+
+        mid = len(inst_list) // 2
+        left_splits = self._split_cluster_recursive(
+            inst_list[:mid], cell_table, max_area, max_width
+        )
+        right_splits = self._split_cluster_recursive(
+            inst_list[mid:], cell_table, max_area, max_width
+        )
+        return left_splits + right_splits
 
     def cluster_netlist(self, netlist_data: dict[str, Any]) -> list[RecipeCluster]:
         """Group netlist instances into recipe clusters and divide oversized stages."""
@@ -176,8 +251,6 @@ class MacroFloorplanner:
 
         clusters: list[RecipeCluster] = []
         for recipe, inst_list in sorted(recipe_groups.items()):
-            # Calculate total area of instances in this cluster
-            total_area = 0.0
             inputs: set[str] = set()
             outputs: set[str] = set()
             ranks: list[int] = []
@@ -185,48 +258,43 @@ class MacroFloorplanner:
             for inst in inst_list:
                 cell_id = inst.get("cell", "")
                 cell_meta = cell_table.get(cell_id, {})
-                cw = float(cell_meta.get("width", 0))
-                ch = float(cell_meta.get("height", 0))
-                if cw <= 0 or ch <= 0:
-                    cw, ch = entity_size(cell_id)
-                total_area += cw * ch
-
                 for inp in cell_meta.get("inputs", []):
                     if inp not in ("a", "b", "a1", "a2"):
                         inputs.add(inp)
                 for out in cell_meta.get("outputs", []):
                     if out not in ("y", "y1", "y2"):
                         outputs.add(out)
-
                 if "rank" in inst:
                     ranks.append(int(inst["rank"]))
 
             avg_rank = round(sum(ranks) / len(ranks)) if ranks else 0
-            inst_names = [inst["name"] for inst in inst_list]
 
-            # Check if multi-block allocation is required
-            if total_area > self.max_block_area and len(inst_names) > 1:
-                k = math.ceil(total_area / self.max_block_area)
-                slice_size = math.ceil(len(inst_names) / k)
-                for i in range(k):
-                    part_names = inst_names[i * slice_size : (i + 1) * slice_size]
-                    if not part_names:
-                        continue
-                    part_area = total_area * (len(part_names) / float(len(inst_names)))
+            # Recursively split cluster instances until both area and row width fit
+            splits = self._split_cluster_recursive(
+                inst_list, cell_table, self.max_block_area, self.max_block_width
+            )
+
+            total_splits = len(splits)
+            if total_splits > 1:
+                for i, split_insts in enumerate(splits):
+                    split_names = [inst["name"] for inst in split_insts]
+                    split_area = self._cluster_area(split_insts, cell_table)
                     clusters.append(
                         RecipeCluster(
                             name=f"cluster_{recipe}_part_{i}",
                             recipe=recipe,
-                            instances=part_names,
-                            total_area=part_area,
+                            instances=split_names,
+                            total_area=split_area,
                             rank=avg_rank,
                             inputs=set(inputs),
                             outputs=set(outputs),
                             sub_cluster_index=i,
-                            total_sub_clusters=k,
+                            total_sub_clusters=total_splits,
                         )
                     )
             else:
+                inst_names = [inst["name"] for inst in inst_list]
+                total_area = self._cluster_area(inst_list, cell_table)
                 clusters.append(
                     RecipeCluster(
                         name=f"cluster_{recipe}",
@@ -240,6 +308,39 @@ class MacroFloorplanner:
                 )
 
         return clusters
+
+    def _grid_allocation_order(self, w: int, h: int) -> list[tuple[int, int]]:
+        """Order grid cells from outermost perimeter to innermost center rings."""
+        cells: list[tuple[int, int]] = []
+        min_x, max_x = 0, w - 1
+        min_y, max_y = 0, h - 1
+
+        while min_x <= max_x and min_y <= max_y:
+            if min_x == max_x and min_y == max_y:
+                cells.append((min_x, min_y))
+                break
+            if min_x == max_x:
+                cells.extend((min_x, y) for y in range(min_y, max_y + 1))
+                break
+            if min_y == max_y:
+                cells.extend((x, min_y) for x in range(min_x, max_x + 1))
+                break
+
+            # South edge (left to right)
+            cells.extend((x, min_y) for x in range(min_x, max_x))
+            # East edge (bottom to top)
+            cells.extend((max_x, y) for y in range(min_y, max_y))
+            # North edge (right to left)
+            cells.extend((x, max_y) for x in range(max_x, min_x, -1))
+            # West edge (top to bottom)
+            cells.extend((min_x, y) for y in range(max_y, min_y, -1))
+
+            min_x += 1
+            max_x -= 1
+            min_y += 1
+            max_y -= 1
+
+        return cells
 
     def plan_grid(
         self,
@@ -260,8 +361,9 @@ class MacroFloorplanner:
             h = grid_h
             w = max(1, math.ceil(num_blocks / float(h)))
         else:
-            w = max(1, math.ceil(math.sqrt(num_blocks)))
-            h = max(1, math.ceil(num_blocks / float(w)))
+            s = max(1, math.ceil(math.sqrt(num_blocks)))
+            w = s
+            h = s
 
         floorplan = MacroFloorplan(
             grid_w=w,
@@ -276,14 +378,19 @@ class MacroFloorplanner:
             key=lambda c: (c.rank, c.recipe, c.sub_cluster_index),
         )
 
+        alloc_order = self._grid_allocation_order(w, h)
+
         # Assign each cluster to grid coordinates (block_x, block_y)
         for idx, cluster in enumerate(sorted_clusters):
-            bx = idx % w
-            by = idx // w
+            bx, by = alloc_order[idx]
             cluster.assigned_block = (bx, by)
             floorplan.block_to_clusters.setdefault((bx, by), []).append(cluster)
             for inst_name in cluster.instances:
                 floorplan.instance_to_block[inst_name] = (bx, by)
+
+        # Record all unassigned blocks as empty_blocks (for example in the middle)
+        for bx, by in alloc_order[len(sorted_clusters) :]:
+            floorplan.empty_blocks.add((bx, by))
 
         # Instantiate horizontal street channels between adjacent rows
         for by in range(h - 1):

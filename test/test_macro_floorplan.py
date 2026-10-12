@@ -230,3 +230,65 @@ class TestMacroFloorplan(unittest.TestCase):
         self.assertGreater(len(entities), 0)
         collisions = check_collisions(entities)
         self.assertEqual(collisions, [])
+
+    def test_recursive_splitting_by_row_width(self) -> None:
+        """Verify that oversized rows recursively split until each part fits within width."""
+        # Iron plate in mock data has 2 instances of width 5 + pad 8 = 13 tiles each -> 26 tiles.
+        # Set max_block_width to 15.0 so that 26 tiles must split recursively into 2 parts.
+        planner = MacroFloorplanner(max_block_area=8836.0, max_block_width=15.0)
+        clusters = planner.cluster_netlist(MOCK_NETLIST_DATA)
+
+        iron_parts = [c for c in clusters if c.recipe == "iron-plate"]
+        self.assertEqual(len(iron_parts), 2)
+        for part in iron_parts:
+            part_insts = [
+                inst for inst in MOCK_NETLIST_DATA["instances"] if inst["name"] in part.instances
+            ]
+            part_w = planner._cluster_width(part_insts, MOCK_NETLIST_DATA["cells"])
+            self.assertLessEqual(part_w, 15.0)
+
+    def test_square_grid_with_empty_middle_block(self) -> None:
+        """Verify square layout dimensioning and empty middle block placement."""
+        # 8 distinct clusters should form a 3x3 square grid with center (1, 1) empty
+        clusters = [
+            RecipeCluster(
+                name=f"cluster_{i}",
+                recipe=f"item_{i}",
+                instances=[f"u_inst_{i}"],
+                total_area=10.0,
+            )
+            for i in range(8)
+        ]
+        floorplan = self.floorplanner.plan_grid(clusters)
+        self.assertEqual(floorplan.grid_w, 3)
+        self.assertEqual(floorplan.grid_h, 3)
+        self.assertEqual(floorplan.empty_blocks, {(1, 1)})
+
+        # Verify planner assigns all 8 clusters to outer perimeter cells
+        for c in clusters:
+            self.assertIsNotNone(c.assigned_block)
+            bx, by = c.assigned_block
+            self.assertIn((bx, by), floorplan.block_to_clusters)
+            # Distance to border is 0 for perimeter cells
+            self.assertEqual(min(bx, 2 - bx, by, 2 - by), 0)
+
+        # Verify emitted floorplan TCL creates blockage over center block (1, 1) core
+        tcl = floorplan.emit_floorplan_tcl()
+        self.assertIn("create_blockage -region [list 103 103 197 197]", tcl)
+
+        # Verify DEF blockages include center block core
+        def_blockages = floorplan.emit_def_blockages(dbu=1000)
+        self.assertIn("PLACEMENT RECT ( 103000 103000 ) ( 197000 197000 )", def_blockages)
+
+    def test_single_item_type_per_cell(self) -> None:
+        """Verify each cell is responsible for only one item type and no composites."""
+        clusters = self.floorplanner.cluster_netlist(MOCK_NETLIST_DATA)
+        floorplan = self.floorplanner.plan_grid(clusters)
+
+        for (bx, by), blk_clusters in floorplan.block_to_clusters.items():
+            recipes = {c.recipe for c in blk_clusters}
+            self.assertEqual(
+                len(recipes),
+                1,
+                f"Block ({bx}, {by}) contains multiple item types: {recipes}",
+            )

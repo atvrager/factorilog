@@ -93,6 +93,12 @@ class TestChassisFloorplan(unittest.TestCase):
         self.assertIn("create_blockage -region [list 0 97 200 103]", tcl)
         self.assertIn("create_blockage -region [list 97 0 103 200]", tcl)
 
+    def test_emit_floorplan_tcl_empty_middle_block(self) -> None:
+        """Verify generated TCL floorplan blocks empty middle blocks."""
+        tcl = self.chassis.emit_floorplan_tcl(3, 3, empty_blocks={(1, 1)})
+        # Center core (1, 1) has bounds [103 103 197 197]
+        self.assertIn("create_blockage -region [list 103 103 197 197]", tcl)
+
     def test_emit_def_blockages(self) -> None:
         """Verify DEF blockages section format and DBU scaling."""
         def_blockages = self.chassis.emit_def_blockages(1, 1, dbu=1000)
@@ -207,4 +213,27 @@ class TestChassisFloorplan(unittest.TestCase):
             [],
             f"Expected zero placement violations in street channels, got: {violations}",
         )
+
+    def test_verify_cells_in_cores_3x3(self) -> None:
+        """Verify placement check passes for 3x3 layout with cells in cores."""
+        def_data: dict[str, Any] = {
+            "units": 1000,
+            "components": [
+                {"name": "inst_blk00", "macro": "furnace", "x": 10000, "y": 10000},
+                {"name": "inst_blk10", "macro": "furnace", "x": 110000, "y": 10000},
+                {"name": "inst_blk20", "macro": "assembler", "x": 210000, "y": 10000},
+                {"name": "inst_blk21", "macro": "assembler", "x": 210000, "y": 110000},
+            ],
+        }
+        netlist_data: dict[str, Any] = {
+            "cells": {
+                "furnace": {"width": 3, "height": 3},
+                "assembler": {"width": 3, "height": 3},
+            }
+        }
+        violations = self.chassis.verify_cells_in_cores(
+            def_data, grid_w=3, grid_h=3, netlist_data=netlist_data
+        )
+        self.assertEqual(len(violations), 0)
+
 

@@ -63,6 +63,56 @@ if {[file exists "ranks.tcl"]} {
     }
 }
 
+proc get_chassis_block_order {w h} {
+    set cells [list]
+    set min_x 0
+    set max_x [expr {$w - 1}]
+    set min_y 0
+    set max_y [expr {$h - 1}]
+
+    while {$min_x <= $max_x && $min_y <= $max_y} {
+        if {$min_x == $max_x && $min_y == $max_y} {
+            lappend cells [list $min_x $min_y]
+            break
+        }
+        if {$min_x == $max_x} {
+            for {set y $min_y} {$y <= $max_y} {incr y} {
+                lappend cells [list $min_x $y]
+            }
+            break
+        }
+        if {$min_y == $max_y} {
+            for {set x $min_x} {$x <= $max_x} {incr x} {
+                lappend cells [list $x $min_y]
+            }
+            break
+        }
+
+        # South edge (left to right)
+        for {set x $min_x} {$x < $max_x} {incr x} {
+            lappend cells [list $x $min_y]
+        }
+        # East edge (bottom to top)
+        for {set y $min_y} {$y < $max_y} {incr y} {
+            lappend cells [list $max_x $y]
+        }
+        # North edge (right to left)
+        for {set x $max_x} {$x > $min_x} {incr x -1} {
+            lappend cells [list $x $max_y]
+        }
+        # West edge (top to bottom)
+        for {set y $max_y} {$y > $min_y} {incr y -1} {
+            lappend cells [list $min_x $y]
+        }
+
+        incr min_x
+        incr max_x -1
+        incr min_y
+        incr max_y -1
+    }
+    return $cells
+}
+
 if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} {
     # Structured Linear Row Placement:
     # Arrange machines in horizontal rows by recipe topological depth.
@@ -108,68 +158,222 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
         }
     }
 
-    set core_w [expr {max(30, $max_row_w + 4)}]
-    set total_h $channel_h
-    for {set r 0} {$r < $num_ranks} {incr r} {
-        set row_start_y($r) [expr {$CORE_MARGIN + $total_h}]
-        set total_h [expr {$total_h + $rank_h($r) + $channel_h}]
+    if {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"} {
+        if {![info exists CHASSIS_GRID_W]} { set CHASSIS_GRID_W 1 }
+        if {![info exists CHASSIS_GRID_H]} { set CHASSIS_GRID_H 1 }
+        if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
+        if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
+        if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }
+        if {![info exists CHASSIS_CHANNEL_W]} { set CHASSIS_CHANNEL_W 6 }
+
+        set margin_x [expr {($CHASSIS_PITCH - $CHASSIS_CORE_W) / 2}]
+        set margin_y [expr {($CHASSIS_PITCH - $CHASSIS_CORE_H) / 2}]
+        set die_w [expr {$CHASSIS_GRID_W * $CHASSIS_PITCH}]
+        set die_h [expr {$CHASSIS_GRID_H * $CHASSIS_PITCH}]
+        set core_lo_x $margin_x
+        set core_lo_y $margin_y
+        set core_hi_x [expr {$die_w - $margin_x}]
+        set core_hi_y [expr {$die_h - $margin_y}]
+
+        set total_h $channel_h
+        for {set r 0} {$r < $num_ranks} {incr r} {
+            set row_start_y($r) [expr {$core_lo_y + $total_h}]
+            set total_h [expr {$total_h + $rank_h($r) + $channel_h}]
+        }
+
+        puts "factorilog: structured linear row floorplan on chassis (${CHASSIS_GRID_W}x${CHASSIS_GRID_H}): die ${die_w}x${die_h}, core margin ${margin_x}x${margin_y}"
+
+        initialize_floorplan -die_area [list 0 0 $die_w $die_h] \
+            -core_area [list $core_lo_x $core_lo_y $core_hi_x $core_hi_y] \
+            -site tile
+
+        # Create placement blockages on street channels and outer margins
+        create_blockage -region [list 0 0 $die_w $margin_y]
+        set top_y [expr {($CHASSIS_GRID_H - 1) * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+        create_blockage -region [list 0 $top_y $die_w $die_h]
+        create_blockage -region [list 0 0 $margin_x $die_h]
+        set right_x [expr {($CHASSIS_GRID_W - 1) * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+        create_blockage -region [list $right_x 0 $die_w $die_h]
+
+        # Internal horizontal street channels
+        for {set by 0} {$by < [expr {$CHASSIS_GRID_H - 1}]} {incr by} {
+            set y1 [expr {$by * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+            set y2 [expr {$y1 + $CHASSIS_CHANNEL_W}]
+            create_blockage -region [list 0 $y1 $die_w $y2]
+        }
+
+        # Internal vertical street channels
+        for {set bx 0} {$bx < [expr {$CHASSIS_GRID_W - 1}]} {incr bx} {
+            set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+            set x2 [expr {$x1 + $CHASSIS_CHANNEL_W}]
+            create_blockage -region [list $x1 0 $x2 $die_h]
+        }
+
+        # Placement blockages for empty center blocks in chassis grids >= 3x3
+        if {[info exists CHASSIS_EMPTY_BLOCKS] && $CHASSIS_EMPTY_BLOCKS != ""} {
+            foreach blk $CHASSIS_EMPTY_BLOCKS {
+                set bx [lindex $blk 0]
+                set by [lindex $blk 1]
+                set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x}]
+                set y1 [expr {$by * $CHASSIS_PITCH + $margin_y}]
+                set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+                set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+                create_blockage -region [list $x1 $y1 $x2 $y2]
+            }
+        } elseif {$CHASSIS_GRID_W >= 3 && $CHASSIS_GRID_H >= 3} {
+            set mid_bx [expr {($CHASSIS_GRID_W - 1) / 2}]
+            set mid_by [expr {($CHASSIS_GRID_H - 1) / 2}]
+            set x1 [expr {$mid_bx * $CHASSIS_PITCH + $margin_x}]
+            set y1 [expr {$mid_by * $CHASSIS_PITCH + $margin_y}]
+            set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+            set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+            create_blockage -region [list $x1 $y1 $x2 $y2]
+        }
+    } else {
+        set core_w [expr {max(30, $max_row_w + 4)}]
+        set total_h $channel_h
+        for {set r 0} {$r < $num_ranks} {incr r} {
+            set row_start_y($r) [expr {$CORE_MARGIN + $total_h}]
+            set total_h [expr {$total_h + $rank_h($r) + $channel_h}]
+        }
+        set core_h $total_h
+        set die_w [expr {$core_w + 2 * $CORE_MARGIN}]
+        set die_h [expr {$core_h + 2 * $CORE_MARGIN}]
+        set core_lo_x $CORE_MARGIN
+        set core_lo_y $CORE_MARGIN
+        set core_hi_x [expr {$die_w - $CORE_MARGIN}]
+        set core_hi_y [expr {$die_h - $CORE_MARGIN}]
+
+        puts "factorilog: structured linear row floorplan ($num_ranks ranks): die ${die_w}x${die_h}, core ${core_w}x${core_h}"
+
+        initialize_floorplan -die_area "0 0 $die_w $die_h" \
+            -core_area "$core_lo_x $core_lo_y $core_hi_x $core_hi_y" \
+            -site tile
     }
-    set core_h $total_h
-    set die_w [expr {$core_w + 2 * $CORE_MARGIN}]
-    set die_h [expr {$core_h + 2 * $CORE_MARGIN}]
-    set core_lo_x $CORE_MARGIN
-    set core_lo_y $CORE_MARGIN
-    set core_hi_x [expr {$die_w - $CORE_MARGIN}]
-    set core_hi_y [expr {$die_h - $CORE_MARGIN}]
-
-    puts "factorilog: structured linear row floorplan ($num_ranks ranks): die ${die_w}x${die_h}, core ${core_w}x${core_h}"
-
-    initialize_floorplan -die_area "0 0 $die_w $die_h" \
-        -core_area "$core_lo_x $core_lo_y $core_hi_x $core_hi_y" \
-        -site tile
 
     make_tracks
 
     set dbTech [[$block getDataBase] getTech]
     set m2Layer [$dbTech findLayer "M2"]
 
-    # Assign positions to instances in each rank row
-    for {set r 0} {$r < $num_ranks} {incr r} {
-        set ry $row_start_y($r)
-        set roff 0
-        if {[info exists rank_offset_x($r)]} { set roff $rank_offset_x($r) }
-        set rx [expr {$core_lo_x + 2 + $roff}]
-        if {[info exists rank_instances($r)]} {
-            foreach iname $rank_instances($r) {
-                set dinst [$block findInst $iname]
-                if {$dinst != "NULL" && $dinst != ""} {
-                    set dmaster [$dinst getMaster]
-                    set dw [expr {[$dmaster getWidth] / $dbu}]
-                    set dh [expr {[$dmaster getHeight] / $dbu}]
-                    $dinst setLocation [expr {int($rx * $dbu)}] [expr {int($ry * $dbu)}]
-                    $dinst setPlacementStatus PLACED
+    set is_chassis [expr {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"}]
+    if {$is_chassis} {
+        set block_order [get_chassis_block_order $CHASSIS_GRID_W $CHASSIS_GRID_H]
+        set num_blocks [llength $block_order]
 
-                    set pad $pad_between
-                    if {[string match "*merge*" $iname]} {
-                        set pad 16
-                    } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
-                        set pad [expr {max(10, $SPLIT_PAD_SITES)}]
-                    } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
-                        set pad 2
+        # Assign positions to instances in each rank row inside its allocated chassis block
+        for {set r 0} {$r < $num_ranks} {incr r} {
+            if {$num_blocks > 1} {
+                set blk_idx [expr {$r % $num_blocks}]
+                set blk [lindex $block_order $blk_idx]
+                set bx [lindex $blk 0]
+                set by [lindex $blk 1]
+                set blk_lo_x [expr {$bx * $CHASSIS_PITCH + $margin_x}]
+                set blk_lo_y [expr {$by * $CHASSIS_PITCH + $margin_y}]
+                set blk_hi_x [expr {$blk_lo_x + $CHASSIS_CORE_W}]
+                set blk_hi_y [expr {$blk_lo_y + $CHASSIS_CORE_H}]
+
+                set rx [expr {$blk_lo_x + 6}]
+                set ry [expr {$blk_lo_y + 10}]
+                set cur_row_h 5
+            } else {
+                set blk_lo_x $core_lo_x
+                set blk_hi_x $core_hi_x
+                set rx [expr {$core_lo_x + 6}]
+                set ry $row_start_y($r)
+                set cur_row_h $rank_h($r)
+            }
+
+            if {[info exists rank_instances($r)]} {
+                foreach iname $rank_instances($r) {
+                    set dinst [$block findInst $iname]
+                    if {$dinst != "NULL" && $dinst != ""} {
+                        set dmaster [$dinst getMaster]
+                        set dw [expr {[$dmaster getWidth] / $dbu}]
+                        set dh [expr {[$dmaster getHeight] / $dbu}]
+                        if {$dh > $cur_row_h} { set cur_row_h $dh }
+                        set pad $pad_between
+                        if {[string match "*merge*" $iname]} {
+                            set pad 16
+                        } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
+                            set pad [expr {max(10, $SPLIT_PAD_SITES)}]
+                        } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
+                            set pad 2
+                        }
+
+                        set wrap_threshold [expr {$blk_hi_x - 6}]
+                        if {[string match "*merge*" $iname]} {
+                            set wrap_threshold [expr {$blk_hi_x - 20}]
+                        }
+                        if {$rx + $dw > $wrap_threshold} {
+                            set rx [expr {$blk_lo_x + 6}]
+                            set ry [expr {$ry + $cur_row_h + $channel_h}]
+                            set cur_row_h $dh
+                        }
+                        $dinst setLocation [expr {int($rx * $dbu)}] [expr {int($ry * $dbu)}]
+                        $dinst setPlacementStatus PLACED
+                        set rx [expr {$rx + $dw + $pad}]
                     }
-                    set rx [expr {$rx + $dw + $pad}]
+                }
+            }
+        }
+    } else {
+        # Assign positions to instances in each rank row
+        for {set r 0} {$r < $num_ranks} {incr r} {
+            set ry $row_start_y($r)
+            set roff 0
+            if {[info exists rank_offset_x($r)]} { set roff $rank_offset_x($r) }
+            set rx [expr {$core_lo_x + 2 + $roff}]
+            if {[info exists rank_instances($r)]} {
+                foreach iname $rank_instances($r) {
+                    set dinst [$block findInst $iname]
+                    if {$dinst != "NULL" && $dinst != ""} {
+                        set dmaster [$dinst getMaster]
+                        set dw [expr {[$dmaster getWidth] / $dbu}]
+                        set dh [expr {[$dmaster getHeight] / $dbu}]
+                        set pad $pad_between
+                        if {[string match "*merge*" $iname]} {
+                            set pad 16
+                        } elseif {[string match "*split*" $iname] || [string match "*bal*" $iname]} {
+                            set pad [expr {max(10, $SPLIT_PAD_SITES)}]
+                        } elseif {[string match "*disp*" $iname] || [string match "*acc*" $iname] || [string match "*comb*" $iname] || [string match "*dec*" $iname] || [string match "*latch*" $iname] || [string match "*switch*" $iname] || [string match "*params*" $iname]} {
+                            set pad 2
+                        }
+
+                        set wrap_threshold [expr {$core_hi_x - 2}]
+                        if {[string match "*merge*" $iname]} {
+                            set wrap_threshold [expr {$core_hi_x - 20}]
+                        }
+                        if {$rx + $dw > $wrap_threshold} {
+                            set rx [expr {$core_lo_x + 2}]
+                            set ry [expr {$ry + $rank_h($r) + $channel_h}]
+                        }
+                        $dinst setLocation [expr {int($rx * $dbu)}] [expr {int($ry * $dbu)}]
+                        $dinst setPlacementStatus PLACED
+                        set rx [expr {$rx + $dw + $pad}]
+                    }
                 }
             }
         }
     }
 
-    # Place any unranked instances at top of core
-    set unranked_x [expr {$core_lo_x + 2}]
-    set unranked_y [expr {$core_hi_y - 4}]
+    # Place any unranked instances
+    if {$is_chassis} {
+        set unranked_x [expr {$core_lo_x + 6}]
+        set unranked_y [expr {$core_lo_y + 80}]
+    } else {
+        set unranked_x [expr {$core_lo_x + 2}]
+        set unranked_y [expr {$core_hi_y - 4}]
+    }
     foreach inst [$block getInsts] {
         if {[$inst getPlacementStatus] != "PLACED"} {
             set master [$inst getMaster]
             set dw [expr {[$master getWidth] / $dbu}]
+            set dh [expr {[$master getHeight] / $dbu}]
+            if {$unranked_x + $dw > [expr {$core_hi_x - 6}]} {
+                set unranked_x [expr {$core_lo_x + 6}]
+                set unranked_y [expr {$unranked_y - $dh - 4}]
+            }
             $inst setLocation [expr {int($unranked_x * $dbu)}] [expr {int($unranked_y * $dbu)}]
             $inst setPlacementStatus PLACED
             set unranked_x [expr {$unranked_x + $dw + $pad_between}]
@@ -229,6 +433,27 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
         set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
         set x2 [expr {$x1 + $CHASSIS_CHANNEL_W}]
         create_blockage -region [list $x1 0 $x2 $die_h]
+    }
+
+    # Placement blockages for empty center blocks in chassis grids >= 3x3
+    if {[info exists CHASSIS_EMPTY_BLOCKS] && $CHASSIS_EMPTY_BLOCKS != ""} {
+        foreach blk $CHASSIS_EMPTY_BLOCKS {
+            set bx [lindex $blk 0]
+            set by [lindex $blk 1]
+            set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x}]
+            set y1 [expr {$by * $CHASSIS_PITCH + $margin_y}]
+            set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+            set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+            create_blockage -region [list $x1 $y1 $x2 $y2]
+        }
+    } elseif {$CHASSIS_GRID_W >= 3 && $CHASSIS_GRID_H >= 3} {
+        set mid_bx [expr {($CHASSIS_GRID_W - 1) / 2}]
+        set mid_by [expr {($CHASSIS_GRID_H - 1) / 2}]
+        set x1 [expr {$mid_bx * $CHASSIS_PITCH + $margin_x}]
+        set y1 [expr {$mid_by * $CHASSIS_PITCH + $margin_y}]
+        set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+        set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+        create_blockage -region [list $x1 $y1 $x2 $y2]
     }
 
     make_tracks

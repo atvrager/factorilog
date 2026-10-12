@@ -253,8 +253,10 @@ script.on_init(function()
                 end
             end
         else
+            local med_poles = surface.find_entities_filtered{{name = "medium-electric-pole"}}
+            local search_poles = (#med_poles > 0) and med_poles or all_poles
             local best_x = 1e9
-            for _, p in ipairs(all_poles) do
+            for _, p in ipairs(search_poles) do
                 if p.valid and p.position.x < best_x then
                     best_x = p.position.x
                     target_pole = p
@@ -297,6 +299,27 @@ script.on_init(function()
                 local c1 = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 local c2 = target_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                 c1.connect_to(c2, false)
+            end
+
+            -- Bridge power from target_pole to chassis big electric poles if present
+            local big_poles = surface.find_entities_filtered{{name = "big-electric-pole"}}
+            if #big_poles > 0 and target_pole and target_pole.valid then
+                local best_d = 1e9
+                local nearest_big = nil
+                for _, bp in ipairs(big_poles) do
+                    if bp.valid then
+                        local d = (bp.position.x - target_pole.position.x)^2 + (bp.position.y - target_pole.position.y)^2
+                        if d < best_d then
+                            best_d = d
+                            nearest_big = bp
+                        end
+                    end
+                end
+                if nearest_big and nearest_big.valid then
+                    local c1 = target_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                    local c2 = nearest_big.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                    c1.connect_to(c2, false)
+                end
             end
 
             surface.create_entity{{

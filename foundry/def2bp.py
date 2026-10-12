@@ -242,6 +242,109 @@ def main() -> int:
     def_data = parse_def(def_text)
     entities, wires = build_entities(def_data, netlist_data, strict_drc=not args.no_strict_drc)
 
+    tiles: list[dict[str, Any]] | None = None
+    if def_data.get("blockages"):
+        try:
+            from foundry.chassis import CityBlockChassis
+            from foundry.macro_floorplan import MacroFloorplanner
+        except ImportError:
+            from chassis import CityBlockChassis
+            from macro_floorplan import MacroFloorplanner
+
+        units = float(def_data.get("units", 1000))
+        die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
+        die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
+        grid_w = max(1, round(die_w / 100.0))
+        grid_h = max(1, round(die_h / 100.0))
+
+        bp_candidates = [
+            Path("cityblock.bp"),
+            Path(__file__).resolve().parent.parent / "cityblock.bp",
+            Path("/home/atv/src/factorilog/cityblock.bp"),
+        ]
+        chassis: CityBlockChassis | None = None
+        for bp_cand in bp_candidates:
+            if bp_cand.is_file():
+                try:
+                    chassis = CityBlockChassis.from_blueprint_file(bp_cand)
+                    break
+                except Exception:
+                    pass
+        if chassis is None:
+            chassis = CityBlockChassis(pitch=100, core_width=94, core_height=94, channel_width=6)
+
+        base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
+        base_entities = base_bp.get("blueprint", {}).get("entities", [])
+        tiles = base_bp.get("blueprint", {}).get("tiles", [])
+
+        # Emit channel entities from macro floorplanner
+        macro_planner = MacroFloorplanner(chassis=chassis)
+        floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
+        channel_entities = floorplan.emit_channel_entities()
+
+        occupied_tiles: set[tuple[float, float]] = set()
+        for e in entities:
+            pos = e.get("position", {})
+            ex = float(pos.get("x", 0.0))
+            ey = float(pos.get("y", 0.0))
+            ename = e.get("name", "")
+            if "splitter" in ename:
+                d = e.get("direction", 0)
+                if d in (0, 8):
+                    occupied_tiles.add((round(ex - 0.5, 2), round(ey, 2)))
+                    occupied_tiles.add((round(ex + 0.5, 2), round(ey, 2)))
+                else:
+                    occupied_tiles.add((round(ex, 2), round(ey - 0.5, 2)))
+                    occupied_tiles.add((round(ex, 2), round(ey + 0.5, 2)))
+            elif (
+                "assembling-machine" in ename
+                or "electric-furnace" in ename
+                or "lab" in ename
+                or "chemical-plant" in ename
+            ):
+                for dx in (-1.0, 0.0, 1.0):
+                    for dy in (-1.0, 0.0, 1.0):
+                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
+            elif "oil-refinery" in ename:
+                for dx in (-2.0, -1.0, 0.0, 1.0, 2.0):
+                    for dy in (-2.0, -1.0, 0.0, 1.0, 2.0):
+                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
+            else:
+                occupied_tiles.add((round(ex, 2), round(ey, 2)))
+
+        for be in base_entities + channel_entities:
+            if "position" not in be:
+                continue
+            bpos = be.get("position", {})
+            bx = float(bpos.get("x", 0.0))
+            by = float(bpos.get("y", 0.0))
+            bname = be.get("name", "")
+            b_tiles: list[tuple[float, float]] = []
+            if bname == "big-electric-pole":
+                b_tiles.extend(
+                    (round(bx + dx, 2), round(by + dy, 2))
+                    for dx in (-0.5, 0.5)
+                    for dy in (-0.5, 0.5)
+                )
+            elif bname == "radar":
+                b_tiles.extend(
+                    (round(bx + dx, 2), round(by + dy, 2))
+                    for dx in (-1.0, 0.0, 1.0)
+                    for dy in (-1.0, 0.0, 1.0)
+                )
+            else:
+                b_tiles.append((round(bx, 2), round(by, 2)))
+
+            if any(t in occupied_tiles for t in b_tiles):
+                continue
+
+            for t in b_tiles:
+                occupied_tiles.add(t)
+
+            new_be = dict(be)
+            new_be["entity_number"] = len(entities) + 1
+            entities.append(new_be)
+
     if args.json:
         document: dict[str, Any] = {
             "blueprint": {
@@ -253,9 +356,11 @@ def main() -> int:
         }
         if wires:
             document["blueprint"]["wires"] = wires
+        if tiles:
+            document["blueprint"]["tiles"] = tiles
         output_text = json.dumps(document, indent=2)
     else:
-        output_text = blueprint.encode(entities, args.label, wires=wires)
+        output_text = blueprint.encode(entities, args.label, wires=wires, tiles=tiles)
 
     if args.out:
         args.out.write_text(output_text + "\n")

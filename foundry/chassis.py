@@ -139,11 +139,12 @@ class CityBlockChassis(ChassisTemplate):
         self,
         grid_w: int,
         grid_h: int,
+        empty_blocks: set[tuple[int, int]] | None = None,
     ) -> list[tuple[int, int, int, int]]:
         """Return (x, y, width, height) rectangles covering all street channels.
 
         Generates horizontal and vertical blockage bars surrounding the
-        interior machine cores.
+        interior machine cores, as well as full core blockages for empty blocks.
         """
         blockages: list[tuple[int, int, int, int]] = []
         total_w = grid_w * self.pitch_x
@@ -172,9 +173,20 @@ class CityBlockChassis(ChassisTemplate):
             x_width = self.channel_width
             blockages.append((x_start, 0, x_width, total_h))
 
+        # Blockages for unused / empty interior blocks
+        if empty_blocks:
+            for bx, by in sorted(empty_blocks):
+                mx, my, mw, mh = self.get_core_bounds(bx, by)
+                blockages.append((mx, my, mw, mh))
+
         return blockages
 
-    def emit_floorplan_tcl(self, grid_w: int, grid_h: int) -> str:
+    def emit_floorplan_tcl(
+        self,
+        grid_w: int,
+        grid_h: int,
+        empty_blocks: set[tuple[int, int]] | None = None,
+    ) -> str:
         """Emit OpenROAD floorplan commands with chassis die area and blockages."""
         die_w = grid_w * self.pitch_x
         die_h = grid_h * self.pitch_y
@@ -191,16 +203,22 @@ class CityBlockChassis(ChassisTemplate):
             "",
             "# Placement blockages covering street transit channels",
         ]
-        for x, y, w, h in self.get_placement_blockages(grid_w, grid_h):
+        for x, y, w, h in self.get_placement_blockages(grid_w, grid_h, empty_blocks=empty_blocks):
             x2 = x + w
             y2 = y + h
             lines.append(f"create_blockage -region [list {x} {y} {x2} {y2}]")
 
         return "\n".join(lines) + "\n"
 
-    def emit_def_blockages(self, grid_w: int, grid_h: int, dbu: int = 1000) -> str:
+    def emit_def_blockages(
+        self,
+        grid_w: int,
+        grid_h: int,
+        dbu: int = 1000,
+        empty_blocks: set[tuple[int, int]] | None = None,
+    ) -> str:
         """Emit DEF BLOCKAGES section covering all street transit channels."""
-        blockages = self.get_placement_blockages(grid_w, grid_h)
+        blockages = self.get_placement_blockages(grid_w, grid_h, empty_blocks=empty_blocks)
         lines = [f"BLOCKAGES {len(blockages)} ;"]
         for x, y, w, h in blockages:
             x1 = x * dbu

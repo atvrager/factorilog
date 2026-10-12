@@ -16,6 +16,7 @@ foundry/factory.blueprint
 # Rendered machine cell assets and blueprints
 *.bp.txt
 *.png
+*.zip
 /scratch/
 
 __pycache__/
