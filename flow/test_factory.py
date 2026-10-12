@@ -544,7 +544,7 @@ script.on_event(defines.events.on_tick, function(event)
         local productive_machines = productive_asms + productive_furnaces
         local active_ratio = total_machines > 0 and (active_machines / total_machines) or 0.0
 
-        local check_types = {{"assembling-machine", "furnace", "inserter"}}
+        local check_types = {{"assembling-machine", "furnace", "inserter", "lamp", "radar"}}
         local unpowered = 0
         for _, t in ipairs(check_types) do
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
@@ -552,6 +552,15 @@ script.on_event(defines.events.on_tick, function(event)
                     unpowered = unpowered + 1
                     log(string.format("UNPOWERED_ENT: %s at (%.1f, %.1f)", ent.name, ent.position.x, ent.position.y))
                 end
+            end
+        end
+
+        local big_poles = surface.find_entities_filtered{{name = "big-electric-pole"}}
+        for _, bp in ipairs(big_poles) do
+            local conn = bp.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+            if not conn or #conn.connections == 0 then
+                unpowered = unpowered + 1
+                log(string.format("DISCONNECTED_BIG_POLE: at (%.1f, %.1f)", bp.position.x, bp.position.y))
             end
         end
 
@@ -632,6 +641,7 @@ end)
             or "BELT_INVENTORY:" in line
             or "NEARBY_BELTS_WITH_ITEMS" in line
             or "UNPOWERED_ENT:" in line
+            or "DISCONNECTED_BIG_POLE:" in line
         ):
             print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -178,6 +179,176 @@ def build_entities(
     return entities, wires
 
 
+def jumper_belts_across_chassis_poles(
+    entities: list[dict[str, Any]], base_entities: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Convert straight transport belts that collide with chassis big electric poles into underground jumpers."""
+    ent_map: dict[tuple[float, float], dict[str, Any]] = {
+        (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e
+        for e in entities
+        if "position" in e
+    }
+    to_remove: set[tuple[float, float]] = set()
+
+    for be in base_entities:
+        if be.get("name") != "big-electric-pole":
+            continue
+        bpos = be.get("position", {})
+        bx = float(bpos.get("x", 0.0))
+        by = float(bpos.get("y", 0.0))
+
+        # Check for vertical colliding belts (direction 8: South, or 0: North)
+        for dx in (-0.5, 0.5):
+            x = round(bx + dx, 2)
+            y_lo = round(by - 0.5, 2)
+            y_hi = round(by + 0.5, 2)
+            e_lo = ent_map.get((x, y_lo))
+            e_hi = ent_map.get((x, y_hi))
+            if (
+                e_lo
+                and e_hi
+                and e_lo.get("name") == "transport-belt"
+                and e_hi.get("name") == "transport-belt"
+                and e_lo.get("direction") == e_hi.get("direction")
+            ):
+                d = e_lo.get("direction", 8)
+                if d == 8:  # South
+                    in_pos = (x, round(by - 1.5, 2))
+                    out_pos = (x, round(by + 1.5, 2))
+                    e_in = ent_map.get(in_pos)
+                    e_out = ent_map.get(out_pos)
+                    if e_in and e_in.get("direction") == 8:
+                        if (
+                            e_out
+                            and e_out.get("name") == "underground-belt"
+                            and e_out.get("type") == "input"
+                        ):
+                            dist = 1
+                            found_out = None
+                            while dist <= 9:
+                                cand_pos = (x, round(out_pos[1] + dist, 2))
+                                cand = ent_map.get(cand_pos)
+                                if (
+                                    cand
+                                    and cand.get("name") == "underground-belt"
+                                    and cand.get("type") == "output"
+                                    and cand.get("direction") == 8
+                                ):
+                                    found_out = cand
+                                    break
+                                dist += 1
+                            if found_out:
+                                tier = (
+                                    "fast-underground-belt"
+                                    if dist + 3 <= 7
+                                    else "express-underground-belt"
+                                )
+                                e_in["name"] = tier
+                                e_in["type"] = "input"
+                                found_out["name"] = tier
+                                found_out["type"] = "output"
+                                to_remove.add((x, y_lo))
+                                to_remove.add((x, y_hi))
+                                to_remove.add(out_pos)
+                                ent_map.pop((x, y_lo), None)
+                                ent_map.pop((x, y_hi), None)
+                                ent_map.pop(out_pos, None)
+                        elif e_out and e_out.get("direction") == 8:
+                            e_in["name"] = "underground-belt"
+                            e_in["type"] = "input"
+                            e_out["name"] = "underground-belt"
+                            e_out["type"] = "output"
+                            to_remove.add((x, y_lo))
+                            to_remove.add((x, y_hi))
+                            ent_map.pop((x, y_lo), None)
+                            ent_map.pop((x, y_hi), None)
+                elif d == 0:  # North
+                    in_pos = (x, round(by + 1.5, 2))
+                    out_pos = (x, round(by - 1.5, 2))
+                    e_in = ent_map.get(in_pos)
+                    e_out = ent_map.get(out_pos)
+                    if (
+                        e_in
+                        and e_out
+                        and e_in.get("direction") == 0
+                        and e_out.get("direction") == 0
+                    ):
+                        e_in["name"] = "underground-belt"
+                        e_in["type"] = "input"
+                        e_out["name"] = "underground-belt"
+                        e_out["type"] = "output"
+                        to_remove.add((x, y_lo))
+                        to_remove.add((x, y_hi))
+                        ent_map.pop((x, y_lo), None)
+                        ent_map.pop((x, y_hi), None)
+
+        # Check for horizontal colliding belts (direction 4: East, or 12: West)
+        for dy in (-0.5, 0.5):
+            y = round(by + dy, 2)
+            x_lo = round(bx - 0.5, 2)
+            x_hi = round(bx + 0.5, 2)
+            e_lo = ent_map.get((x_lo, y))
+            e_hi = ent_map.get((x_hi, y))
+            if (
+                e_lo
+                and e_hi
+                and e_lo.get("name") == "transport-belt"
+                and e_hi.get("name") == "transport-belt"
+                and e_lo.get("direction") == e_hi.get("direction")
+            ):
+                d = e_lo.get("direction", 4)
+                if d == 4:  # East
+                    in_pos = (round(bx - 1.5, 2), y)
+                    out_pos = (round(bx + 1.5, 2), y)
+                    e_in = ent_map.get(in_pos)
+                    e_out = ent_map.get(out_pos)
+                    if (
+                        e_in
+                        and e_out
+                        and e_in.get("direction") == 4
+                        and e_out.get("direction") == 4
+                    ):
+                        e_in["name"] = "underground-belt"
+                        e_in["type"] = "input"
+                        e_out["name"] = "underground-belt"
+                        e_out["type"] = "output"
+                        to_remove.add((x_lo, y))
+                        to_remove.add((x_hi, y))
+                        ent_map.pop((x_lo, y), None)
+                        ent_map.pop((x_hi, y), None)
+                elif d == 12:  # West
+                    in_pos = (round(bx + 1.5, 2), y)
+                    out_pos = (round(bx - 1.5, 2), y)
+                    e_in = ent_map.get(in_pos)
+                    e_out = ent_map.get(out_pos)
+                    if (
+                        e_in
+                        and e_out
+                        and e_in.get("direction") == 12
+                        and e_out.get("direction") == 12
+                    ):
+                        e_in["name"] = "underground-belt"
+                        e_in["type"] = "input"
+                        e_out["name"] = "underground-belt"
+                        e_out["type"] = "output"
+                        to_remove.add((x_lo, y))
+                        to_remove.add((x_hi, y))
+                        ent_map.pop((x_lo, y), None)
+                        ent_map.pop((x_hi, y), None)
+
+    if to_remove:
+        entities = [
+            e
+            for e in entities
+            if (
+                round(e.get("position", {}).get("x", 0.0), 2),
+                round(e.get("position", {}).get("y", 0.0), 2),
+            )
+            not in to_remove
+        ]
+    return entities
+
+
 def def_to_blueprint(
     def_text: str,
     netlist_data: dict[str, Any],
@@ -281,6 +452,7 @@ def main() -> int:
         macro_planner = MacroFloorplanner(chassis=chassis)
         floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
         channel_entities = floorplan.emit_channel_entities()
+        entities = jumper_belts_across_chassis_poles(entities, base_entities)
 
         occupied_tiles: set[tuple[float, float]] = set()
         for e in entities:
@@ -342,8 +514,58 @@ def main() -> int:
                 occupied_tiles.add(t)
 
             new_be = dict(be)
+            new_be.pop("neighbours", None)
+            new_be.pop("connections", None)
             new_be["entity_number"] = len(entities) + 1
             entities.append(new_be)
+
+        # Wire chassis big electric poles together into a unified power and circuit bus grid
+        big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
+        seen_pairs: set[tuple[int, int]] = set()
+        if wires is None:
+            wires = []
+
+        for i, bp1 in enumerate(big_poles):
+            p1_num = int(bp1.get("entity_number", 0))
+            p1_pos = bp1.get("position", {})
+            x1, y1 = float(p1_pos.get("x", 0.0)), float(p1_pos.get("y", 0.0))
+            for bp2 in big_poles[i + 1 :]:
+                p2_num = int(bp2.get("entity_number", 0))
+                p2_pos = bp2.get("position", {})
+                x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
+                dx = abs(x1 - x2)
+                dy = abs(y1 - y2)
+                dist = math.hypot(dx, dy)
+                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
+                    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        # 5: copper wire, 1: red wire, 2: green wire
+                        wires.append([pair[0], 5, pair[1], 5])
+                        wires.append([pair[0], 1, pair[1], 1])
+                        wires.append([pair[0], 2, pair[1], 2])
+
+        # Connect medium electric poles to the nearest big electric pole within reach (<= 9.0 tiles)
+        med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
+        for mp in med_poles:
+            mp_num = int(mp.get("entity_number", 0))
+            mp_pos = mp.get("position", {})
+            mx, my = float(mp_pos.get("x", 0.0)), float(mp_pos.get("y", 0.0))
+            best_d = float("inf")
+            best_bp = None
+            for bp in big_poles:
+                bp_pos = bp.get("position", {})
+                bx, by = float(bp_pos.get("x", 0.0)), float(bp_pos.get("y", 0.0))
+                d = math.hypot(mx - bx, my - by)
+                if d < best_d:
+                    best_d = d
+                    best_bp = bp
+            if best_bp is not None and best_d <= 9.0:
+                bp_num = int(best_bp.get("entity_number", 0))
+                pair = (min(mp_num, bp_num), max(mp_num, bp_num))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    wires.append([pair[0], 5, pair[1], 5])
 
     if args.json:
         document: dict[str, Any] = {

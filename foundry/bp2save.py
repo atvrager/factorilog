@@ -221,6 +221,48 @@ script.on_init(function()
         end
     end
 
+    -- Wire all chassis big electric poles into a unified power and circuit bus grid
+    local all_big_poles = surface.find_entities_filtered{{name = "big-electric-pole"}}
+    for i = 1, #all_big_poles do
+        local bp1 = all_big_poles[i]
+        for j = i + 1, #all_big_poles do
+            local bp2 = all_big_poles[j]
+            local dx = math.abs(bp1.position.x - bp2.position.x)
+            local dy = math.abs(bp1.position.y - bp2.position.y)
+            local dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= 30.5 and (dx < 0.1 or dy < 0.1) then
+                local c1 = bp1.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                local c2 = bp2.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                c1.connect_to(c2, false)
+                local r1 = bp1.get_wire_connector(defines.wire_connector_id.circuit_red, true)
+                local r2 = bp2.get_wire_connector(defines.wire_connector_id.circuit_red, true)
+                r1.connect_to(r2, false)
+                local g1 = bp1.get_wire_connector(defines.wire_connector_id.circuit_green, true)
+                local g2 = bp2.get_wire_connector(defines.wire_connector_id.circuit_green, true)
+                g1.connect_to(g2, false)
+            end
+        end
+    end
+
+    -- Connect medium electric poles to the nearest big electric pole within reach (<= 9 tiles)
+    local all_med_poles = surface.find_entities_filtered{{name = "medium-electric-pole"}}
+    for _, mp in ipairs(all_med_poles) do
+        local best_d = 1e9
+        local best_bp = nil
+        for _, bp in ipairs(all_big_poles) do
+            local d = (mp.position.x - bp.position.x)^2 + (mp.position.y - bp.position.y)^2
+            if d < best_d then
+                best_d = d
+                best_bp = bp
+            end
+        end
+        if best_bp and best_d <= 81.0 then
+            local c1 = mp.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+            local c2 = best_bp.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+            c1.connect_to(c2, false)
+        end
+    end
+
     -- Off-chip power supply: single generator outside floorplan hooked to PDN
     local all_poles = surface.find_entities_filtered{{type = "electric-pole"}}
     if #all_poles > 0 then
@@ -319,6 +361,10 @@ script.on_init(function()
                     local c1 = target_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                     local c2 = nearest_big.get_wire_connector(defines.wire_connector_id.pole_copper, true)
                     c1.connect_to(c2, false)
+                    if feed_pole and feed_pole.valid then
+                        local fc = feed_pole.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+                        fc.connect_to(c2, false)
+                    end
                 end
             end
 

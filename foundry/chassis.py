@@ -7,6 +7,7 @@ orthogonal CityBlockChassis reference implementation.
 from __future__ import annotations
 
 import json
+import math
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -341,6 +342,8 @@ class CityBlockChassis(ChassisTemplate):
                     key = (ex, ey, ename)
                     if key not in entities_map:
                         new_e = dict(e)
+                        new_e.pop("neighbours", None)
+                        new_e.pop("connections", None)
                         new_e["position"] = {"x": ex, "y": ey}
                         entities_map[key] = new_e
 
@@ -351,22 +354,49 @@ class CityBlockChassis(ChassisTemplate):
         for idx, ent in enumerate(sorted_ents, start=1):
             ent["entity_number"] = idx
 
+        # Wire chassis big electric poles together into a unified power and circuit bus grid
+        big_poles = [e for e in sorted_ents if e.get("name") == "big-electric-pole"]
+        seen_pairs: set[tuple[int, int]] = set()
+        wires: list[list[int]] = []
+
+        for i, bp1 in enumerate(big_poles):
+            p1_num = int(bp1.get("entity_number", 0))
+            p1_pos = bp1.get("position", {})
+            x1, y1 = float(p1_pos.get("x", 0.0)), float(p1_pos.get("y", 0.0))
+            for bp2 in big_poles[i + 1 :]:
+                p2_num = int(bp2.get("entity_number", 0))
+                p2_pos = bp2.get("position", {})
+                x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
+                dx = abs(x1 - x2)
+                dy = abs(y1 - y2)
+                dist = math.hypot(dx, dy)
+                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
+                    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        # 5: copper wire, 1: red wire, 2: green wire
+                        wires.append([pair[0], 5, pair[1], 5])
+                        wires.append([pair[0], 1, pair[1], 1])
+                        wires.append([pair[0], 2, pair[1], 2])
+
         # Build clean tiles list
         sorted_tiles = [
             {"position": {"x": x, "y": y}, "name": name}
             for (x, y), name in sorted(tiles_map.items(), key=lambda item: (item[0][1], item[0][0]))
         ]
 
-        bp_doc: dict[str, Any] = {
-            "blueprint": {
-                "item": "blueprint",
-                "label": f"City Block Grid {grid_w}x{grid_h}",
-                "snap-to-grid": {"x": self.pitch_x, "y": self.pitch_y},
-                "absolute-snapping": True,
-                "entities": sorted_ents,
-                "tiles": sorted_tiles,
-            }
+        bp_content: dict[str, Any] = {
+            "item": "blueprint",
+            "label": f"City Block Grid {grid_w}x{grid_h}",
+            "snap-to-grid": {"x": self.pitch_x, "y": self.pitch_y},
+            "absolute-snapping": True,
+            "entities": sorted_ents,
+            "tiles": sorted_tiles,
         }
+        if wires:
+            bp_content["wires"] = wires
+
+        bp_doc: dict[str, Any] = {"blueprint": bp_content}
         return bp_doc
 
     def emit_base_blueprint_string(self, grid_w: int, grid_h: int) -> str:
@@ -377,6 +407,7 @@ class CityBlockChassis(ChassisTemplate):
             entities=bp.get("entities", []),
             label=bp.get("label", "City Block Chassis"),
             tiles=bp.get("tiles", []),
+            wires=bp.get("wires"),
             snap_to_grid=bp.get("snap-to-grid"),
             absolute_snapping=bp.get("absolute-snapping"),
         )

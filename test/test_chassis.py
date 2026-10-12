@@ -92,6 +92,11 @@ class TestCityBlockChassis(unittest.TestCase):
         bp2x2 = doc2x2["blueprint"]
         self.assertEqual(len(bp2x2["tiles"]), 7488)
         self.assertEqual(len(bp2x2["entities"]), 261)
+        self.assertIn("wires", bp2x2)
+        self.assertGreater(len(bp2x2["wires"]), 0)
+        for ent in bp2x2["entities"]:
+            self.assertNotIn("neighbours", ent)
+            self.assertNotIn("connections", ent)
 
         # Verify exchange string encoding and decoding round-trip
         bp_string = chassis.emit_base_blueprint_string(1, 1)
@@ -99,6 +104,7 @@ class TestCityBlockChassis(unittest.TestCase):
         decoded = decode(bp_string)
         self.assertEqual(len(decoded["blueprint"]["tiles"]), len(chassis.template_tiles))
         self.assertEqual(len(decoded["blueprint"]["entities"]), len(chassis.template_entities))
+        self.assertIn("wires", decoded["blueprint"])
 
 
 if __name__ == "__main__":
