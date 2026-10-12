@@ -207,3 +207,16 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "chassis_test",
+    size = "small",
+    srcs = ["test_chassis.py"],
+    data = [
+        "//:cityblock.bp",
+    ],
+    main = "test_chassis.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)

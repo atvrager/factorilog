@@ -39,6 +39,7 @@ py_library(
         "belt_library.py",
         "blueprint.py",
         "bp2save.py",
+        "chassis.py",
         "circuit.py",
         "circuit_synth.py",
         "def2bp.py",

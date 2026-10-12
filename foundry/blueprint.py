@@ -25,8 +25,11 @@ def encode(
     label: str,
     wires: list[list[int]] | None = None,
     icons: list[dict[str, Any]] | None = None,
+    tiles: list[dict[str, Any]] | None = None,
+    snap_to_grid: dict[str, int] | None = None,
+    absolute_snapping: bool | None = None,
 ) -> str:
-    """Encode a list of entities into an exchange string."""
+    """Encode entities and optional tiles into an exchange string."""
     if icons is None:
         icons = []
         seen: set[str] = set()
@@ -63,6 +66,13 @@ def encode(
     }
     if wires:
         bp_dict["wires"] = wires
+    if tiles:
+        bp_dict["tiles"] = tiles
+    if snap_to_grid:
+        bp_dict["snap-to-grid"] = snap_to_grid
+    if absolute_snapping is not None:
+        bp_dict["absolute-snapping"] = absolute_snapping
+
     document = {"blueprint": bp_dict}
     raw = json.dumps(document, separators=(",", ":")).encode()
     return FORMAT_PREFIX + base64.b64encode(zlib.compress(raw, 9)).decode()
@@ -78,9 +88,14 @@ def decode(string: str) -> dict[str, Any]:
 
 def entities_of(string: str) -> list[dict[str, Any]]:
     """Exchange string -> the entity list."""
-    return decode(string)["blueprint"]["entities"]
+    return decode(string)["blueprint"].get("entities", [])
 
 
 def wires_of(string: str) -> list[list[int]]:
     """Exchange string -> the wire list."""
     return decode(string)["blueprint"].get("wires", [])
+
+
+def tiles_of(string: str) -> list[dict[str, Any]]:
+    """Exchange string -> the tile list."""
+    return decode(string)["blueprint"].get("tiles", [])
