@@ -15,10 +15,22 @@ from foundry.native_engine.symbol_finder import (
     FactorioSymbolFinder,
     resolve_factorio_binary,
 )
+from foundry.native_engine.verifier import (
+    DrcViolation,
+    LvsError,
+    NativeLayoutVerifier,
+    NetSpec,
+    VerificationResult,
+)
 
 __all__ = [
+    "DrcViolation",
     "FactorioNativeEngine",
     "FactorioSymbolFinder",
+    "LvsError",
+    "NativeLayoutVerifier",
+    "NetSpec",
+    "VerificationResult",
     "make_fluid_buffer",
     "make_transport_line_with_items",
     "read_fluid_buffer",

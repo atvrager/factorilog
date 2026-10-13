@@ -60,6 +60,7 @@ py_library(
         "native_engine/__init__.py",
         "native_engine/engine.py",
         "native_engine/symbol_finder.py",
+        "native_engine/verifier.py",
         "netbuild.py",
         "netlist.py",
         "pdk.py",

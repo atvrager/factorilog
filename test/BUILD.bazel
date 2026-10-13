@@ -274,6 +274,27 @@ py_test(
     ],
 )
 
+py_test(
+    name = "layout_verifier_test",
+    size = "medium",
+    srcs = ["test_layout_verifier.py"],
+    data = [
+        "//:cityblock.bp",
+        "//:test_straight_col17.blueprint",
+    ],
+    local = True,
+    main = "test_layout_verifier.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+
 
 
 
