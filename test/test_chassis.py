@@ -106,6 +106,81 @@ class TestCityBlockChassis(unittest.TestCase):
         self.assertEqual(len(decoded["blueprint"]["entities"]), len(chassis.template_entities))
         self.assertIn("wires", decoded["blueprint"])
 
+    def test_route_chassis_nets(self) -> None:
+        """Verify routing nets across city block chassis using the maze router."""
+        from foundry.router.types import (
+            DIRECTION_EAST,
+            DIRECTION_SOUTH,
+            RouterNetSpec,
+        )
+
+        prototypes = {
+            "underground-belt": {
+                "underground-belt": {
+                    "name": "underground-belt",
+                    "speed": 0.03125,
+                    "max_distance": 5,
+                },
+                "fast-underground-belt": {
+                    "name": "fast-underground-belt",
+                    "speed": 0.0625,
+                    "max_distance": 7,
+                },
+            },
+            "transport-belt": {
+                "transport-belt": {
+                    "name": "transport-belt",
+                    "speed": 0.03125,
+                    "related_underground_belt": "underground-belt",
+                },
+                "fast-transport-belt": {
+                    "name": "fast-transport-belt",
+                    "speed": 0.0625,
+                    "related_underground_belt": "fast-underground-belt",
+                },
+            },
+            "pipe-to-ground": {
+                "pipe-to-ground": {
+                    "name": "pipe-to-ground",
+                    "fluid_box": {
+                        "pipe_connections": [
+                            {"connection_type": "underground", "max_underground_distance": 10},
+                        ]
+                    },
+                }
+            },
+            "pipe": {"pipe": {"name": "pipe"}},
+        }
+        nets = [
+            RouterNetSpec(
+                name="bus_iron",
+                source=(10, 10),
+                sink=(25, 10),
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+                commodity="iron-plate",
+            ),
+            RouterNetSpec(
+                name="bus_copper",
+                source=(18, 5),
+                sink=(18, 20),
+                start_heading=DIRECTION_SOUTH,
+                end_heading=DIRECTION_SOUTH,
+                commodity="copper-plate",
+            ),
+        ]
+        routes, entities, verification_result = self.chassis.route_chassis_nets(
+            nets,
+            grid_w=1,
+            grid_h=1,
+            prototypes=prototypes,
+            verify_oracle=False,
+        )
+        self.assertEqual(len(routes), 2)
+        self.assertGreater(len(entities), 0)
+        belt_names = {e.get("name") for e in entities}
+        self.assertTrue("transport-belt" in belt_names or "underground-belt" in belt_names)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,9 @@
 # 3_route.tcl - Global and detailed routing stage.
 #
 # Reads the placed database.
-# Runs FastRoute and TritonRoute to connect all signal tracks.
+# Runs FastRoute and TritonRoute to connect all signal tracks across layers M1-M3.
+# Downstream factory synthesis converts tracks to Factorio physical logistics.
+# DualLaneMazeRouter in foundry/router enforces native simulation DRC and LVS.
 # Emits the routed database and DEF file.
 
 read_db 2_placed.odb

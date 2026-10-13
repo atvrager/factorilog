@@ -1,8 +1,10 @@
 """Routing track rasterization and underground jumper resolution.
 
-Extracts M1-M4 wire segments from OpenROAD DEF routing, resolves surface crossings
-using underground belt and pipe jumpers, enforces pin chirality, and prevents
-unintended belt sideloading.
+DEPRECATION NOTICE:
+This module is deprecated.
+Use foundry.router.maze_router instead.
+DualLaneMazeRouter provides full 3D multi-layer maze routing with
+dynamic prototypes and native simulation oracle verification.
 """
 
 from __future__ import annotations
@@ -10,8 +12,15 @@ from __future__ import annotations
 import collections
 import heapq
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any
+
+warnings.warn(
+    "foundry.jumper is deprecated; use foundry.router.maze_router instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 try:
     from foundry import pdk

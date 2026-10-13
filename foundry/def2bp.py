@@ -32,7 +32,7 @@ try:
         entity_size,
         prune_dead_end_belts,
     )
-    from foundry.jumper import route_and_resolve_jumpers
+    from foundry.jumper import RouteResult, route_and_resolve_jumpers
     from foundry.pdn import generate_pdn
     from foundry.placement import place_components
     from foundry.pump_insertion import insert_pipeline_pumps
@@ -54,7 +54,7 @@ except ImportError:
         entity_size,
         prune_dead_end_belts,
     )
-    from jumper import route_and_resolve_jumpers
+    from jumper import RouteResult, route_and_resolve_jumpers
     from pdn import generate_pdn
     from placement import place_components
     from pump_insertion import insert_pipeline_pumps
@@ -76,14 +76,136 @@ __all__ = [
     "merge_collinear_wires",
     "parse_def",
     "prune_dead_end_belts",
+    "route_with_maze_router",
     "untangle_def",
 ]
+
+
+def route_with_maze_router(
+    def_data: dict[str, Any],
+    netlist_data: dict[str, Any],
+    placement: Any,
+) -> RouteResult:
+    """Route DEF nets using the 3D multi-layer DualLaneMazeRouter.
+
+    Extract terminal coordinates for each logical net from components and pins.
+    Execute the multi-layer router across surface and subterranean layers.
+    Add routed physical entities directly to the placement record.
+    """
+    from foundry.native_engine.verifier import load_game_prototypes
+    from foundry.router.maze_router import DualLaneMazeRouter
+    from foundry.router.types import RouterNetSpec
+
+    scale = 1.0 / float(def_data.get("units", 1000))
+    die_area = def_data.get("die_area", [0, 0, 100000, 100000])
+    min_x = math.floor(die_area[0] * scale)
+    min_y = math.floor(die_area[1] * scale)
+    max_x = math.ceil(die_area[2] * scale)
+    max_y = math.ceil(die_area[3] * scale)
+
+    obstacles = {(math.floor(pos[0]), math.floor(pos[1])) for pos in placement.occupied_positions}
+
+    pin_dict: dict[str, tuple[int, int]] = {}
+    valid_in_pins: set[tuple[float, float]] = set()
+    valid_out_pins: set[tuple[float, float]] = set()
+    for pin in def_data.get("pins", []):
+        px = round(pin.get("x", 0) * scale)
+        py = round(pin.get("y", 0) * scale)
+        pname = pin.get("name", pin.get("net", ""))
+        pin_dict[pname] = (px, py)
+        direction = pin.get("direction", "")
+        if direction == "INPUT":
+            valid_in_pins.add((float(px), float(py)))
+        elif direction == "OUTPUT":
+            valid_out_pins.add((float(px), float(py)))
+
+    fluids = set(netlist_data.get("fluids", [])) or set(placement.fluids or [])
+    inst_entities = placement.inst_to_entity
+    net_specs: list[RouterNetSpec] = []
+
+    for net in def_data.get("nets", []):
+        nname = net.get("name", "")
+        conns = net.get("connections", [])
+        if len(conns) < 2:
+            continue
+
+        src_pos: tuple[int, int] | None = None
+        dst_pos: tuple[int, int] | None = None
+
+        for inst_name, port in conns:
+            if inst_name == "PIN":
+                pos = pin_dict.get(nname) or pin_dict.get(port)
+                if pos:
+                    if (float(pos[0]), float(pos[1])) in valid_in_pins:
+                        src_pos = pos
+                    else:
+                        dst_pos = pos
+            elif inst_name in inst_entities:
+                ent = inst_entities[inst_name]
+                epos = ent.get("position", {})
+                ex = round(float(epos.get("x", 0.0)))
+                ey = round(float(epos.get("y", 0.0)))
+                if src_pos is None:
+                    src_pos = (ex, ey)
+                else:
+                    dst_pos = (ex, ey)
+
+        if src_pos and dst_pos and src_pos != dst_pos:
+            is_fluid = any(f in nname for f in fluids)
+            net_specs.append(
+                RouterNetSpec(
+                    name=nname,
+                    source=src_pos,
+                    sink=dst_pos,
+                    commodity=nname.split("__")[0],
+                    is_fluid=is_fluid,
+                )
+            )
+
+    prototypes = load_game_prototypes()
+    router = DualLaneMazeRouter(
+        min_x=min_x,
+        max_x=max_x,
+        min_y=min_y,
+        max_y=max_y,
+        prototypes=prototypes,
+        obstacles=obstacles,
+    )
+    routes, entities, _ = router.route(net_specs, verify=False)
+
+    for ent in entities:
+        placement.entities.append(ent)
+        epos = ent.get("position", {})
+        pos_key = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
+        placement.occupied_positions.add(pos_key)
+        placement.grid_entities[pos_key] = ent
+
+    net_surface_tiles: dict[str, dict[tuple[float, float], int]] = {}
+    tile_to_nets: dict[tuple[float, float], set[str]] = {}
+    for nname, route_res in routes.items():
+        net_surface_tiles[nname] = {}
+        for node in route_res.nodes:
+            if node.z == 0:
+                k = (float(node.x), float(node.y))
+                net_surface_tiles[nname][k] = node.heading
+                tile_to_nets.setdefault(k, set()).add(nname)
+
+    all_pins = valid_in_pins | valid_out_pins
+    return RouteResult(
+        net_surface_tiles=net_surface_tiles,
+        tile_to_nets=tile_to_nets,
+        adjacent_fluid_conflicts=set(),
+        pin_tiles=all_pins,
+        valid_input_pins=valid_in_pins,
+        valid_output_pins=valid_out_pins,
+    )
 
 
 def build_entities(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     strict_drc: bool = True,
+    use_maze_router: bool = False,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
     def_data["_netlist_data"] = netlist_data
@@ -262,7 +384,12 @@ def build_entities(
 
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
     debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
-    routes = route_and_resolve_jumpers(def_data, netlist_data, placement, debug_trace=debug_trace)
+    if use_maze_router:
+        routes = route_with_maze_router(def_data, netlist_data, placement)
+    else:
+        routes = route_and_resolve_jumpers(
+            def_data, netlist_data, placement, debug_trace=debug_trace
+        )
 
     if floorplan:
         for fe in fabric_entities:
@@ -528,10 +655,16 @@ def def_to_blueprint(
     netlist_data: dict[str, Any],
     label: str = "factory",
     strict_drc: bool = True,
+    use_maze_router: bool = False,
 ) -> str:
     """Convert DEF text and netlist metadata into a blueprint exchange string."""
     def_data = parse_def(def_text)
-    entities, wires = build_entities(def_data, netlist_data, strict_drc=strict_drc)
+    entities, wires = build_entities(
+        def_data,
+        netlist_data,
+        strict_drc=strict_drc,
+        use_maze_router=use_maze_router,
+    )
     return blueprint.encode(entities, label, wires=wires)
 
 
@@ -577,6 +710,11 @@ def main() -> int:
         action="store_true",
         help="Do not abort on physical DRC violations",
     )
+    parser.add_argument(
+        "--use-maze-router",
+        action="store_true",
+        help="Route nets using 3D multi-layer DualLaneMazeRouter",
+    )
 
     args = parser.parse_args()
 
@@ -585,7 +723,12 @@ def main() -> int:
     netlist_data = json.loads(args.netlist_file.read_text())
 
     def_data = parse_def(def_text)
-    entities, wires = build_entities(def_data, netlist_data, strict_drc=not args.no_strict_drc)
+    entities, wires = build_entities(
+        def_data,
+        netlist_data,
+        strict_drc=not args.no_strict_drc,
+        use_maze_router=args.use_maze_router,
+    )
 
     tiles: list[dict[str, Any]] | None = None
     if def_data.get("blockages"):

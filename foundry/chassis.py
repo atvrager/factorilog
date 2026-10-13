@@ -468,3 +468,36 @@ class CityBlockChassis(ChassisTemplate):
             h_channel=h_ch,
             v_channel=v_ch,
         )
+
+    def route_chassis_nets(
+        self,
+        nets: list[Any],
+        grid_w: int = 1,
+        grid_h: int = 1,
+        obstacles: set[tuple[int, int]] | None = None,
+        prototypes: dict[str, Any] | None = None,
+        engine: Any = None,
+        verify_oracle: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], Any]:
+        """Route factory nets across the chassis grid using the dual lane maze router.
+
+        This method initializes a multi-layer maze router with the chassis bounds.
+        It routes all specified nets with negotiated congestion and native oracle verification.
+        """
+        from foundry.router.maze_router import DualLaneMazeRouter
+
+        max_x = grid_w * self.pitch_x
+        max_y = grid_h * self.pitch_y
+        router = DualLaneMazeRouter(
+            min_x=0,
+            max_x=max_x,
+            min_y=0,
+            max_y=max_y,
+            engine=engine,
+            prototypes=prototypes,
+            obstacles=obstacles,
+        )
+        return router.route(
+            nets=nets,
+            verify=verify_oracle,
+        )
