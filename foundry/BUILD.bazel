@@ -10,6 +10,7 @@ filegroup(
     srcs = glob([
         "*.py",
         "native_engine/*.py",
+        "router/*.py",
         "untangle/*.py",
     ]),
 )
@@ -17,6 +18,12 @@ filegroup(
 py_library(
     name = "native_engine_lib",
     srcs = glob(["native_engine/*.py"]),
+)
+
+py_library(
+    name = "router_lib",
+    srcs = glob(["router/*.py"]),
+    deps = [":native_engine_lib"],
 )
 
 py_library(
@@ -68,6 +75,13 @@ py_library(
         "placement.py",
         "pump_insertion.py",
         "render_bp.py",
+        "router/__init__.py",
+        "router/blueprint_builder.py",
+        "router/grid.py",
+        "router/maze_router.py",
+        "router/pathfinder.py",
+        "router/transitions.py",
+        "router/types.py",
         "solve.py",
         "untangle/__init__.py",
         "untangle/channels.py",

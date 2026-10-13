@@ -503,7 +503,7 @@ class NativeLayoutVerifier:
                     front_distance=total_distance_units,
                     line_length=total_distance_units,
                 )
-                steps = min(ticks, ticks_needed + 10)
+                steps = max(ticks, ticks_needed + 10)
                 for t in range(steps):
                     engine.move_transport_line(line, speed, tick=t + 1)
 

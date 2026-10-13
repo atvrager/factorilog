@@ -294,6 +294,22 @@ py_test(
     ],
 )
 
+py_test(
+    name = "router_test",
+    size = "medium",
+    srcs = ["test_router.py"],
+    local = True,
+    main = "test_router.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
 
 
 
