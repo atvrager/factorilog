@@ -11,6 +11,8 @@ DEFAULT_CANDIDATE_PATHS = [
     Path(os.environ.get("FACTORIO_BIN", "")),
     Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64_/factorio",
     Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio",
+    Path("/home/atv/.steam/steam/steamapps/common/Factorio/bin/x64_/factorio"),
+    Path("/home/atv/.local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio"),
     Path("/usr/bin/factorio"),
 ]
 
