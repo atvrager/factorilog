@@ -271,7 +271,72 @@ class TestLayoutVerifier(unittest.TestCase):
         pipe_violations = modded_verifier.check_drc(pipe_entities)
         self.assertEqual(len(pipe_violations), 0)
 
+    def test_verifier_multi_tier_belt_weaving(self) -> None:
+        """Verify that multiple underground belt tiers weave across identical tiles."""
+        # Yellow belt pair: input (0,0) -> output (4,0)
+        # Fast (red) belt pair: input (1,0) -> output (5,0)
+        # Express (blue) belt pair: input (2,0) -> output (6,0)
+        entities = [
+            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "fast-underground-belt", "position": {"x": 1.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "express-underground-belt", "position": {"x": 2.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
+            {"name": "fast-underground-belt", "position": {"x": 5.5, "y": 0.5}, "direction": 4, "type": "output"},
+            {"name": "express-underground-belt", "position": {"x": 6.5, "y": 0.5}, "direction": 4, "type": "output"},
+        ]
+
+        violations = self.verifier.check_drc(entities)
+        self.assertEqual(len(violations), 0)
+
+        # Verify all 3 nets simulate and deliver items independently across the weave
+        nets = [
+            NetSpec("yellow_net", "iron-plate", (0.5, 0.5), (4.5, 0.5)),
+            NetSpec("red_net", "copper-plate", (1.5, 0.5), (5.5, 0.5)),
+            NetSpec("blue_net", "steel-plate", (2.5, 0.5), (6.5, 0.5)),
+        ]
+        res = self.verifier.verify_blueprint(entities, nets=nets, ticks=120)
+        self.assertTrue(res.is_valid)
+        self.assertEqual(len(res.lvs_errors), 0)
+        self.assertEqual(res.delivered_items.get("yellow_net"), 1)
+        self.assertEqual(res.delivered_items.get("red_net"), 1)
+        self.assertEqual(res.delivered_items.get("blue_net"), 1)
+
+    def test_verifier_belt_and_pipe_weaving(self) -> None:
+        """Verify that underground belts and pipes weave across overlapping tiles."""
+        # Yellow belt pair: input (0,0) -> output (4,0)
+        # Pipe pair: input (1,0) -> output (3,0)
+        entities = [
+            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "pipe-to-ground", "position": {"x": 1.5, "y": 0.5}, "direction": 4},
+            {"name": "pipe-to-ground", "position": {"x": 3.5, "y": 0.5}, "direction": 12},
+            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
+        ]
+
+        violations = self.verifier.check_drc(entities)
+        self.assertEqual(len(violations), 0)
+
+        belt_net = NetSpec("belt_net", "iron-plate", (0.5, 0.5), (4.5, 0.5))
+        pipe_net = NetSpec("pipe_net", "water", (1.5, 0.5), (3.5, 0.5), is_fluid=True)
+        res = self.verifier.verify_blueprint(entities, nets=[belt_net, pipe_net], ticks=60)
+        self.assertTrue(res.is_valid)
+        self.assertEqual(res.delivered_items.get("belt_net"), 1)
+        self.assertGreater(res.delivered_fluids.get("pipe_net", 0.0), 0.0)
+
+    def test_verifier_same_tier_blocking(self) -> None:
+        """Verify that an intervening same-tier entrance blocks downstream pairing."""
+        # Yellow input (0,0), Yellow input (2,0), Yellow output (4,0)
+        # The input at (2,0) pairs with (4,0). The input at (0,0) remains unpaired.
+        entities = [
+            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "underground-belt", "position": {"x": 2.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
+        ]
+
+        violations = self.verifier.check_drc(entities)
+        self.assertTrue(any(v.code == "DRC_UG_UNPAIRED" and v.position == (0, 0) for v in violations))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -214,53 +214,69 @@ class NativeLayoutVerifier:
             max_span = self.get_entity_span(name)
 
             found_output = False
+            found_mismatched_output = None
             for step in range(1, 32):
                 target_pos = (in_pos[0] + dx * step, in_pos[1] + dy * step)
+
+                # Same-tier entrance along the ray blocks downstream pairing
+                same_tier_block = any(
+                    other is not in_ent
+                    and other.get("name") == name
+                    and _round_pos(other["position"]) == target_pos
+                    for other in ug_inputs
+                )
+                if same_tier_block:
+                    break
+
                 for idx, out_ent in enumerate(ug_outputs):
                     if idx in paired_outputs:
                         continue
+                    out_name = out_ent.get("name", "")
                     out_pos = _round_pos(out_ent["position"])
                     if out_pos == target_pos:
                         out_dir = out_ent.get("direction", DIRECTION_NORTH)
-                        out_name = out_ent.get("name", "")
-                        if out_name != name:
-                            violations.append(
-                                DrcViolation(
-                                    code="DRC_UG_TIER_MISMATCH",
-                                    message=f"Mismatched tier between underground pair at {target_pos}.",
-                                    position=target_pos,
+                        if out_name == name:
+                            if out_dir != in_dir:
+                                violations.append(
+                                    DrcViolation(
+                                        code="DRC_UG_DIRECTION_MISMATCH",
+                                        message=f"Output underground facing wrong direction at {target_pos}.",
+                                        position=target_pos,
+                                    )
                                 )
-                            )
-                        elif out_dir != in_dir:
-                            violations.append(
-                                DrcViolation(
-                                    code="DRC_UG_DIRECTION_MISMATCH",
-                                    message=f"Output underground facing wrong direction at {target_pos}.",
-                                    position=target_pos,
+                            elif step > max_span:
+                                violations.append(
+                                    DrcViolation(
+                                        code="DRC_UG_SPAN_EXCEEDED",
+                                        message=f"Underground span {step} exceeds prototype limit {max_span}.",
+                                        position=target_pos,
+                                    )
                                 )
-                            )
-                        elif step > max_span:
-                            violations.append(
-                                DrcViolation(
-                                    code="DRC_UG_SPAN_EXCEEDED",
-                                    message=f"Underground span {step} exceeds prototype limit {max_span}.",
-                                    position=target_pos,
-                                )
-                            )
-                        paired_outputs.add(idx)
-                        found_output = True
-                        break
+                            paired_outputs.add(idx)
+                            found_output = True
+                            break
+                        if out_dir == in_dir and found_mismatched_output is None:
+                            found_mismatched_output = target_pos
                 if found_output:
                     break
 
             if not found_output:
-                violations.append(
-                    DrcViolation(
-                        code="DRC_UG_UNPAIRED",
-                        message=f"Input underground at {in_pos} has no matching downstream output.",
-                        position=in_pos,
+                if found_mismatched_output is not None:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC_UG_TIER_MISMATCH",
+                            message=f"Mismatched tier between underground pair at {found_mismatched_output}.",
+                            position=found_mismatched_output,
+                        )
                     )
-                )
+                else:
+                    violations.append(
+                        DrcViolation(
+                            code="DRC_UG_UNPAIRED",
+                            message=f"Input underground at {in_pos} has no matching downstream output.",
+                            position=in_pos,
+                        )
+                    )
 
         for idx, out_ent in enumerate(ug_outputs):
             if idx not in paired_outputs:
@@ -274,7 +290,7 @@ class NativeLayoutVerifier:
                 )
 
         # 2. Inspect pipe-to-ground spans
-        pipe_grounds = [e for e in entities if e.get("name") == "pipe-to-ground"]
+        pipe_grounds = [e for e in entities if "pipe-to-ground" in e.get("name", "")]
         paired_pipe_grounds: set[int] = set()
 
         for i, pg_a in enumerate(pipe_grounds):
@@ -292,6 +308,9 @@ class NativeLayoutVerifier:
                 target_pos = (pos_a[0] + dx * step, pos_a[1] + dy * step)
                 for j, pg_b in enumerate(pipe_grounds):
                     if i == j or j in paired_pipe_grounds:
+                        continue
+                    if pg_b.get("name") != pg_name:
+                        # Different pipe tier: weaves on independent subterranean layer
                         continue
                     pos_b = _round_pos(pg_b["position"])
                     if pos_b == target_pos:
@@ -323,6 +342,7 @@ class NativeLayoutVerifier:
                 visited: set[tuple[int, int]] = set()
                 components: list[set[tuple[int, int]]] = []
 
+                tile_map = {_round_pos(e["position"]): e for e in entities}
                 for p_pos in pipe_positions:
                     if p_pos in visited:
                         continue
@@ -332,9 +352,8 @@ class NativeLayoutVerifier:
                     while queue:
                         curr = queue.popleft()
                         comp.add(curr)
-                        for d_step in DIR_STEPS.values():
-                            neighbor = (curr[0] + d_step[0], curr[1] + d_step[1])
-                            if neighbor in pipe_positions and neighbor not in visited:
+                        for neighbor in self._get_pipe_neighbors(curr, tile_map):
+                            if neighbor not in visited:
                                 visited.add(neighbor)
                                 queue.append(neighbor)
                     components.append(comp)
@@ -357,6 +376,48 @@ class NativeLayoutVerifier:
                         )
 
         return violations
+
+    def _get_pipe_neighbors(
+        self,
+        pos: tuple[int, int],
+        tile_map: dict[tuple[int, int], dict[str, Any]],
+    ) -> list[tuple[int, int]]:
+        """Return connected adjacent and subterranean fluid neighbors for entity at pos."""
+        ent = tile_map.get(pos)
+        if not ent or "pipe" not in ent.get("name", ""):
+            return []
+
+        neighbors: set[tuple[int, int]] = set()
+        name = ent.get("name", "")
+
+        # 1. Surface orthogonal neighbors
+        for dx, dy in DIR_STEPS.values():
+            nbr_pos = (pos[0] + dx, pos[1] + dy)
+            nbr_ent = tile_map.get(nbr_pos)
+            if nbr_ent and "pipe" in nbr_ent.get("name", ""):
+                neighbors.add(nbr_pos)
+
+        # 2. Subterranean underground leap
+        if "pipe-to-ground" in name:
+            dir_a = ent.get("direction", DIRECTION_NORTH)
+            dx, dy = DIR_STEPS.get(dir_a, (0, -1))
+            opp_dir = (dir_a + 8) % 16
+            max_span = self.get_entity_span(name)
+
+            for step in range(1, max_span + 1):
+                target_pos = (pos[0] + dx * step, pos[1] + dy * step)
+                cand = tile_map.get(target_pos)
+                if cand:
+                    cand_name = cand.get("name", "")
+                    if cand_name == name:
+                        cand_dir = cand.get("direction", DIRECTION_NORTH)
+                        if cand_dir == opp_dir:
+                            neighbors.add(target_pos)
+                        # Intervening same-tier pipe ends underground span
+                        break
+                    # Different tier pipe-to-ground or belt weaves through without blocking
+
+        return sorted(neighbors)
 
     def simulate_and_verify_lvs(
         self,
@@ -476,14 +537,11 @@ class NativeLayoutVerifier:
             if curr == snk:
                 return path
 
-            for dx, dy in DIR_STEPS.values():
-                nxt = (curr[0] + dx, curr[1] + dy)
+            for nxt in self._get_pipe_neighbors(curr, tile_map):
                 if nxt in visited:
                     continue
-                ent = tile_map.get(nxt)
-                if ent and "pipe" in ent.get("name", ""):
-                    visited.add(nxt)
-                    queue.append([*path, nxt])
+                visited.add(nxt)
+                queue.append([*path, nxt])
 
         return []
 
@@ -518,14 +576,14 @@ class NativeLayoutVerifier:
                 for step in range(1, 32):
                     target = (curr[0] + dx * step, curr[1] + dy * step)
                     cand = tile_map.get(target)
-                    if (
-                        cand
-                        and cand.get("name") == name
-                        and cand.get("type") == "output"
-                        and cand.get("direction", DIRECTION_NORTH) == d
-                    ):
-                        if step <= max_span:
+                    if cand and cand.get("name") == name:
+                        if (
+                            cand.get("type") == "output"
+                            and cand.get("direction", DIRECTION_NORTH) == d
+                            and step <= max_span
+                        ):
                             found_out = target
+                        # Intervening same-tier underground entity blocks/ends connection
                         break
                 if not found_out:
                     break
