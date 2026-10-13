@@ -292,3 +292,26 @@ class TestMacroFloorplan(unittest.TestCase):
                 1,
                 f"Block ({bx}, {by}) contains multiple item types: {recipes}",
             )
+
+    def test_auto_square_grid_for_22_clusters(self) -> None:
+        """Verify automatic square-est grid calculation for 22 clusters."""
+        clusters = [
+            RecipeCluster(
+                name=f"cluster_{i}",
+                recipe=f"item_{i}",
+                instances=[f"u_inst_{i}"],
+                total_area=10.0,
+            )
+            for i in range(22)
+        ]
+        # Without specifying grid_w and grid_h
+        floorplan = self.floorplanner.plan_grid(clusters)
+        self.assertEqual(floorplan.grid_w, 5)
+        self.assertEqual(floorplan.grid_h, 5)
+        self.assertEqual(len(floorplan.empty_blocks), 3)
+
+        # With grid_w=0 and grid_h=0
+        floorplan_zero = self.floorplanner.plan_grid(clusters, grid_w=0, grid_h=0)
+        self.assertEqual(floorplan_zero.grid_w, 5)
+        self.assertEqual(floorplan_zero.grid_h, 5)
+        self.assertEqual(len(floorplan_zero.empty_blocks), 3)

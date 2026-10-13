@@ -24,8 +24,20 @@ foreach inst [$block getInsts] {
 }
 
 if {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"} {
-    if {![info exists CHASSIS_GRID_W]} { set CHASSIS_GRID_W 1 }
-    if {![info exists CHASSIS_GRID_H]} { set CHASSIS_GRID_H 1 }
+    if {![info exists CHASSIS_GRID_W] || $CHASSIS_GRID_W <= 0} {
+        if {[info exists AUTO_CHASSIS_GRID_W] && $AUTO_CHASSIS_GRID_W > 0} {
+            set CHASSIS_GRID_W $AUTO_CHASSIS_GRID_W
+        } else {
+            set CHASSIS_GRID_W 1
+        }
+    }
+    if {![info exists CHASSIS_GRID_H] || $CHASSIS_GRID_H <= 0} {
+        if {[info exists AUTO_CHASSIS_GRID_H] && $AUTO_CHASSIS_GRID_H > 0} {
+            set CHASSIS_GRID_H $AUTO_CHASSIS_GRID_H
+        } else {
+            set CHASSIS_GRID_H 1
+        }
+    }
     if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
     if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
     if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }

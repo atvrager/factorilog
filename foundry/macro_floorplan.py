@@ -645,13 +645,19 @@ class MacroFloorplanner:
         """Map clusters to city blocks and instantiate channels and crossroads."""
         num_blocks = len(clusters)
 
-        if grid_w is not None and grid_h is not None:
+        if (
+            grid_w is not None
+            and grid_h is not None
+            and grid_w > 0
+            and grid_h > 0
+            and grid_w * grid_h >= num_blocks
+        ):
             w = grid_w
             h = grid_h
-        elif grid_w is not None:
+        elif grid_w is not None and grid_w > 0:
             w = grid_w
             h = max(1, math.ceil(num_blocks / float(w)))
-        elif grid_h is not None:
+        elif grid_h is not None and grid_h > 0:
             h = grid_h
             w = max(1, math.ceil(num_blocks / float(h)))
         else:

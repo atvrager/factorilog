@@ -17,6 +17,7 @@ joins lanes with a splitter.
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -144,7 +145,21 @@ def build_all(
         ],
     }
     (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
-    (out / "ranks.tcl").write_text(netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans))
+    ranks_text = netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans)
+    try:
+        from macro_floorplan import MacroFloorplanner
+
+        clusters = MacroFloorplanner().cluster_netlist(sidecar)
+        auto_side = max(1, math.ceil(math.sqrt(len(clusters))))
+        ranks_text += (
+            f"\n# Auto-calculated square-est chassis grid dimensions\n"
+            f"set AUTO_CHASSIS_GRID_W {auto_side}\n"
+            f"set AUTO_CHASSIS_GRID_H {auto_side}\n"
+            f"set AUTO_NUM_CLUSTERS {len(clusters)}\n"
+        )
+    except Exception:
+        pass
+    (out / "ranks.tcl").write_text(ranks_text)
     counts: dict[str, int] = {}
     for inst in nl.instances:
         counts[inst.cell_key] = counts.get(inst.cell_key, 0) + 1

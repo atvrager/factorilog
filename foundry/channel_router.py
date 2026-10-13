@@ -116,6 +116,12 @@ class StreetChannel:
     ) -> ChannelLane:
         """Allocate an available lane for a net."""
         assigned_tier = tier or self.default_tier
+
+        # Reuse existing lane if net is already routed in this channel in the same direction
+        for lane in self.lanes:
+            if lane.is_allocated and lane.net_name == net_name and lane.direction == direction:
+                return lane
+
         if preferred_lane is not None:
             if preferred_lane < 0 or preferred_lane > 5:
                 raise ValueError(f"preferred_lane must be 0..5, got {preferred_lane}")

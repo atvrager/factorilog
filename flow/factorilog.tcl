@@ -159,8 +159,24 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
     }
 
     if {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"} {
-        if {![info exists CHASSIS_GRID_W]} { set CHASSIS_GRID_W 1 }
-        if {![info exists CHASSIS_GRID_H]} { set CHASSIS_GRID_H 1 }
+        if {![info exists CHASSIS_GRID_W] || $CHASSIS_GRID_W <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_W] && $AUTO_CHASSIS_GRID_W > 0} {
+                set CHASSIS_GRID_W $AUTO_CHASSIS_GRID_W
+            } elseif {[info exists num_ranks] && $num_ranks > 0} {
+                set CHASSIS_GRID_W [expr {int(ceil(sqrt($num_ranks)))}]
+            } else {
+                set CHASSIS_GRID_W 1
+            }
+        }
+        if {![info exists CHASSIS_GRID_H] || $CHASSIS_GRID_H <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_H] && $AUTO_CHASSIS_GRID_H > 0} {
+                set CHASSIS_GRID_H $AUTO_CHASSIS_GRID_H
+            } elseif {[info exists num_ranks] && $num_ranks > 0} {
+                set CHASSIS_GRID_H [expr {int(ceil(sqrt($num_ranks)))}]
+            } else {
+                set CHASSIS_GRID_H 1
+            }
+        }
         if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
         if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
         if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }
@@ -391,8 +407,24 @@ if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} 
     }
 
 } elseif {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"} {
-    if {![info exists CHASSIS_GRID_W]} { set CHASSIS_GRID_W 1 }
-    if {![info exists CHASSIS_GRID_H]} { set CHASSIS_GRID_H 1 }
+        if {![info exists CHASSIS_GRID_W] || $CHASSIS_GRID_W <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_W] && $AUTO_CHASSIS_GRID_W > 0} {
+                set CHASSIS_GRID_W $AUTO_CHASSIS_GRID_W
+            } elseif {[info exists num_ranks] && $num_ranks > 0} {
+                set CHASSIS_GRID_W [expr {int(ceil(sqrt($num_ranks)))}]
+            } else {
+                set CHASSIS_GRID_W 1
+            }
+        }
+        if {![info exists CHASSIS_GRID_H] || $CHASSIS_GRID_H <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_H] && $AUTO_CHASSIS_GRID_H > 0} {
+                set CHASSIS_GRID_H $AUTO_CHASSIS_GRID_H
+            } elseif {[info exists num_ranks] && $num_ranks > 0} {
+                set CHASSIS_GRID_H [expr {int(ceil(sqrt($num_ranks)))}]
+            } else {
+                set CHASSIS_GRID_H 1
+            }
+        }
     if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
     if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
     if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }
