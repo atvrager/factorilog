@@ -70,15 +70,20 @@ class RoutingGrid:
         belt_dict = self.prototypes.get("transport-belt", {})
 
         # Sort underground prototypes by speed ascending
+        valid_ugs = [
+            (name, proto)
+            for name, proto in ug_dict.items()
+            if "speed" in proto and "max_distance" in proto
+        ]
         sorted_ugs = sorted(
-            ug_dict.items(),
-            key=lambda kv: float(kv[1].get("speed", 0.0)),
+            valid_ugs,
+            key=lambda kv: float(kv[1]["speed"]),
         )
 
         for idx, (ug_name, ug_proto) in enumerate(sorted_ugs):
             layer_id = idx + 1
-            speed = float(ug_proto.get("speed", 0.03125))
-            max_span = int(ug_proto.get("max_distance", 5))
+            speed = float(ug_proto["speed"])
+            span = int(ug_proto["max_distance"])
 
             # Match surface belt by related_underground_belt or speed
             matching_belt = next(
@@ -86,15 +91,17 @@ class RoutingGrid:
                     b_name
                     for b_name, b_proto in belt_dict.items()
                     if b_proto.get("related_underground_belt") == ug_name
-                    or float(b_proto.get("speed", 0.0)) == speed
+                    or ("speed" in b_proto and float(b_proto["speed"]) == speed)
                 ),
-                "transport-belt",
+                None,
             )
+            if not matching_belt:
+                continue
 
             result[layer_id] = {
                 "name": ug_name,
                 "belt_name": matching_belt,
-                "max_span": max_span,
+                "max_span": span,
                 "tier_cost": idx * 1.5,
                 "speed": speed,
             }
@@ -112,20 +119,22 @@ class RoutingGrid:
 
         for idx, (pg_name, pg_proto) in enumerate(sorted_pgs):
             layer_id = 10 + idx
-            max_span = 10
             fluid_box = pg_proto.get("fluid_box", {})
+            conn_dist = None
             for conn in fluid_box.get("pipe_connections", []):
                 if (
                     conn.get("connection_type") == "underground"
                     and "max_underground_distance" in conn
                 ):
-                    max_span = int(conn["max_underground_distance"])
+                    conn_dist = int(conn["max_underground_distance"])
                     break
+            if conn_dist is None:
+                continue
 
             result[layer_id] = {
                 "name": pg_name,
                 "pipe_name": default_pipe,
-                "max_span": max_span,
+                "max_span": conn_dist,
                 "tier_cost": idx * 1.5,
             }
         return result

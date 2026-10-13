@@ -1,5 +1,17 @@
 Communicate only in Simplified Technical English (ASD-STE100).
 
+## Factorio Ground-Truth and Dynamic Discovery Rules
+
+- Do not trust internal model knowledge or memory weights for Factorio data.
+- Model knowledge contains cutoff limitations and errors.
+- Always derive ground truth dynamically from the game software or prototype data.
+- Never hardcode prototype names, spans, speeds, or capacities.
+- Never write hardcoded tier tables or fallback constant values.
+- Support only core Factorio base game prototypes.
+- Do not add Space Age expansion prototypes or content.
+- For example, do not use turbo belts or space platforms.
+- Query all entity limits and properties from prototype data at runtime.
+
 ## Testing Rules
 
 - Do NOT execute scratch Python scripts for tests.

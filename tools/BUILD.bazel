@@ -152,6 +152,25 @@ py_test(
     main = "test_check_no_hardcoded_routing.py",
 )
 
+py_binary(
+    name = "check_no_hardcoded_prototypes",
+    srcs = ["check_no_hardcoded_prototypes.py"],
+    main = "check_no_hardcoded_prototypes.py",
+)
+
+py_test(
+    name = "no_hardcoded_prototypes_test",
+    size = "small",
+    srcs = [
+        "check_no_hardcoded_prototypes.py",
+        "test_check_no_hardcoded_prototypes.py",
+    ],
+    data = [
+        "//foundry:py_srcs",
+    ],
+    main = "test_check_no_hardcoded_prototypes.py",
+)
+
 sh_test(
     name = "ruff_test",
     size = "small",

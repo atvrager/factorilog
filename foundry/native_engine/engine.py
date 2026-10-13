@@ -327,26 +327,32 @@ def simulate_pipe_network(
                     engine.transfer_fluid(dst, src, flow)
 
 
-MAX_UNDERGROUND_SPANS: dict[str, int] = {
-    "transport-belt": 5,
-    "fast-transport-belt": 7,
-    "express-transport-belt": 9,
-}
-
-
 def validate_underground_belt_span(
     belt_name: str,
     dx: int,
     dy: int,
+    prototypes: dict[str, Any] | None = None,
 ) -> bool:
     """Validate underground belt span distance and cardinal axis alignment."""
     if (dx != 0 and dy != 0) or (dx == 0 and dy == 0):
         return False
     distance = abs(dx) + abs(dy)
-    max_span = MAX_UNDERGROUND_SPANS.get(belt_name)
-    if max_span is None:
+    if prototypes is None:
+        from foundry.native_engine.verifier import load_game_prototypes
+
+        prototypes = load_game_prototypes()
+
+    ug_dict = prototypes.get("underground-belt", {})
+    proto = ug_dict.get(belt_name)
+    if proto is None:
+        tb_dict = prototypes.get("transport-belt", {})
+        tb_proto = tb_dict.get(belt_name, {})
+        related = tb_proto.get("related_underground_belt")
+        if related and related in ug_dict:
+            proto = ug_dict[related]
+    if proto is None or "max_distance" not in proto:
         return False
-    return distance <= max_span
+    return distance <= int(proto["max_distance"])
 
 
 def simulate_splitter_step(
