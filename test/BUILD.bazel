@@ -258,5 +258,22 @@ py_test(
     ],
 )
 
+py_test(
+    name = "native_engine_test",
+    size = "medium",
+    srcs = ["test_native_engine.py"],
+    local = True,
+    main = "test_native_engine.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+
 
 

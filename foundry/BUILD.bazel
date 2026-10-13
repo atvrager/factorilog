@@ -9,8 +9,14 @@ filegroup(
     name = "py_srcs",
     srcs = glob([
         "*.py",
+        "native_engine/*.py",
         "untangle/*.py",
     ]),
+)
+
+py_library(
+    name = "native_engine_lib",
+    srcs = glob(["native_engine/*.py"]),
 )
 
 py_library(
@@ -51,6 +57,9 @@ py_library(
         "lef.py",
         "liberty.py",
         "macro_floorplan.py",
+        "native_engine/__init__.py",
+        "native_engine/engine.py",
+        "native_engine/symbol_finder.py",
         "netbuild.py",
         "netlist.py",
         "pdk.py",
