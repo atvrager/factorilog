@@ -11,11 +11,6 @@ from typing import Any
 from foundry.native_engine.verifier import load_game_prototypes
 from foundry.router.types import (
     LANE_BOTH,
-    LAYER_BELT_BLUE,
-    LAYER_BELT_RED,
-    LAYER_BELT_TURBO,
-    LAYER_BELT_YELLOW,
-    LAYER_PIPE_DEFAULT,
     LAYER_SURFACE,
     RouteEdge,
     RouteNode,
@@ -69,46 +64,70 @@ class RoutingGrid:
         self.net_routes: dict[str, RouteResult] = {}
 
     def _init_belt_tiers(self) -> dict[int, dict[str, Any]]:
-        """Register underground belt tiers from prototypes."""
-        known_tiers = [
-            (LAYER_BELT_YELLOW, "underground-belt", "transport-belt", 0.0),
-            (LAYER_BELT_RED, "fast-underground-belt", "fast-transport-belt", 1.5),
-            (LAYER_BELT_BLUE, "express-underground-belt", "express-transport-belt", 3.0),
-            (LAYER_BELT_TURBO, "turbo-underground-belt", "turbo-transport-belt", 5.0),
-        ]
+        """Register underground belt tiers dynamically from prototypes."""
         result: dict[int, dict[str, Any]] = {}
         ug_dict = self.prototypes.get("underground-belt", {})
+        belt_dict = self.prototypes.get("transport-belt", {})
 
-        for layer_id, ug_name, belt_name, tier_cost in known_tiers:
-            proto = ug_dict.get(ug_name, {})
-            max_span = int(proto.get("max_distance", 5))
+        # Sort underground prototypes by speed ascending
+        sorted_ugs = sorted(
+            ug_dict.items(),
+            key=lambda kv: float(kv[1].get("speed", 0.0)),
+        )
+
+        for idx, (ug_name, ug_proto) in enumerate(sorted_ugs):
+            layer_id = idx + 1
+            speed = float(ug_proto.get("speed", 0.03125))
+            max_span = int(ug_proto.get("max_distance", 5))
+
+            # Match surface belt by related_underground_belt or speed
+            matching_belt = next(
+                (
+                    b_name
+                    for b_name, b_proto in belt_dict.items()
+                    if b_proto.get("related_underground_belt") == ug_name
+                    or float(b_proto.get("speed", 0.0)) == speed
+                ),
+                "transport-belt",
+            )
+
             result[layer_id] = {
                 "name": ug_name,
-                "belt_name": belt_name,
+                "belt_name": matching_belt,
                 "max_span": max_span,
-                "tier_cost": tier_cost,
+                "tier_cost": idx * 1.5,
+                "speed": speed,
             }
         return result
 
     def _init_pipe_tiers(self) -> dict[int, dict[str, Any]]:
-        """Register underground pipe tiers from prototypes."""
+        """Register underground pipe tiers dynamically from prototypes."""
         result: dict[int, dict[str, Any]] = {}
         pg_dict = self.prototypes.get("pipe-to-ground", {})
-        proto = pg_dict.get("pipe-to-ground", {})
+        pipe_dict = self.prototypes.get("pipe", {})
+        default_pipe = next(iter(pipe_dict.keys()), "pipe")
 
-        max_span = 10
-        fluid_box = proto.get("fluid_box", {})
-        for conn in fluid_box.get("pipe_connections", []):
-            if conn.get("connection_type") == "underground":
-                max_span = int(conn.get("max_underground_distance", 10))
-                break
+        # Sort pipe-to-ground prototypes by name
+        sorted_pgs = sorted(pg_dict.items(), key=lambda kv: kv[0])
 
-        result[LAYER_PIPE_DEFAULT] = {
-            "name": "pipe-to-ground",
-            "pipe_name": "pipe",
-            "max_span": max_span,
-            "tier_cost": 0.0,
-        }
+        for idx, (pg_name, pg_proto) in enumerate(sorted_pgs):
+            layer_id = 10 + idx
+            max_span = 10
+            fluid_box = pg_proto.get("fluid_box", {})
+            for conn in fluid_box.get("pipe_connections", []):
+                if (
+                    conn.get("connection_type") == "underground"
+                    and "max_underground_distance" in conn
+                ):
+                    max_span = int(conn["max_underground_distance"])
+                    break
+
+            result[layer_id] = {
+                "name": pg_name,
+                "pipe_name": default_pipe,
+                "max_span": max_span,
+                "tier_cost": idx * 1.5,
+            }
         return result
 
     def is_in_bounds(self, x: int, y: int) -> bool:

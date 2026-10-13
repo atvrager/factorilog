@@ -37,11 +37,6 @@ LANE_BOTH = 2
 
 # Layer identifiers
 LAYER_SURFACE = 0
-LAYER_BELT_YELLOW = 1
-LAYER_BELT_RED = 2
-LAYER_BELT_BLUE = 3
-LAYER_BELT_TURBO = 4
-LAYER_PIPE_DEFAULT = 10
 
 
 @dataclass(frozen=True)
