@@ -270,11 +270,10 @@ class TestChannelRouter(unittest.TestCase):
             register_underground_span,
         )
 
-        # Base and Space Age spans
+        # Base spans
         self.assertEqual(get_underground_span("underground-belt"), 5)
         self.assertEqual(get_underground_span("fast-underground-belt"), 7)
         self.assertEqual(get_underground_span("express-underground-belt"), 9)
-        self.assertEqual(get_underground_span("turbo-underground-belt"), 11)
 
         # Dynamic registration for modded tier
         register_underground_span("mod-hyper-underground-belt", 15)
@@ -291,12 +290,8 @@ class TestChannelRouter(unittest.TestCase):
             get_compatible_underground_belt(6, preferred_name="fast-underground-belt"),
             "fast-underground-belt",
         )
-        # 10-tile gap selects Space Age turbo belt (span 11 >= 10)
-        self.assertEqual(
-            get_compatible_underground_belt(10, preferred_name="fast-underground-belt"),
-            "turbo-underground-belt",
-        )
         # 14-tile gap selects kr-advanced-underground-belt (span 14 >= 14)
+        register_underground_span("kr-advanced-underground-belt", 14)
         self.assertEqual(
             get_compatible_underground_belt(14),
             "kr-advanced-underground-belt",
@@ -307,26 +302,9 @@ class TestChannelRouter(unittest.TestCase):
             "mod-hyper-underground-belt",
         )
 
-    def test_check_underground_pairing_space_age_and_mods(self) -> None:
-        """Verify that check_underground_pairing dynamically supports Space Age and modded spans."""
+    def test_check_underground_pairing_mods(self) -> None:
+        """Verify that check_underground_pairing dynamically supports registered modded spans."""
         from foundry.entity_helpers import register_underground_span
-
-        # Space Age turbo underground pair spanning 11 tiles (for example x=0 to x=11)
-        turbo_entities = [
-            {
-                "name": "turbo-underground-belt",
-                "type": "input",
-                "position": {"x": 0.5, "y": 0.5},
-                "direction": DIRECTION_EAST,
-            },
-            {
-                "name": "turbo-underground-belt",
-                "type": "output",
-                "position": {"x": 11.5, "y": 0.5},
-                "direction": DIRECTION_EAST,
-            },
-        ]
-        self.assertEqual(check_underground_pairing(turbo_entities), [])
 
         # Modded belt with span 14
         register_underground_span("kr-advanced-underground-belt", 14)

@@ -148,6 +148,18 @@ def build_conduit_graph(
         node = ("pipe-to-ground", px, py)
         adj.setdefault(node, set())
 
+        # Surface connection to facing pipe-to-ground mouth-to-mouth
+        surf_dx, surf_dy = DIR_STEPS.get(d, (0, 0))
+        surf_pos = (px + surf_dx, py + surf_dy)
+        for c in tile_map.get(surf_pos, []):
+            if c.get("name") == "pipe-to-ground":
+                cd = c.get("direction", DIRECTION_NORTH)
+                c_surf_dx, c_surf_dy = DIR_STEPS.get(cd, (0, 0))
+                if (surf_pos[0] + c_surf_dx, surf_pos[1] + c_surf_dy) == (px, py):
+                    c_node = ("pipe-to-ground", surf_pos[0], surf_pos[1])
+                    adj[node].add(c_node)
+                    adj[c_node].add(node)
+
         # Underground connection to facing pair within maximum span
         max_pipe_span = get_underground_span("pipe-to-ground", 10)
         for span in range(1, max_pipe_span + 1):

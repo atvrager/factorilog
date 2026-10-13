@@ -50,7 +50,6 @@ _PROTOTYPE_SPANS: dict[str, int] = {
     "underground-belt": 5,
     "fast-underground-belt": 7,
     "express-underground-belt": 9,
-    "turbo-underground-belt": 11,
     "pipe-to-ground": 10,
 }
 

@@ -233,6 +233,7 @@ def _factorilog_pnr_impl(ctx):
         "set CHASSIS_CORE_H %d" % ctx.attr.chassis_core_h,
         "set CHASSIS_CHANNEL_W %d" % ctx.attr.chassis_channel_w,
         "set DO_UNTANGLE %s" % ("1" if ctx.attr.do_untangle else "0"),
+        "set SKIP_ROUTER %s" % ("1" if ctx.attr.skip_router else "0"),
         "set DROUTE_END_ITER 50",
         "source [file join [file dirname [info script]] factorilog.tcl]",
         "EOF",
@@ -312,6 +313,7 @@ factorilog_pnr = rule(
         "chassis_core_h": attr.int(default = 94, doc = "Chassis core height in tiles"),
         "chassis_channel_w": attr.int(default = 6, doc = "Chassis street channel width in tiles"),
         "do_untangle": attr.bool(default = True, doc = "Enable pre-route pin untangling in OpenROAD TCL"),
+        "skip_router": attr.bool(default = True, doc = "Skip OpenROAD global/detailed routing; route with native maze router"),
         "ranks_tcl": attr.label(allow_single_file = [".tcl"], doc = "Optional TCL script containing instance ranks"),
         "def_file": attr.output(mandatory = True, doc = "Routed DEF output file"),
         "route_drc": attr.output(doc = "DRC report output file"),
@@ -348,6 +350,8 @@ def _factorilog_blueprint_impl(ctx):
         outputs.append(out_time)
     if not ctx.attr.strict_drc:
         args.append("--no-strict-drc")
+    if ctx.attr.use_maze_router:
+        args.append("--use-maze-router")
 
     ctx.actions.run(
         inputs = [def_file, netlist_json],
@@ -370,6 +374,7 @@ factorilog_blueprint = rule(
         "pins_json": attr.output(doc = "Optional output pins JSON metadata file"),
         "time_json": attr.output(doc = "Optional output blueprint timing JSON file"),
         "strict_drc": attr.bool(default = True, doc = "Enforce strict zero physical DRC violations"),
+        "use_maze_router": attr.bool(default = True, doc = "Route nets using 3D multi-layer DualLaneMazeRouter"),
         "_def2bp": attr.label(
             default = Label("//foundry:def2bp"),
             executable = True,
@@ -673,6 +678,8 @@ def factorilog_science_factory(
         telemetry_taps = "none",
         controller_verilog = None,
         strict_drc = True,
+        skip_router = True,
+        use_maze_router = True,
         test_expected_item = None,
         test_min_produced = 20,
         test_ticks = 7200,
@@ -736,6 +743,7 @@ def factorilog_science_factory(
         chassis_core_h = chassis_core_h,
         chassis_channel_w = chassis_channel_w,
         do_untangle = do_untangle,
+        skip_router = skip_router,
         tags = merged_tags,
     )
 
@@ -748,6 +756,7 @@ def factorilog_science_factory(
         time_json = name + "_bp_time.json",
         label_text = name,
         strict_drc = strict_drc,
+        use_maze_router = use_maze_router,
         tags = merged_tags,
     )
 

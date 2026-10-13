@@ -47,7 +47,7 @@ def build_blueprint_entities(
                         "name", ""
                     ):
                         continue
-                heading = end.heading if move == "turn" else start.heading
+                heading = start.heading
                 name = edge.tier_name
                 entities_by_pos[pos] = {
                     "name": name,
@@ -56,16 +56,19 @@ def build_blueprint_entities(
                 }
             elif move == "dive":
                 # Entrance hood
-                pos = (start.x, start.y)
+                pos = (
+                    (end.x, end.y) if (start.x != end.x or start.y != end.y) else (start.x, start.y)
+                )
                 name = edge.tier_name
                 ent: dict[str, Any] = {
                     "name": name,
                     "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": start.heading,
+                    "direction": OPPOSITE_DIR.get(start.heading, 0) if is_fluid else start.heading,
                 }
                 if not is_fluid:
                     ent["type"] = "input"
                 entities_by_pos[pos] = ent
+
             elif move == "leap":
                 # Exit hood
                 pos = (end.x, end.y)
@@ -73,12 +76,9 @@ def build_blueprint_entities(
                 ent = {
                     "name": name,
                     "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
+                    "direction": end.heading,
                 }
-                if is_fluid:
-                    # Pipe to ground faces toward entrance
-                    ent["direction"] = OPPOSITE_DIR.get(end.heading, 0)
-                else:
-                    ent["direction"] = end.heading
+                if not is_fluid:
                     ent["type"] = "output"
                 entities_by_pos[pos] = ent
 

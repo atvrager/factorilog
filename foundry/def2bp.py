@@ -81,10 +81,157 @@ __all__ = [
 ]
 
 
+def _resolve_terminal(
+    inst_name: str,
+    port: str,
+    net_name: str,
+    comp_map: dict[str, Any],
+    inst_map: dict[str, Any],
+    cell_map: dict[str, Any],
+    pin_dict: dict[str, tuple[int, int]],
+    valid_in_pins: set[tuple[float, float]],
+    scale: float,
+    clean_fluids: set[str] | None = None,
+) -> tuple[tuple[int, int], bool, int | None, int | None] | None:
+    if inst_name == "PIN":
+        pos = pin_dict.get(net_name) or pin_dict.get(port)
+        if pos is None:
+            return None
+        is_driver = (float(pos[0]), float(pos[1])) in valid_in_pins
+        inward_dir = DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else None
+        return (pos, is_driver, None, inward_dir)
+
+    if inst_name not in comp_map:
+        return None
+
+    comp = comp_map[inst_name]
+    gx = comp["x"] * scale
+    gy = comp["y"] * scale
+    inst = inst_map.get(inst_name, {})
+    cell_id = inst.get("cell", comp.get("macro", ""))
+    cell = cell_map.get(cell_id, {})
+    orient = comp.get("orient", "N")
+
+    igx = round(gx)
+    igy = round(gy)
+
+    if orient in ("W", "E"):
+        splitter_dir = DIRECTION_NORTH if orient == "W" else DIRECTION_SOUTH
+        pump_dir = DIRECTION_WEST if orient == "W" else DIRECTION_EAST
+    else:
+        splitter_dir = DIRECTION_WEST if orient == "S" else DIRECTION_EAST
+        pump_dir = DIRECTION_SOUTH if orient == "S" else DIRECTION_NORTH
+
+    if cell_id == "belt_merge2" or comp.get("macro") == "belt_merge2":
+        if orient in ("W", "E"):
+            if port in ("a", "a1"):
+                return ((igx, igy - 1), False, splitter_dir, splitter_dir)
+            if port in ("b", "a2"):
+                return ((igx + 1, igy - 1), False, splitter_dir, splitter_dir)
+            if port == "y":
+                return ((igx, igy + 1), True, splitter_dir, None)
+        else:
+            if port in ("a", "a1"):
+                return ((igx - 1, igy), False, splitter_dir, splitter_dir)
+            if port in ("b", "a2"):
+                return ((igx - 1, igy + 1), False, splitter_dir, splitter_dir)
+            if port == "y":
+                return ((igx + 1, igy), True, splitter_dir, None)
+
+    elif cell_id in ("belt_split2", "belt_balancer2") or comp.get("macro") in (
+        "belt_split2",
+        "belt_balancer2",
+    ):
+        if orient in ("W", "E"):
+            if port in ("a", "a1"):
+                return ((igx, igy - 1), False, splitter_dir, splitter_dir)
+            if port in ("b", "a2"):
+                return ((igx + 1, igy - 1), False, splitter_dir, splitter_dir)
+            if port == "y1":
+                return ((igx, igy + 1), True, splitter_dir, None)
+            if port == "y2":
+                return ((igx + 1, igy + 1), True, splitter_dir, None)
+        else:
+            if port in ("a", "a1"):
+                return ((igx - 1, igy), False, splitter_dir, splitter_dir)
+            if port in ("b", "a2"):
+                return ((igx - 1, igy + 1), False, splitter_dir, splitter_dir)
+            if port == "y1":
+                return ((igx + 1, igy), True, splitter_dir, None)
+            if port == "y2":
+                return ((igx + 1, igy + 1), True, splitter_dir, None)
+
+    elif cell_id == "pump" or comp.get("macro") == "pump":
+        if port == "a":
+            return ((igx, igy - 1), False, pump_dir, pump_dir)
+        if port == "y":
+            return ((igx, igy + 2), True, pump_dir, None)
+
+    else:
+        outputs = [o.replace("-", "_") for o in cell.get("outputs", [])]
+        clean_port = port.replace("-", "_")
+        try:
+            from foundry.lef import get_macro_port_geometry
+        except ImportError:
+            from lef import get_macro_port_geometry
+
+        if clean_port in outputs:
+            orig_outputs = cell.get("outputs", [])
+            idx = outputs.index(clean_port)
+            orig_name = orig_outputs[idx] if idx < len(orig_outputs) else clean_port
+            geom = get_macro_port_geometry(cell, orig_name, is_output=True)
+            is_fluid_port = bool(clean_fluids and orig_name in clean_fluids)
+            pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
+            ax, ay = geom[pos_key]
+            head = geom.get("approach_dir") if not is_fluid_port else None
+            face = geom.get("face", "E")
+            inward_dir = (
+                (
+                    DIRECTION_WEST
+                    if face == "E"
+                    else DIRECTION_EAST
+                    if face == "W"
+                    else DIRECTION_SOUTH
+                    if face == "N"
+                    else DIRECTION_NORTH
+                )
+                if is_fluid_port
+                else None
+            )
+            return ((math.floor(gx + ax), math.floor(gy + ay)), True, head, inward_dir)
+
+        inputs = [i.replace("-", "_") for i in cell.get("inputs", [])]
+        if clean_port in inputs:
+            orig_inputs = cell.get("inputs", [])
+            idx = inputs.index(clean_port)
+            orig_name = orig_inputs[idx] if idx < len(orig_inputs) else clean_port
+            geom = get_macro_port_geometry(cell, orig_name, is_output=False)
+            is_fluid_port = bool(clean_fluids and orig_name in clean_fluids)
+            pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
+            ax, ay = geom[pos_key]
+            face = geom.get("face", "W")
+            if is_fluid_port:
+                approach_head = (
+                    DIRECTION_WEST
+                    if face == "E"
+                    else DIRECTION_EAST
+                    if face == "W"
+                    else DIRECTION_SOUTH
+                    if face == "N"
+                    else DIRECTION_NORTH
+                )
+            else:
+                approach_head = geom.get("approach_dir") if face in ("W", "E") else None
+            return ((math.floor(gx + ax), math.floor(gy + ay)), False, None, approach_head)
+
+    return ((igx, igy), False, None, None)
+
+
 def route_with_maze_router(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     placement: Any,
+    engine: Any | None = None,
 ) -> RouteResult:
     """Route DEF nets using the 3D multi-layer DualLaneMazeRouter.
 
@@ -92,9 +239,14 @@ def route_with_maze_router(
     Execute the multi-layer router across surface and subterranean layers.
     Add routed physical entities directly to the placement record.
     """
-    from foundry.native_engine.verifier import load_game_prototypes
-    from foundry.router.maze_router import DualLaneMazeRouter
-    from foundry.router.types import RouterNetSpec
+    try:
+        from foundry.native_engine.verifier import load_game_prototypes
+        from foundry.router.maze_router import DualLaneMazeRouter
+        from foundry.router.types import RouterNetSpec
+    except ImportError:
+        from native_engine.verifier import load_game_prototypes
+        from router.maze_router import DualLaneMazeRouter
+        from router.types import RouterNetSpec
 
     scale = 1.0 / float(def_data.get("units", 1000))
     die_area = def_data.get("die_area", [0, 0, 100000, 100000])
@@ -109,8 +261,8 @@ def route_with_maze_router(
     valid_in_pins: set[tuple[float, float]] = set()
     valid_out_pins: set[tuple[float, float]] = set()
     for pin in def_data.get("pins", []):
-        px = round(pin.get("x", 0) * scale)
-        py = round(pin.get("y", 0) * scale)
+        px = math.floor(pin.get("x", 0) * scale)
+        py = math.floor(pin.get("y", 0) * scale)
         pname = pin.get("name", pin.get("net", ""))
         pin_dict[pname] = (px, py)
         direction = pin.get("direction", "")
@@ -120,7 +272,13 @@ def route_with_maze_router(
             valid_out_pins.add((float(px), float(py)))
 
     fluids = set(netlist_data.get("fluids", [])) or set(placement.fluids or [])
-    inst_entities = placement.inst_to_entity
+    clean_fluids = (
+        {f.replace("-", "_") for f in fluids} | {f.replace("_", "-") for f in fluids} | set(fluids)
+    )
+    comp_map = {c["name"]: c for c in def_data.get("components", [])}
+    inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
+    cell_map = netlist_data.get("cells", {})
+
     net_specs: list[RouterNetSpec] = []
 
     for net in def_data.get("nets", []):
@@ -129,38 +287,136 @@ def route_with_maze_router(
         if len(conns) < 2:
             continue
 
-        src_pos: tuple[int, int] | None = None
-        dst_pos: tuple[int, int] | None = None
+        drivers: list[tuple[tuple[int, int], int | None, int | None]] = []
+        sinks: list[tuple[tuple[int, int], int | None, int | None]] = []
 
         for inst_name, port in conns:
-            if inst_name == "PIN":
-                pos = pin_dict.get(nname) or pin_dict.get(port)
-                if pos:
-                    if (float(pos[0]), float(pos[1])) in valid_in_pins:
-                        src_pos = pos
-                    else:
-                        dst_pos = pos
-            elif inst_name in inst_entities:
-                ent = inst_entities[inst_name]
-                epos = ent.get("position", {})
-                ex = round(float(epos.get("x", 0.0)))
-                ey = round(float(epos.get("y", 0.0)))
-                if src_pos is None:
-                    src_pos = (ex, ey)
-                else:
-                    dst_pos = (ex, ey)
-
-        if src_pos and dst_pos and src_pos != dst_pos:
-            is_fluid = any(f in nname for f in fluids)
-            net_specs.append(
-                RouterNetSpec(
-                    name=nname,
-                    source=src_pos,
-                    sink=dst_pos,
-                    commodity=nname.split("__")[0],
-                    is_fluid=is_fluid,
-                )
+            term = _resolve_terminal(
+                inst_name,
+                port,
+                nname,
+                comp_map,
+                inst_map,
+                cell_map,
+                pin_dict,
+                valid_in_pins,
+                scale,
+                clean_fluids=clean_fluids,
             )
+            if term is not None:
+                coord, is_drv, head, term_head = term
+                if is_drv:
+                    drivers.append((coord, head, term_head))
+                else:
+                    sinks.append((coord, head, term_head))
+
+        if not drivers and sinks and len(conns) >= 2:
+            drivers.append(sinks.pop(0))
+        elif not sinks and drivers and len(conns) >= 2:
+            sinks.append(drivers.pop())
+
+        is_fluid = any(cf in nname.replace("-", "_") for cf in clean_fluids)
+        commodity = nname.split("__")[0].replace("_", "-")
+
+        if is_fluid and (len(drivers) > 1 or len(sinks) > 1):
+            all_terms = drivers + sinks
+            seen_nodes: dict[tuple[int, int], tuple[tuple[int, int], int | None, int | None]] = {}
+            for t in all_terms:
+                if t[0] not in seen_nodes:
+                    seen_nodes[t[0]] = t
+            nodes = list(seen_nodes.values())
+            if len(nodes) >= 2:
+                in_tree = [nodes[0]]
+                remaining = set(nodes[1:])
+                edge_idx = 0
+                while remaining:
+                    best_dist = float("inf")
+                    best_pair = None
+                    for u in in_tree:
+                        ux, uy = u[0]
+                        for v in remaining:
+                            vx, vy = v[0]
+                            dist = abs(ux - vx) + abs(uy - vy)
+                            if dist < best_dist:
+                                best_dist = dist
+                                best_pair = (u, v)
+                    if best_pair is None:
+                        break
+                    u, v = best_pair
+                    in_tree.append(v)
+                    remaining.remove(v)
+                    net_specs.append(
+                        RouterNetSpec(
+                            name=f"{nname}_mst_{edge_idx}",
+                            source=v[0],
+                            sink=u[0],
+                            commodity=commodity,
+                            is_fluid=True,
+                            start_heading=v[1],
+                            end_heading=None,
+                            terminal_heading=None,
+                            source_inward_dir=v[2],
+                            sink_inward_dir=u[2],
+                        )
+                    )
+                    edge_idx += 1
+        else:
+            for d_idx, (d_pos, d_head, d_term) in enumerate(drivers):
+                for s_idx, (s_pos, s_head, s_term) in enumerate(sinks):
+                    if d_pos != s_pos:
+                        sub_name = nname
+                        if len(drivers) > 1 or len(sinks) > 1:
+                            sub_name = f"{nname}_d{d_idx}_s{s_idx}"
+                        net_specs.append(
+                            RouterNetSpec(
+                                name=sub_name,
+                                source=d_pos,
+                                sink=s_pos,
+                                commodity=commodity,
+                                is_fluid=is_fluid,
+                                start_heading=d_head,
+                                end_heading=s_head,
+                                terminal_heading=None if is_fluid else s_term,
+                                source_inward_dir=d_term if is_fluid else None,
+                                sink_inward_dir=s_term if is_fluid else None,
+                            )
+                        )
+    # Ensure source and sink tiles are not blocked by fixed obstacles
+    for nspec in net_specs:
+        obstacles.discard(nspec.source)
+        obstacles.discard(nspec.sink)
+        min_x = min(min_x, nspec.source[0] - 2, nspec.sink[0] - 2)
+        max_x = max(max_x, nspec.source[0] + 2, nspec.sink[0] + 2)
+        min_y = min(min_y, nspec.source[1] - 2, nspec.sink[1] - 2)
+        max_y = max(max_y, nspec.source[1] + 2, nspec.sink[1] + 2)
+
+    component_headings: dict[tuple[int, int], int] = {}
+    for ent in placement.entities:
+        ename = ent.get("name", "")
+        if "splitter" in ename:
+            pos = ent.get("position", {})
+            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            d = ent.get("direction", 0)
+            if d in (0, 8):  # North, South
+                component_headings[(math.floor(cx - 0.5), math.floor(cy))] = d
+                component_headings[(math.floor(cx + 0.5), math.floor(cy))] = d
+            else:  # East, West
+                component_headings[(math.floor(cx), math.floor(cy - 0.5))] = d
+                component_headings[(math.floor(cx), math.floor(cy + 0.5))] = d
+
+    if engine is None:
+        try:
+            from foundry.native_engine.engine import FactorioNativeEngine
+
+            engine = FactorioNativeEngine()
+        except Exception:
+            try:
+                from native_engine.engine import FactorioNativeEngine
+
+                engine = FactorioNativeEngine()
+            except Exception:
+                pass
 
     prototypes = load_game_prototypes()
     router = DualLaneMazeRouter(
@@ -168,10 +424,30 @@ def route_with_maze_router(
         max_x=max_x,
         min_y=min_y,
         max_y=max_y,
+        engine=engine,
         prototypes=prototypes,
         obstacles=obstacles,
+        component_headings=component_headings,
     )
-    routes, entities, _ = router.route(net_specs, verify=False)
+    routes, entities, verif_res = router.route(net_specs, verify=True)
+    placement.router_routes = routes
+    placement.router_net_specs = net_specs
+    placement.router_verif_res = verif_res
+    if verif_res and not verif_res.is_valid:
+        for err in verif_res.lvs_errors:
+            sys.stderr.write(
+                f"factorilog [maze_router]: NATIVE LVS ERROR: {err.net_name}: {err.message}\n"
+            )
+        for drc in verif_res.drc_violations:
+            sys.stderr.write(
+                f"factorilog [maze_router]: NATIVE DRC ERROR: [{drc.code}] at {drc.position}: {drc.message}\n"
+            )
+    failed = [res for res in routes.values() if not res.is_success]
+    if failed:
+        for f in failed[:10]:
+            sys.stderr.write(
+                f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
+            )
 
     for ent in entities:
         placement.entities.append(ent)
@@ -183,12 +459,17 @@ def route_with_maze_router(
     net_surface_tiles: dict[str, dict[tuple[float, float], int]] = {}
     tile_to_nets: dict[tuple[float, float], set[str]] = {}
     for nname, route_res in routes.items():
-        net_surface_tiles[nname] = {}
+        base_name = nname
+        if "_d" in nname and "_s" in nname:
+            base_name = nname.split("_d")[0]
+        elif "_mst_" in nname:
+            base_name = nname.split("_mst_")[0]
+        net_surface_tiles.setdefault(base_name, {})
         for node in route_res.nodes:
             if node.z == 0:
                 k = (float(node.x), float(node.y))
-                net_surface_tiles[nname][k] = node.heading
-                tile_to_nets.setdefault(k, set()).add(nname)
+                net_surface_tiles[base_name][k] = node.heading
+                tile_to_nets.setdefault(k, set()).add(base_name)
 
     all_pins = valid_in_pins | valid_out_pins
     return RouteResult(
@@ -205,7 +486,8 @@ def build_entities(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     strict_drc: bool = True,
-    use_maze_router: bool = False,
+    use_maze_router: bool = True,
+    engine: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
     """Build Factorio entities and wire connections from DEF and netlist data."""
     def_data["_netlist_data"] = netlist_data
@@ -217,6 +499,7 @@ def build_entities(
 
     # 2. Place components, machines, and inserters
     placement = place_components(def_data, netlist_data)
+    def_data["_placement"] = placement
 
     fabric_entities: list[dict[str, Any]] = []
     floorplan = None
@@ -385,7 +668,7 @@ def build_entities(
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
     debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
     if use_maze_router:
-        routes = route_with_maze_router(def_data, netlist_data, placement)
+        routes = route_with_maze_router(def_data, netlist_data, placement, engine=engine)
     else:
         routes = route_and_resolve_jumpers(
             def_data, netlist_data, placement, debug_trace=debug_trace
@@ -426,8 +709,11 @@ def build_entities(
             f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected: {unpaired_hoods}"
         )
 
-    # 6. Prune dead-end stub belts
-    entities = prune_dead_end_belts(placement.entities, def_data, netlist_data)
+    # 6. Prune dead-end stub belts (only needed for legacy rasterizer)
+    if not use_maze_router:
+        entities = prune_dead_end_belts(placement.entities, def_data, netlist_data)
+    else:
+        entities = list(placement.entities)
     grid_entities = {
         (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities
     }
@@ -476,6 +762,21 @@ def build_entities(
             fatal = [v for v in violations if v.severity == "ERROR"]
             if fatal:
                 raise ValueError(f"Physical DRC failed with {len(fatal)} violation(s)")
+
+    if strict_drc:
+        router_routes = getattr(placement, "router_routes", None) or {}
+        failed_routes = [r for r in router_routes.values() if not r.is_success]
+        if failed_routes:
+            raise ValueError(
+                f"Router failed on {len(failed_routes)} net(s): "
+                + ", ".join(r.net_name for r in failed_routes[:5])
+            )
+        verif_res = getattr(placement, "router_verif_res", None)
+        if verif_res is not None and not verif_res.is_valid:
+            raise ValueError(
+                f"Native router verification failed with {len(verif_res.lvs_errors)} LVS error(s) "
+                f"and {len(verif_res.drc_violations)} DRC violation(s)"
+            )
 
     return entities, wires
 
@@ -713,7 +1014,14 @@ def main() -> int:
     parser.add_argument(
         "--use-maze-router",
         action="store_true",
-        help="Route nets using 3D multi-layer DualLaneMazeRouter",
+        default=True,
+        help="Route nets using 3D multi-layer DualLaneMazeRouter (default: True, Plan of Record)",
+    )
+    parser.add_argument(
+        "--no-maze-router",
+        action="store_false",
+        dest="use_maze_router",
+        help="Disable maze router",
     )
 
     args = parser.parse_args()

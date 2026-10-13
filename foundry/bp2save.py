@@ -423,14 +423,23 @@ script.on_init(function()
         local ent = ents[1]
         if ent and ent.valid then
             if pin.type == "pipe" then
-                -- Place infinity pipe next to input pipe
-                local p = surface.create_entity{{
-                    name = "infinity-pipe",
-                    position = {{px, py - 1}},
-                    force = game.forces.player
-                }}
-                if p then
-                    p.set_infinity_pipe_filter({{name = pin.name, percentage = 1.0, mode = "at-least"}})
+                -- Place infinity pipe on an available adjacent tile to input pipe
+                local p = nil
+                for _, offset in ipairs({{{{ -1, 0 }}, {{ 0, -1 }}, {{ 0, 1 }}, {{ 1, 0 }}}}) do
+                    local cand_pos = {{px + offset[1], py + offset[2]}}
+                    p = surface.create_entity{{
+                        name = "infinity-pipe",
+                        position = cand_pos,
+                        force = game.forces.player
+                    }}
+                    if p then
+                        p.set_infinity_pipe_filter({{name = pin.name, percentage = 1.0, mode = "at-least"}})
+                        log(string.format("INPUT_PIN_PIPE: %s placed infinity-pipe at (%.1f,%.1f)", pin.name, cand_pos[1], cand_pos[2]))
+                        break
+                    end
+                end
+                if not p then
+                    log(string.format("ERROR: Failed to place infinity-pipe for input pin %s at (%.1f,%.1f)", pin.name, px, py))
                 end
             else
                 local dir = ent.direction
@@ -477,14 +486,23 @@ script.on_init(function()
         local ent = ents[1]
         if ent and ent.valid then
             if pin.type == "pipe" then
-                -- Place void infinity pipe
-                local p = surface.create_entity{{
-                    name = "infinity-pipe",
-                    position = {{px + 1, py}},
-                    force = game.forces.player
-                }}
-                if p then
-                    p.set_infinity_pipe_filter({{name = pin.name, percentage = 0.0, mode = "at-most"}})
+                -- Place void infinity pipe on an available adjacent tile
+                local p = nil
+                for _, offset in ipairs({{{{ 1, 0 }}, {{ 0, 1 }}, {{ -1, 0 }}, {{ 0, -1 }}}}) do
+                    local cand_pos = {{px + offset[1], py + offset[2]}}
+                    p = surface.create_entity{{
+                        name = "infinity-pipe",
+                        position = cand_pos,
+                        force = game.forces.player
+                    }}
+                    if p then
+                        p.set_infinity_pipe_filter({{name = pin.name, percentage = 0.0, mode = "at-most"}})
+                        log(string.format("OUTPUT_PIN_PIPE: %s placed void infinity-pipe at (%.1f,%.1f)", pin.name, cand_pos[1], cand_pos[2]))
+                        break
+                    end
+                end
+                if not p then
+                    log(string.format("ERROR: Failed to place void infinity-pipe for output pin %s at (%.1f,%.1f)", pin.name, px, py))
                 end
             else
                 local dir = ent.direction
@@ -661,6 +679,16 @@ def build_save(
                 f"Factorio scenario2map failed with code {res_create.returncode}:\n"
                 f"STDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}"
             )
+
+        log_file = work_dir / "factorio-current.log"
+        if log_file.is_file():
+            pin_lines = [
+                line
+                for line in log_file.read_text().splitlines()
+                if "PIN" in line or "ERROR" in line
+            ]
+            for pl in pin_lines:
+                sys.stderr.write(f"bp2save: {pl}\n")
 
         generated_save = work_dir / "saves" / f"{scenario_name}.zip"
         if not generated_save.is_file():

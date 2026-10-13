@@ -362,6 +362,34 @@ class TestNativeEngine(unittest.TestCase):
         self.assertEqual(water_info["fluid_id"], 1)
         self.assertEqual(oil_info["fluid_id"], 2)
 
+    def test_native_underground_pipe_machine_direct_connection(self) -> None:
+        """Verify direct fluid flow between machine buffer and underground pipe buffer."""
+        if not self.game_bin:
+            self.skipTest("Factorio binary not found on host system.")
+
+        engine = FactorioNativeEngine(self.game_bin)
+        # Source machine buffer connects directly to underground entrance buffer.
+        # Underground exit buffer connects directly to sink machine buffer.
+        # No intermediate surface pipe buffers exist in this network.
+        source_machine = make_fluid_buffer(fluid_id=1, amount=100.0, capacity=1000.0)
+        ug_entrance = make_fluid_buffer(fluid_id=1, amount=0.0, capacity=100.0)
+        ug_exit = make_fluid_buffer(fluid_id=1, amount=0.0, capacity=100.0)
+        sink_machine = make_fluid_buffer(fluid_id=1, amount=0.0, capacity=1000.0)
+
+        buffers = [source_machine, ug_entrance, ug_exit, sink_machine]
+        initial_total = sum(read_fluid_buffer(b)["amount"] for b in buffers)
+        self.assertAlmostEqual(initial_total, 100.0, places=4)
+
+        simulate_pipe_network(engine, buffers, ticks=30)
+
+        # Fluid transfers directly into the sink machine buffer
+        sink_amount = read_fluid_buffer(sink_machine)["amount"]
+        self.assertGreater(sink_amount, 0.0)
+
+        # Total fluid mass stays constant
+        final_total = sum(read_fluid_buffer(b)["amount"] for b in buffers)
+        self.assertAlmostEqual(initial_total, final_total, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

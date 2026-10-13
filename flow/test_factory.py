@@ -308,12 +308,12 @@ script.on_event(defines.events.on_tick, function(event)
                         log(string.format("  INSERTER at (%.1f,%.1f) dir=%s held=%s pickup=(%.1f,%.1f) %s",
                             ins.position.x, ins.position.y, tostring(ins.direction), held, ptx, pty, b_info
                         ))
-                        if (c1 + c2 == 0) or (b_info == "no_belt") then
+                        if (c1 + c2 == 0) or (b_info == "no_belt") or (pf == 0) then
                             local cur_tx = ptx
                             local cur_ty = pty
                             local tr_steps = 0
                             local visited = {{}}
-                            while tr_steps < 2000 do
+                            while tr_steps < 60 do
                                 tr_steps = tr_steps + 1
                                 local cur_b = nil
                                 for _, e in ipairs(surface.find_entities_filtered{{position = {{cur_tx, cur_ty}}}}) do
@@ -344,9 +344,9 @@ script.on_event(defines.events.on_tick, function(event)
                                         end
                                     end
                                 end
-                                if c_tot > 0 then
-                                    log(string.format("    UPSTREAM_ITEMS: found %d items [%s] after %d steps at (%.1f,%.1f) %s",
-                                        c_tot, table.concat(found_items, ","), tr_steps, cur_tx, cur_ty, cur_b.name))
+                                log(string.format("    UPSTREAM_STEP %d: at (%.1f,%.1f) %s dir=%s items=[%s]",
+                                    tr_steps, cur_tx, cur_ty, cur_b.name, tostring(cur_b.direction), table.concat(found_items, ",")))
+                                if (pf > 0) and (c_tot > 0) then
                                     break
                                 end
                                 local bdir = cur_b.direction
@@ -555,6 +555,97 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
 
+        local inf_pipes = surface.find_entities_filtered{{name = "infinity-pipe"}}
+        for _, ip in ipairs(inf_pipes) do
+            local fc = ip.get_fluid_contents()
+            local fc_str = "empty"
+            if fc then
+                for k, v in pairs(fc) do fc_str = string.format("%s:%.1f", k, v) end
+            end
+            local filt = ip.get_infinity_pipe_filter()
+            local filt_str = filt and string.format("%s:%.1f:%s", filt.name, filt.percentage or 1.0, filt.mode or "none") or "no_filter"
+            log(string.format("INFINITY_PIPE: at (%.1f,%.1f) filter=%s fluid=%s", ip.position.x, ip.position.y, filt_str, fc_str))
+            for _, d in ipairs({{{{0, 1}}, {{0, -1}}, {{1, 0}}, {{-1, 0}}}}) do
+                local npos = {{ip.position.x + d[1], ip.position.y + d[2]}}
+                local nents = surface.find_entities_filtered{{position = npos}}
+                for _, ne in ipairs(nents) do
+                    local nfc = ne.get_fluid_contents()
+                    local nfc_str = "empty"
+                    if nfc then
+                        for k, v in pairs(nfc) do nfc_str = string.format("%s:%.1f", k, v) end
+                    end
+                    log(string.format("  ADJ_TO_INFINITY: %s at (%.1f,%.1f) fluid=%s", ne.name, ne.position.x, ne.position.y, nfc_str))
+                end
+            end
+        end
+
+        local water_ip = surface.find_entities_filtered{{position = {{-274.5, 178.5}}}}[1]
+        local crude_ip = surface.find_entities_filtered{{position = {{-274.5, 18.5}}}}[1]
+        if water_ip and crude_ip then
+            local q = {{water_ip}}
+            local parent = {{}}
+            local vis = {{}}
+            local key_start = string.format("%.1f,%.1f", water_ip.position.x, water_ip.position.y)
+            local key_target = string.format("%.1f,%.1f", crude_ip.position.x, crude_ip.position.y)
+            vis[key_start] = true
+            local found_target = false
+            local vis_count = 1
+            while #q > 0 and not found_target do
+                local cur = table.remove(q, 1)
+                local cur_k = string.format("%.1f,%.1f", cur.position.x, cur.position.y)
+                if cur_k == key_target then
+                    found_target = true
+                    break
+                end
+                local candidates = {{}}
+                for _, d in ipairs({{{{0, 1}}, {{0, -1}}, {{1, 0}}, {{-1, 0}}}}) do
+                    local npos = {{cur.position.x + d[1], cur.position.y + d[2]}}
+                    for _, ne in ipairs(surface.find_entities_filtered{{position = npos}}) do
+                        if ne.name == "pipe" or ne.name == "pump" or ne.name == "infinity-pipe" or ne.name == "pipe-to-ground" or ne.type == "assembling-machine" then
+                            table.insert(candidates, ne)
+                        end
+                    end
+                end
+                if cur.name == "pipe-to-ground" then
+                    local ug_dir = cur.direction
+                    local dx, dy = 0, 0
+                    if ug_dir == defines.direction.north then dx, dy = 0, 1
+                    elseif ug_dir == defines.direction.south then dx, dy = 0, -1
+                    elseif ug_dir == defines.direction.east then dx, dy = -1, 0
+                    elseif ug_dir == defines.direction.west then dx, dy = 1, 0
+                    end
+                    for s = 1, 10 do
+                        local upos = {{cur.position.x + dx * s, cur.position.y + dy * s}}
+                        for _, ue in ipairs(surface.find_entities_filtered{{position = upos}}) do
+                            if ue.name == "pipe-to-ground" and (ue.direction + 8) % 16 == ug_dir then
+                                table.insert(candidates, ue)
+                                break
+                            end
+                        end
+                    end
+                end
+                for _, cand in ipairs(candidates) do
+                    local ck = string.format("%.1f,%.1f", cand.position.x, cand.position.y)
+                    if not vis[ck] then
+                        vis[ck] = true
+                        vis_count = vis_count + 1
+                        parent[ck] = cur_k
+                        table.insert(q, cand)
+                    end
+                end
+            end
+            log(string.format("FLUID_PATH_SEARCH: found_target=%s, visited=%d", tostring(found_target), vis_count))
+            if found_target then
+                local path = {{}}
+                local step_k = key_target
+                while step_k do
+                    table.insert(path, step_k)
+                    step_k = parent[step_k]
+                end
+                log(string.format("FLUID_PATH_BETWEEN_WATER_AND_CRUDE (%d steps): %s", #path, table.concat(path, " -> ")))
+            end
+        end
+
         local big_poles = surface.find_entities_filtered{{name = "big-electric-pole"}}
         for _, bp in ipairs(big_poles) do
             local conn = bp.get_wire_connector(defines.wire_connector_id.pole_copper, false)
@@ -642,6 +733,9 @@ end)
             or "NEARBY_BELTS_WITH_ITEMS" in line
             or "UNPOWERED_ENT:" in line
             or "DISCONNECTED_BIG_POLE:" in line
+            or "INFINITY_PIPE:" in line
+            or "ADJ_TO_INFINITY:" in line
+            or "FLUID_PATH_" in line
         ):
             print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:

@@ -149,12 +149,55 @@ class TestLayoutVerifier(unittest.TestCase):
         self.assertEqual(len(res.lvs_errors), 0)
         self.assertGreater(res.delivered_fluids.get("net_water", 0.0), 0.0)
 
+    def test_verifier_underground_pipe_machine_connection(self) -> None:
+        """Verify that an underground pipe connecting directly to machine terminals passes."""
+        # Machine terminal at source (14.5, 472.5) and sink (4.5, 472.5) connected by underground pipe pair
+        entities = [
+            {"name": "pipe-to-ground", "position": {"x": 14.5, "y": 472.5}, "direction": 4},
+            {"name": "pipe-to-ground", "position": {"x": 4.5, "y": 472.5}, "direction": 12},
+        ]
+        net = NetSpec(
+            name="net_water",
+            commodity="water",
+            source_pos=(14.5, 472.5),
+            sink_pos=(4.5, 472.5),
+            is_fluid=True,
+        )
+
+        res = self.verifier.verify_blueprint(entities, nets=[net], ticks=60)
+        self.assertEqual(res.drc_violations, [])
+        self.assertEqual(res.lvs_errors, [])
+        self.assertTrue(res.is_valid)
+        self.assertGreater(res.delivered_fluids.get("net_water", 0.0), 0.0)
+
+    def test_verifier_two_underground_pipe_pairs_mouth_to_mouth(self) -> None:
+        """Verify two underground pipe pairs connected mouth-to-mouth across 19 tiles."""
+        entities = [
+            {"name": "pipe-to-ground", "position": {"x": 33.5, "y": 472.5}, "direction": 4},
+            {"name": "pipe-to-ground", "position": {"x": 24.5, "y": 472.5}, "direction": 12},
+            {"name": "pipe-to-ground", "position": {"x": 23.5, "y": 472.5}, "direction": 4},
+            {"name": "pipe-to-ground", "position": {"x": 14.5, "y": 472.5}, "direction": 12},
+        ]
+        net = NetSpec(
+            name="net_water",
+            commodity="water",
+            source_pos=(33.5, 472.5),
+            sink_pos=(14.5, 472.5),
+            is_fluid=True,
+        )
+
+        res = self.verifier.verify_blueprint(entities, nets=[net], ticks=60)
+        self.assertEqual(res.drc_violations, [])
+        self.assertEqual(res.lvs_errors, [])
+        self.assertTrue(res.is_valid)
+        self.assertGreater(res.delivered_fluids.get("net_water", 0.0), 0.0)
+
     def test_verifier_pipe_span_exceeded(self) -> None:
         """Verify that pipe-to-ground spans exceeding 10 tiles trigger a DRC error."""
         # Pipe-to-ground spanning 12 tiles (limit is 10)
         entities = [
-            {"name": "pipe-to-ground", "position": {"x": 0.5, "y": 0.5}, "direction": 4},
-            {"name": "pipe-to-ground", "position": {"x": 12.5, "y": 0.5}, "direction": 12},
+            {"name": "pipe-to-ground", "position": {"x": 0.5, "y": 0.5}, "direction": 12},
+            {"name": "pipe-to-ground", "position": {"x": 12.5, "y": 0.5}, "direction": 4},
         ]
 
         violations = self.verifier.check_drc(entities)
@@ -307,8 +350,8 @@ class TestLayoutVerifier(unittest.TestCase):
         # Pipe pair: input (1,0) -> output (3,0)
         entities = [
             {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "pipe-to-ground", "position": {"x": 1.5, "y": 0.5}, "direction": 4},
-            {"name": "pipe-to-ground", "position": {"x": 3.5, "y": 0.5}, "direction": 12},
+            {"name": "pipe-to-ground", "position": {"x": 1.5, "y": 0.5}, "direction": 12},
+            {"name": "pipe-to-ground", "position": {"x": 3.5, "y": 0.5}, "direction": 4},
             {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
         ]
 

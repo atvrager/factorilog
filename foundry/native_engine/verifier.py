@@ -13,7 +13,6 @@ from typing import Any
 from foundry.belt_library import (
     DIR_STEPS,
     DIRECTION_NORTH,
-    DIRECTION_SOUTH,
     OPPOSITE_DIR,
 )
 from foundry.blueprint import decode
@@ -80,34 +79,55 @@ def _round_pos(pos: tuple[float, float] | dict[str, float]) -> tuple[int, int]:
     return math.floor(pos[0]), math.floor(pos[1])
 
 
+def filter_core_prototypes(raw_data: dict[str, Any]) -> dict[str, Any]:
+    """Filter prototype database to retain only core Factorio base game prototypes."""
+    filtered: dict[str, Any] = {}
+    for category, items in raw_data.items():
+        if isinstance(items, dict):
+            filtered_items = {}
+            for name, proto in items.items():
+                if isinstance(proto, dict):
+                    if "turbo" in name:
+                        continue
+                    if proto.get("mod") in ("space-age", "elevated-rails", "quality"):
+                        continue
+                    filtered_items[name] = proto
+                else:
+                    filtered_items[name] = proto
+            filtered[category] = filtered_items
+        else:
+            filtered[category] = items
+    return filtered
+
+
 def load_game_prototypes(
     dump_source: dict[str, Any] | str | Path | None = None,
     game_bin: Path | None = None,
 ) -> dict[str, Any]:
     """Load Factorio prototype database dynamically from the game environment."""
     if isinstance(dump_source, dict):
-        return dump_source
+        return filter_core_prototypes(dump_source)
 
     if dump_source is not None:
         path = Path(dump_source)
         if path.is_file():
-            return json.loads(path.read_text(encoding="utf-8"))
+            return filter_core_prototypes(json.loads(path.read_text(encoding="utf-8")))
 
-    # Check live game dump from script-output
-    default_dump = Path("~/.factorio/script-output/data-raw-dump.json").expanduser()
-    if default_dump.is_file():
-        try:
-            return json.loads(default_dump.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Check hermetic repository fixture
+    # Check hermetic repository fixture first for core base game prototypes
     repo_fixture = (
         Path(__file__).resolve().parent.parent.parent / "test" / "data" / "dump-fixture.json"
     )
     if repo_fixture.is_file():
         try:
-            return json.loads(repo_fixture.read_text(encoding="utf-8"))
+            return filter_core_prototypes(json.loads(repo_fixture.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+
+    # Check live game dump from script-output
+    default_dump = Path("~/.factorio/script-output/data-raw-dump.json").expanduser()
+    if default_dump.is_file():
+        try:
+            return filter_core_prototypes(json.loads(default_dump.read_text(encoding="utf-8")))
         except Exception:
             pass
 
@@ -116,7 +136,7 @@ def load_game_prototypes(
     if bin_path and bin_path.is_file():
         subprocess.run([str(bin_path), "--dump-data"], check=False, capture_output=True)
         if default_dump.is_file():
-            return json.loads(default_dump.read_text(encoding="utf-8"))
+            return filter_core_prototypes(json.loads(default_dump.read_text(encoding="utf-8")))
 
     return {}
 
@@ -298,8 +318,8 @@ class NativeLayoutVerifier:
                 continue
             pos_a = _round_pos(pg_a["position"])
             dir_a = pg_a.get("direction", DIRECTION_NORTH)
-            dx, dy = DIR_STEPS.get(dir_a, (0, -1))
-            opp_dir = OPPOSITE_DIR.get(dir_a, DIRECTION_SOUTH)
+            ug_dir = OPPOSITE_DIR.get(dir_a, dir_a)
+            dx, dy = DIR_STEPS.get(ug_dir, (0, -1))
             pg_name = pg_a.get("name", "pipe-to-ground")
             max_pipe_span = self.get_entity_span(pg_name)
 
@@ -315,7 +335,7 @@ class NativeLayoutVerifier:
                     pos_b = _round_pos(pg_b["position"])
                     if pos_b == target_pos:
                         dir_b = pg_b.get("direction", DIRECTION_NORTH)
-                        if dir_b == opp_dir:
+                        if dir_b == ug_dir:
                             if step > max_pipe_span:
                                 violations.append(
                                     DrcViolation(
@@ -390,18 +410,46 @@ class NativeLayoutVerifier:
         neighbors: set[tuple[int, int]] = set()
         name = ent.get("name", "")
 
-        # 1. Surface orthogonal neighbors
-        for dx, dy in DIR_STEPS.values():
-            nbr_pos = (pos[0] + dx, pos[1] + dy)
-            nbr_ent = tile_map.get(nbr_pos)
-            if nbr_ent and "pipe" in nbr_ent.get("name", ""):
-                neighbors.add(nbr_pos)
+        # 1. Surface pipe connections
+        if name == "pipe":
+            for dx, dy in DIR_STEPS.values():
+                nbr_pos = (pos[0] + dx, pos[1] + dy)
+                nbr_ent = tile_map.get(nbr_pos)
+                if not nbr_ent:
+                    continue
+                nbr_name = nbr_ent.get("name", "")
+                if nbr_name == "pipe":
+                    neighbors.add(nbr_pos)
+                elif "pipe-to-ground" in nbr_name:
+                    nbr_dir = nbr_ent.get("direction", DIRECTION_NORTH)
+                    nbr_mouth = (
+                        nbr_pos[0] + DIR_STEPS[nbr_dir][0],
+                        nbr_pos[1] + DIR_STEPS[nbr_dir][1],
+                    )
+                    if nbr_mouth == pos:
+                        neighbors.add(nbr_pos)
+        elif "pipe-to-ground" in name:
+            dir_a = ent.get("direction", DIRECTION_NORTH)
+            mouth_pos = (pos[0] + DIR_STEPS[dir_a][0], pos[1] + DIR_STEPS[dir_a][1])
+            nbr_ent = tile_map.get(mouth_pos)
+            if nbr_ent:
+                nbr_name = nbr_ent.get("name", "")
+                if nbr_name == "pipe":
+                    neighbors.add(mouth_pos)
+                elif "pipe-to-ground" in nbr_name:
+                    nbr_dir = nbr_ent.get("direction", DIRECTION_NORTH)
+                    nbr_mouth = (
+                        mouth_pos[0] + DIR_STEPS[nbr_dir][0],
+                        mouth_pos[1] + DIR_STEPS[nbr_dir][1],
+                    )
+                    if nbr_mouth == pos:
+                        neighbors.add(mouth_pos)
 
         # 2. Subterranean underground leap
         if "pipe-to-ground" in name:
             dir_a = ent.get("direction", DIRECTION_NORTH)
-            dx, dy = DIR_STEPS.get(dir_a, (0, -1))
-            opp_dir = (dir_a + 8) % 16
+            ug_dir = OPPOSITE_DIR.get(dir_a, dir_a)
+            dx, dy = DIR_STEPS.get(ug_dir, (0, -1))
             max_span = self.get_entity_span(name)
 
             for step in range(1, max_span + 1):
@@ -411,7 +459,7 @@ class NativeLayoutVerifier:
                     cand_name = cand.get("name", "")
                     if cand_name == name:
                         cand_dir = cand.get("direction", DIRECTION_NORTH)
-                        if cand_dir == opp_dir:
+                        if cand_dir == ug_dir:
                             neighbors.add(target_pos)
                         # Intervening same-tier pipe ends underground span
                         break
@@ -550,7 +598,7 @@ class NativeLayoutVerifier:
         src: tuple[int, int],
         snk: tuple[int, int],
         tile_map: dict[tuple[int, int], dict[str, Any]],
-        max_hops: int = 500,
+        max_hops: int = 5000,
     ) -> list[tuple[int, int]]:
         """Trace downstream belt route from source to sink."""
         path: list[tuple[int, int]] = [src]

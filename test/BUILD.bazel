@@ -298,6 +298,16 @@ py_test(
     name = "router_test",
     size = "medium",
     srcs = ["test_router.py"],
+    data = [
+        "//flow:automation_science.def",
+        "//flow:automation_science_netlist.json",
+        "//flow:logistic_science.def",
+        "//flow:logistic_science_netlist.json",
+        "//flow:military_science.def",
+        "//flow:military_science_netlist.json",
+        "//flow:chemical_science.def",
+        "//flow:chemical_science_netlist.json",
+    ],
     local = True,
     main = "test_router.py",
     tags = [

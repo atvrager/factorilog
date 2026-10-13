@@ -811,42 +811,11 @@ proc do_untangle {block dbu} {
 }
 
 # --- route ----------------------------------------------------------
-# The router connects blocks across four layers:
-# M1 and M2 for surface tracks, M3 and M4 for underground tunnels.
-# FastRoute runs global routing. TritonRoute runs detailed routing.
-set has_circuit 0
-foreach inst [$block getInsts] {
-    set master_name [[$inst getMaster] getName]
-    if {[string match "*combinator*" $master_name] || [string match "*display*" $master_name] || [string match "*switch*" $master_name]} {
-        set has_circuit 1
-        break
-    }
-}
-set tech [ord::get_db_tech]
-foreach layer [$tech getLayers] {
-    if {[$layer getType] == "ROUTING"} {
-        set lname [$layer getName]
-        ::drt::detailed_route_set_unidirectional_layer $lname
-    }
-}
-set_routing_layers -signal M1-M2
-
-if {[info exists DO_UNTANGLE] && $DO_UNTANGLE == "1"} {
-    puts "factorilog: running do_untangle"
-    do_untangle $block $dbu
-}
-
-if {[info exists LAYER_ADJUSTMENT] && $LAYER_ADJUSTMENT != ""} {
-    set_global_routing_layer_adjustment M1 $LAYER_ADJUSTMENT
-    set_global_routing_layer_adjustment M2 $LAYER_ADJUSTMENT
-}
-global_route -verbose
-
-set droute_iters 20
-if {[info exists DROUTE_END_ITER]} {
-    set droute_iters $DROUTE_END_ITER
-}
-detailed_route -droute_end_iter $droute_iters -output_drc route_drc.rpt -verbose 1
+# Routing is handled exclusively by native 3D DualLaneMazeRouter.
+# OpenROAD TritonRoute is deleted per new Plan of Record (POR).
+puts "factorilog: OpenROAD router bypassed; routing handled by native 3D maze router"
+set fp [open "route_drc.rpt" w]
+close $fp
 
 set unrouted_count 0
 foreach net [$block getNets] {

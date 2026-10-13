@@ -32,6 +32,7 @@ class DualLaneMazeRouter:
         engine: FactorioNativeEngine | None = None,
         prototypes: dict[str, Any] | None = None,
         obstacles: set[tuple[int, int]] | None = None,
+        component_headings: dict[tuple[int, int], int] | None = None,
     ) -> None:
         """Initialize the router with spatial bounds and optional engine."""
         self.min_x = min_x
@@ -41,11 +42,12 @@ class DualLaneMazeRouter:
         self.engine = engine
         self.prototypes = prototypes
         self.obstacles = set(obstacles) if obstacles else set()
+        self.component_headings = dict(component_headings) if component_headings else {}
 
     def route(
         self,
         nets: list[RouterNetSpec],
-        max_iterations: int = 30,
+        max_iterations: int = 60,
         verify: bool = True,
         ticks: int = 60,
     ) -> tuple[dict[str, RouteResult], list[dict[str, Any]], VerificationResult | None]:
@@ -57,7 +59,9 @@ class DualLaneMazeRouter:
             max_y=self.max_y,
             prototypes=self.prototypes,
             obstacles=self.obstacles,
+            component_headings=self.component_headings,
         )
+        grid.register_terminals(nets)
 
         # Execute PathFinder routing
         routes = route_all_nets(nets, grid, max_iterations=max_iterations)

@@ -39,7 +39,7 @@ LANE_BOTH = 2
 LAYER_SURFACE = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RouteNode:
     """A directed state node in the 5D routing graph."""
 
@@ -55,7 +55,7 @@ class RouteNode:
         return (self.x, self.y)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RouteEdge:
     """A directed transition between two routing nodes."""
 
@@ -79,6 +79,9 @@ class RouterNetSpec:
     tier_preference: str | None = None
     start_heading: int | None = None
     end_heading: int | None = None
+    terminal_heading: int | None = None
+    source_inward_dir: int | None = None
+    sink_inward_dir: int | None = None
 
 
 @dataclass

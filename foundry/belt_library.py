@@ -31,7 +31,6 @@ MAX_UNDERGROUND_SPAN: dict[str, int] = {
     "underground-belt": 5,
     "fast-underground-belt": 7,
     "express-underground-belt": 9,
-    "turbo-underground-belt": 11,
 }
 
 # Inserter pickup and drop offsets by cardinal orientation ((pickup_dx, pickup_dy), (drop_dx, drop_dy)).
