@@ -322,7 +322,17 @@ py_test(
     ],
 )
 
-
-
-
-
+py_test(
+    name = "analytical_placer_test",
+    size = "small",
+    srcs = ["test_analytical_placer.py"],
+    data = [
+        "data/dump-fixture.json",
+        "//flow:automation_science_chassis.def",
+        "//flow:automation_science_netlist.json",
+    ],
+    main = "test_analytical_placer.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)

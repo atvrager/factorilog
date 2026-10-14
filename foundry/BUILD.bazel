@@ -47,6 +47,7 @@ py_binary(
 py_library(
     name = "pdk_lib",
     srcs = [
+        "analytical_placer.py",
         "belt_drc.py",
         "belt_fuzzer.py",
         "belt_library.py",

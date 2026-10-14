@@ -146,6 +146,7 @@ def build_all(
     }
     (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
     ranks_text = netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans)
+    auto_side = 1
     try:
         from macro_floorplan import MacroFloorplanner
 
@@ -159,6 +160,19 @@ def build_all(
         )
     except Exception:
         pass
+    try:
+        from analytical_placer import AnalyticalPlacer
+
+        extra_grids = [(auto_side, auto_side)] if auto_side > 3 else None
+        ranks_text += AnalyticalPlacer().emit_analytical_tcl(
+            nl,
+            merge_plans=plans,
+            split_plans=split_plans,
+            balancer_plans=balancer_plans,
+            extra_chassis_grids=extra_grids,
+        )
+    except Exception as exc:
+        print(f"netbuild: analytical placer warning: {exc}", file=sys.stderr)
     (out / "ranks.tcl").write_text(ranks_text)
     counts: dict[str, int] = {}
     for inst in nl.instances:

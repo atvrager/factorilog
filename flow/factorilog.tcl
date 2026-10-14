@@ -113,7 +113,154 @@ proc get_chassis_block_order {w h} {
     return $cells
 }
 
-if {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} {
+if {![info exists USE_ANALYTICAL_PLACEMENT]} {
+    set USE_ANALYTICAL_PLACEMENT 1
+}
+
+if {[info exists USE_ANALYTICAL_PLACEMENT] && $USE_ANALYTICAL_PLACEMENT == "1" && [info exists analytical_coords]} {
+    # Analytical Placement with Directed Legalization
+    set is_chassis [expr {[info exists USE_CHASSIS] && $USE_CHASSIS == "1"}]
+    if {$is_chassis} {
+        if {![info exists CHASSIS_GRID_W] || $CHASSIS_GRID_W <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_W] && $AUTO_CHASSIS_GRID_W > 0} {
+                set CHASSIS_GRID_W $AUTO_CHASSIS_GRID_W
+            } else {
+                set CHASSIS_GRID_W 1
+            }
+        }
+        if {![info exists CHASSIS_GRID_H] || $CHASSIS_GRID_H <= 0} {
+            if {[info exists AUTO_CHASSIS_GRID_H] && $AUTO_CHASSIS_GRID_H > 0} {
+                set CHASSIS_GRID_H $AUTO_CHASSIS_GRID_H
+            } else {
+                set CHASSIS_GRID_H 1
+            }
+        }
+        if {![info exists CHASSIS_PITCH]} { set CHASSIS_PITCH 100 }
+        if {![info exists CHASSIS_CORE_W]} { set CHASSIS_CORE_W 94 }
+        if {![info exists CHASSIS_CORE_H]} { set CHASSIS_CORE_H 94 }
+        if {![info exists CHASSIS_CHANNEL_W]} { set CHASSIS_CHANNEL_W 6 }
+
+        set margin_x [expr {($CHASSIS_PITCH - $CHASSIS_CORE_W) / 2}]
+        set margin_y [expr {($CHASSIS_PITCH - $CHASSIS_CORE_H) / 2}]
+        set die_w [expr {$CHASSIS_GRID_W * $CHASSIS_PITCH}]
+        set die_h [expr {$CHASSIS_GRID_H * $CHASSIS_PITCH}]
+        set core_lo_x $margin_x
+        set core_lo_y $margin_y
+        set core_hi_x [expr {$die_w - $margin_x}]
+        set core_hi_y [expr {$die_h - $margin_y}]
+
+        puts "factorilog: analytical placement on chassis (${CHASSIS_GRID_W}x${CHASSIS_GRID_H}): die ${die_w}x${die_h}, core margin ${margin_x}x${margin_y}"
+
+        initialize_floorplan -die_area [list 0 0 $die_w $die_h] \
+            -core_area [list $core_lo_x $core_lo_y $core_hi_x $core_hi_y] \
+            -site tile
+
+        # Create placement blockages on street channels and outer margins
+        create_blockage -region [list 0 0 $die_w $margin_y]
+        set top_y [expr {($CHASSIS_GRID_H - 1) * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+        create_blockage -region [list 0 $top_y $die_w $die_h]
+        create_blockage -region [list 0 0 $margin_x $die_h]
+        set right_x [expr {($CHASSIS_GRID_W - 1) * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+        create_blockage -region [list $right_x 0 $die_w $die_h]
+
+        for {set by 0} {$by < [expr {$CHASSIS_GRID_H - 1}]} {incr by} {
+            set y1 [expr {$by * $CHASSIS_PITCH + $margin_y + $CHASSIS_CORE_H}]
+            set y2 [expr {$y1 + $CHASSIS_CHANNEL_W}]
+            create_blockage -region [list 0 $y1 $die_w $y2]
+        }
+
+        for {set bx 0} {$bx < [expr {$CHASSIS_GRID_W - 1}]} {incr bx} {
+            set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x + $CHASSIS_CORE_W}]
+            set x2 [expr {$x1 + $CHASSIS_CHANNEL_W}]
+            create_blockage -region [list $x1 0 $x2 $die_h]
+        }
+
+        if {[info exists CHASSIS_EMPTY_BLOCKS] && $CHASSIS_EMPTY_BLOCKS != ""} {
+            foreach blk $CHASSIS_EMPTY_BLOCKS {
+                set bx [lindex $blk 0]
+                set by [lindex $blk 1]
+                set x1 [expr {$bx * $CHASSIS_PITCH + $margin_x}]
+                set y1 [expr {$by * $CHASSIS_PITCH + $margin_y}]
+                set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+                set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+                create_blockage -region [list $x1 $y1 $x2 $y2]
+            }
+        } elseif {$CHASSIS_GRID_W >= 3 && $CHASSIS_GRID_H >= 3} {
+            set mid_bx [expr {($CHASSIS_GRID_W - 1) / 2}]
+            set mid_by [expr {($CHASSIS_GRID_H - 1) / 2}]
+            set x1 [expr {$mid_bx * $CHASSIS_PITCH + $margin_x}]
+            set y1 [expr {$mid_by * $CHASSIS_PITCH + $margin_y}]
+            set x2 [expr {$x1 + $CHASSIS_CORE_W}]
+            set y2 [expr {$y1 + $CHASSIS_CORE_H}]
+            create_blockage -region [list $x1 $y1 $x2 $y2]
+        }
+
+        set ch_dict_name "analytical_chassis_${CHASSIS_GRID_W}x${CHASSIS_GRID_H}"
+        if {[info exists $ch_dict_name]} {
+            set active_coords [set $ch_dict_name]
+        } elseif {[info exists analytical_chassis_1x1]} {
+            set active_coords $analytical_chassis_1x1
+        } else {
+            set active_coords $analytical_coords
+        }
+    } else {
+        set die_w $analytical_die_w
+        set die_h $analytical_die_h
+        set core_lo_x $analytical_core_lo_x
+        set core_lo_y $analytical_core_lo_y
+        set core_hi_x $analytical_core_hi_x
+        set core_hi_y $analytical_core_hi_y
+        set core_w [expr {$core_hi_x - $core_lo_x}]
+        set core_h [expr {$core_hi_y - $core_lo_y}]
+
+        puts "factorilog: analytical floorplan: die ${die_w}x${die_h}, core ${core_w}x${core_h}"
+
+        initialize_floorplan -die_area "0 0 $die_w $die_h" \
+            -core_area "$core_lo_x $core_lo_y $core_hi_x $core_hi_y" \
+            -site tile
+
+        set active_coords $analytical_coords
+    }
+
+    make_tracks
+
+    dict for {iname xy} $active_coords {
+        set dinst [$block findInst $iname]
+        if {$dinst != "NULL" && $dinst != ""} {
+            set rx [lindex $xy 0]
+            set ry [lindex $xy 1]
+            $dinst setLocation [expr {int($rx * $dbu)}] [expr {int($ry * $dbu)}]
+            $dinst setPlacementStatus PLACED
+        }
+    }
+
+    set unplaced_x [expr {$core_lo_x + 6}]
+    set unplaced_y [expr {$core_lo_y + 6}]
+    foreach inst [$block getInsts] {
+        if {[$inst getPlacementStatus] != "PLACED"} {
+            set master [$inst getMaster]
+            set dw [expr {[$master getWidth] / $dbu}]
+            set dh [expr {[$master getHeight] / $dbu}]
+            if {$unplaced_x + $dw > [expr {$core_hi_x - 6}]} {
+                set unplaced_x [expr {$core_lo_x + 6}]
+                set unplaced_y [expr {$unplaced_y + $dh + 4}]
+            }
+            $inst setLocation [expr {int($unplaced_x * $dbu)}] [expr {int($unplaced_y * $dbu)}]
+            $inst setPlacementStatus PLACED
+            set unplaced_x [expr {$unplaced_x + $dw + 6}]
+        }
+    }
+
+    set_io_pin_constraint -direction input -region left:*
+    set_io_pin_constraint -direction output -region right:*
+    place_pins -hor_layers M1 -ver_layers M2
+
+    detailed_placement
+    if {[catch {check_placement} problem]} {
+        error "factorilog: placement check failed: $problem"
+    }
+
+} elseif {[info exists USE_ROW_PLACEMENT] && $USE_ROW_PLACEMENT == "1" && $has_ranks} {
     # Structured Linear Row Placement:
     # Arrange machines in horizontal rows by recipe topological depth.
     set pad_between [expr {max(8, $CELL_PAD_SITES)}]
@@ -808,6 +955,10 @@ proc do_untangle {block dbu} {
 
         }
     }
+}
+
+if {[info exists DO_UNTANGLE] && $DO_UNTANGLE == "1"} {
+    do_untangle $block $dbu
 }
 
 # --- route ----------------------------------------------------------

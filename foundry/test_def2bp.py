@@ -78,7 +78,9 @@ class TestDef2Bp(unittest.TestCase):
 
     def test_build_entities(self) -> None:
         def_data = def2bp.parse_def(MINI_DEF)
-        entities, wires = def2bp.build_entities(def_data, MINI_NETLIST, strict_drc=False)
+        entities, wires = def2bp.build_entities(
+            def_data, MINI_NETLIST, strict_drc=False, use_maze_router=False
+        )
         self.assertIsInstance(wires, list)
 
         # Look up by name
