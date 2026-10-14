@@ -33,9 +33,25 @@ except ImportError:
     )
 
 try:
-    from foundry.entity_helpers import entity_size, get_underground_span
+    from foundry.entity_helpers import (
+        entity_collision_half_size,
+        entity_size,
+        get_pole_supply_radius,
+        get_pole_wire_reach,
+        get_underground_span,
+        is_electric_consumer,
+        is_electric_pole,
+    )
 except ImportError:
-    from entity_helpers import entity_size, get_underground_span
+    from entity_helpers import (
+        entity_collision_half_size,
+        entity_size,
+        get_pole_supply_radius,
+        get_pole_wire_reach,
+        get_underground_span,
+        is_electric_consumer,
+        is_electric_pole,
+    )
 
 try:
     from foundry.pump_insertion import (
@@ -197,6 +213,10 @@ class BeltDrcChecker:
 
         # 13. Check pipeline extent limit (Rule DRC-16)
         violations.extend(self._check_pipeline_extent(entities, tile_map))
+
+        # 14. Check electric pole power coverage and PDN connectivity (Rule DRC-17)
+        if any(is_electric_pole(e.get("name", "")) for e in entities):
+            violations.extend(self._check_power_coverage(entities, wires or []))
 
         return violations
 
@@ -956,7 +976,7 @@ class BeltDrcChecker:
                 ent_conns[id1].add(c1)
                 ent_conns[id2].add(c2)
 
-                # Rule DRC-09: Wire reach distance <= 9.0 tiles
+                # Rule DRC-09: Wire reach distance <= entity wire reach limit
                 e1 = ent_by_num.get(id1)
                 e2 = ent_by_num.get(id2)
                 if e1 and e2:
@@ -965,11 +985,15 @@ class BeltDrcChecker:
                     x1, y1 = float(p1.get("x", 0)), float(p1.get("y", 0))
                     x2, y2 = float(p2.get("x", 0)), float(p2.get("y", 0))
                     dist = math.hypot(x1 - x2, y1 - y2)
-                    if dist > 9.0:
+                    reach_limit = min(
+                        get_pole_wire_reach(e1.get("name", ""), 9.0),
+                        get_pole_wire_reach(e2.get("name", ""), 9.0),
+                    )
+                    if dist > reach_limit:
                         violations.append(
                             DrcViolation(
                                 code="DRC-09",
-                                message=f"Wire distance {dist:.2f} between {e1.get('name')} (#{id1}) and {e2.get('name')} (#{id2}) exceeds 9.0 tiles limit",
+                                message=f"Wire distance {dist:.2f} between {e1.get('name')} (#{id1}) and {e2.get('name')} (#{id2}) exceeds {reach_limit:.1f} tiles limit",
                                 x=x1,
                                 y=y1,
                             )
@@ -1330,6 +1354,157 @@ class BeltDrcChecker:
                         ),
                         x=min_x,
                         y=min_y,
+                    )
+                )
+
+        return violations
+
+    def _check_power_coverage(
+        self,
+        entities: list[dict[str, Any]],
+        wires: list[list[int]],
+    ) -> list[DrcViolation]:
+        """Verify electric pole coverage and copper PDN connectivity (Rule DRC-17)."""
+        violations: list[DrcViolation] = []
+        ent_by_num: dict[int, dict[str, Any]] = {}
+        for ent in entities:
+            num = ent.get("entity_number")
+            if num is not None:
+                inum = int(num)
+                if inum in ent_by_num:
+                    pos = ent.get("position", {})
+                    x = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+                    y = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+                    prev = ent_by_num[inum]
+                    violations.append(
+                        DrcViolation(
+                            code="DRC-17",
+                            message=(
+                                f"Duplicate entity_number #{inum} shared by {ent.get('name')} "
+                                f"at ({x}, {y}) and {prev.get('name')}"
+                            ),
+                            x=x,
+                            y=y,
+                        )
+                    )
+                else:
+                    ent_by_num[inum] = ent
+
+        poles: list[dict[str, Any]] = [e for e in entities if is_electric_pole(e.get("name", ""))]
+        if not poles:
+            return violations
+
+        # Build copper wire adjacency across poles and power switches
+        copper_adj: dict[int, set[int]] = collections.defaultdict(set)
+        for w in wires:
+            if len(w) >= 4:
+                id1, c1, id2, c2 = int(w[0]), int(w[1]), int(w[2]), int(w[3])
+                if c1 in (5, 6) or c2 in (5, 6):
+                    e1 = ent_by_num.get(id1)
+                    e2 = ent_by_num.get(id2)
+                    n1 = e1.get("name", "") if e1 else ""
+                    n2 = e2.get("name", "") if e2 else ""
+                    valid1 = e1 is not None and (is_electric_pole(n1) or n1 == "power-switch")
+                    valid2 = e2 is not None and (is_electric_pole(n2) or n2 == "power-switch")
+                    if not valid1 or not valid2:
+                        bad_ent = e1 or e2
+                        bpos = bad_ent.get("position", {}) if bad_ent else {}
+                        bx = float(bpos.get("x", 0)) if isinstance(bpos, dict) else 0.0
+                        by = float(bpos.get("y", 0)) if isinstance(bpos, dict) else 0.0
+                        violations.append(
+                            DrcViolation(
+                                code="DRC-17",
+                                message=(
+                                    f"Copper wire [{id1}, {c1}, {id2}, {c2}] connects invalid "
+                                    f"endpoint(s) ({n1 or 'missing'} #{id1}, {n2 or 'missing'} #{id2})"
+                                ),
+                                x=bx,
+                                y=by,
+                            )
+                        )
+                    else:
+                        copper_adj[id1].add(id2)
+                        copper_adj[id2].add(id1)
+
+        # Identify main connected component of electric poles when copper wires are present
+        main_pole_ids: set[int] = set()
+        numbered_poles = [p for p in poles if p.get("entity_number") is not None]
+        if wires and len(numbered_poles) > 1:
+            visited: set[int] = set()
+            best_comp: set[int] = set()
+            for p in numbered_poles:
+                pnum = int(p["entity_number"])
+                if pnum in visited:
+                    continue
+                comp_poles: set[int] = set()
+                queue = collections.deque([pnum])
+                visited.add(pnum)
+                while queue:
+                    curr = queue.popleft()
+                    curr_ent = ent_by_num.get(curr)
+                    if curr_ent and is_electric_pole(curr_ent.get("name", "")):
+                        comp_poles.add(curr)
+                    for nb in copper_adj.get(curr, ()):
+                        if nb not in visited:
+                            visited.add(nb)
+                            queue.append(nb)
+                if len(comp_poles) > len(best_comp):
+                    best_comp = comp_poles
+            main_pole_ids = best_comp
+
+        # Check every electric consumer for pole supply coverage and main PDN connectivity
+        consumers = [e for e in entities if is_electric_consumer(e.get("name", ""))]
+        for ent in consumers:
+            ename = ent.get("name", "")
+            pos = ent.get("position", {})
+            ex = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            ey = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            cx, cy = entity_collision_half_size(ename, ent.get("direction", DIRECTION_NORTH))
+
+            covering_poles: list[dict[str, Any]] = []
+            for p in poles:
+                ppos = p.get("position", {})
+                px = float(ppos.get("x", 0)) if isinstance(ppos, dict) else float(ppos[0])
+                py = float(ppos.get("y", 0)) if isinstance(ppos, dict) else float(ppos[1])
+                p_radius = get_pole_supply_radius(p.get("name", ""))
+                max_reach = p_radius + max(cx, cy)
+                if abs(ex - px) > max_reach or abs(ey - py) > max_reach:
+                    continue
+                if (
+                    max(
+                        max(0.0, abs(ex - px) - cx),
+                        max(0.0, abs(ey - py) - cy),
+                    )
+                    <= p_radius
+                ):
+                    covering_poles.append(p)
+
+            if not covering_poles:
+                violations.append(
+                    DrcViolation(
+                        code="DRC-17",
+                        message=(
+                            f"Unpowered entity {ename} at ({ex}, {ey}) is outside "
+                            f"electric pole supply area"
+                        ),
+                        x=ex,
+                        y=ey,
+                    )
+                )
+            elif main_pole_ids and not any(
+                int(p["entity_number"]) in main_pole_ids
+                for p in covering_poles
+                if p.get("entity_number") is not None
+            ):
+                violations.append(
+                    DrcViolation(
+                        code="DRC-17",
+                        message=(
+                            f"Entity {ename} at ({ex}, {ey}) is covered only by "
+                            f"disconnected electric pole(s) not wired to the main PDN"
+                        ),
+                        x=ex,
+                        y=ey,
                     )
                 )
 

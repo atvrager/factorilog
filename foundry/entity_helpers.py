@@ -52,6 +52,18 @@ _PROTOTYPE_SPANS: dict[str, int] = {
     "express-underground-belt": 9,
     "pipe-to-ground": 10,
 }
+_PROTOTYPE_POLE_SUPPLY: dict[str, float] = {
+    "small-electric-pole": 2.5,
+    "medium-electric-pole": 3.5,
+    "big-electric-pole": 2.0,
+    "substation": 9.0,
+}
+_PROTOTYPE_POLE_WIRE: dict[str, float] = {
+    "small-electric-pole": 7.5,
+    "medium-electric-pole": 9.0,
+    "big-electric-pole": 32.0,
+    "substation": 18.0,
+}
 
 
 def register_underground_span(name: str, span: int) -> None:
@@ -62,6 +74,46 @@ def register_underground_span(name: str, span: int) -> None:
 def get_underground_span(name: str, default: int = 5) -> int:
     """Return maximum underground span for named entity from prototype data."""
     return _PROTOTYPE_SPANS.get(name, default)
+
+
+def get_pole_supply_radius(name: str, default: float = 3.5) -> float:
+    """Return electric supply area distance for named pole from prototype data."""
+    return _PROTOTYPE_POLE_SUPPLY.get(name, default)
+
+
+def get_pole_wire_reach(name: str, default: float = 9.0) -> float:
+    """Return maximum wire reach distance for named entity from prototype data."""
+    return _PROTOTYPE_POLE_WIRE.get(name, default)
+
+
+def is_electric_pole(name: str) -> bool:
+    """Return True if entity name is an electric pole or substation."""
+    return "electric-pole" in name or "substation" in name or name in _PROTOTYPE_POLE_SUPPLY
+
+
+def is_electric_consumer(name: str) -> bool:
+    """Return True if entity name consumes electric power."""
+    if not name or name in ("burner-inserter", "constant-combinator", "display-panel"):
+        return False
+    return any(
+        k in name
+        for k in (
+            "assembling-machine",
+            "electric-furnace",
+            "chemical-plant",
+            "oil-refinery",
+            "centrifuge",
+            "rocket-silo",
+            "electric-mining-drill",
+            "pumpjack",
+            "inserter",
+            "pump",
+            "combinator",
+            "lab",
+            "radar",
+            "lamp",
+        )
+    )
 
 
 def get_compatible_underground_belt(min_span: int, preferred_name: str | None = None) -> str:
@@ -105,7 +157,7 @@ def entity_bounding_box(proto: dict[str, Any]) -> tuple[float, float]:
 
 
 def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
-    """Register prototype dimensions and spans from prototype data."""
+    """Register prototype dimensions, spans, and pole parameters from prototype data."""
     for key, value in prototypes.items():
         if isinstance(value, dict):
             if "collision_box" in value:
@@ -120,6 +172,10 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
             span = _extract_proto_span(value)
             if span is not None:
                 _PROTOTYPE_SPANS[key] = span
+            if "supply_area_distance" in value:
+                _PROTOTYPE_POLE_SUPPLY[key] = float(value["supply_area_distance"])
+            if "maximum_wire_distance" in value:
+                _PROTOTYPE_POLE_WIRE[key] = float(value["maximum_wire_distance"])
             for sub_key, sub_val in value.items():
                 if isinstance(sub_val, dict):
                     if "collision_box" in sub_val:
@@ -134,6 +190,10 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
                     sub_span = _extract_proto_span(sub_val)
                     if sub_span is not None:
                         _PROTOTYPE_SPANS[sub_key] = sub_span
+                    if "supply_area_distance" in sub_val:
+                        _PROTOTYPE_POLE_SUPPLY[sub_key] = float(sub_val["supply_area_distance"])
+                    if "maximum_wire_distance" in sub_val:
+                        _PROTOTYPE_POLE_WIRE[sub_key] = float(sub_val["maximum_wire_distance"])
 
 
 def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
@@ -154,6 +214,7 @@ def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, flo
         or "chemical-plant" in name
         or "centrifuge" in name
         or "lab" in name
+        or "radar" in name
     ):
         return 3.0, 3.0
     if (
@@ -161,6 +222,8 @@ def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, flo
         or "stone-furnace" in name
         or "power-switch" in name
         or "boiler" in name
+        or "big-electric-pole" in name
+        or "substation" in name
     ):
         return 2.0, 2.0
     if "pump" in name:
@@ -188,9 +251,15 @@ def entity_collision_half_size(name: str, direction: int = DIRECTION_NORTH) -> t
         or "chemical-plant" in name
         or "centrifuge" in name
         or "lab" in name
+        or "radar" in name
     ):
         return 1.2, 1.2
-    if "furnace" in name or "power-switch" in name:
+    if (
+        "furnace" in name
+        or "power-switch" in name
+        or "big-electric-pole" in name
+        or "substation" in name
+    ):
         return 0.7, 0.7
     if "pump" in name:
         if direction in (DIRECTION_EAST, DIRECTION_WEST):
@@ -199,39 +268,27 @@ def entity_collision_half_size(name: str, direction: int = DIRECTION_NORTH) -> t
     return 0.15, 0.15
 
 
-def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> list[dict[str, Any]]:
+def check_power(
+    entities: list[dict[str, Any]], supply_radius: float | None = None
+) -> list[dict[str, Any]]:
     """Return list of powered entities lacking electric pole supply coverage."""
-    poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
-    powered = [
-        e
-        for e in entities
-        if any(
-            k in e.get("name", "")
-            for k in (
-                "assembling-machine",
-                "electric-furnace",
-                "chemical-plant",
-                "oil-refinery",
-                "centrifuge",
-                "rocket-silo",
-                "inserter",
-                "pump",
-                "combinator",
-                "lab",
-                "radar",
-            )
-        )
-    ]
+    poles = [e for e in entities if is_electric_pole(e.get("name", ""))]
+    powered = [e for e in entities if is_electric_consumer(e.get("name", ""))]
     unpowered = []
     for e in powered:
         ex = e["position"]["x"]
         ey = e["position"]["y"]
         cx, cy = entity_collision_half_size(e.get("name", ""), e.get("direction", DIRECTION_NORTH))
-        max_dist = supply_radius + max(cx, cy)
         covered = False
         for p in poles:
             px = p["position"]["x"]
             py = p["position"]["y"]
+            p_radius = (
+                supply_radius
+                if supply_radius is not None
+                else get_pole_supply_radius(p.get("name", ""))
+            )
+            max_dist = p_radius + max(cx, cy)
             if abs(ex - px) > max_dist or abs(ey - py) > max_dist:
                 continue
             if (
@@ -239,7 +296,7 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
                     max(0.0, abs(ex - px) - cx),
                     max(0.0, abs(ey - py) - cy),
                 )
-                <= supply_radius
+                <= p_radius
             ):
                 covered = True
                 break

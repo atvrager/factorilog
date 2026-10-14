@@ -876,7 +876,51 @@ END DESIGN
         drc16 = [v for v in violations if v.code == "DRC-16"]
         self.assertEqual(drc16, [])
 
+    def test_drc_power_coverage_unpowered_inserter_flags_drc17(self) -> None:
+        """Rule DRC-17 flags electric consumers outside electric pole supply area."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.5, "y": 0.5}},
+            {"entity_number": 2, "name": "fast-inserter", "position": {"x": 1.5, "y": 0.5}},
+            {"entity_number": 3, "name": "fast-inserter", "position": {"x": 10.5, "y": 0.5}},
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities)
+        drc17 = [v for v in violations if v.code == "DRC-17"]
+        self.assertEqual(len(drc17), 1)
+        self.assertIn("Unpowered entity fast-inserter at (10.5, 0.5)", drc17[0].message)
+
+    def test_drc_power_coverage_disconnected_pole_flags_drc17(self) -> None:
+        """Rule DRC-17 flags consumers covered only by poles disconnected from the main PDN."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.5, "y": 0.5}},
+            {"entity_number": 2, "name": "medium-electric-pole", "position": {"x": 6.5, "y": 0.5}},
+            {"entity_number": 3, "name": "medium-electric-pole", "position": {"x": 20.5, "y": 0.5}},
+            {"entity_number": 4, "name": "fast-inserter", "position": {"x": 1.5, "y": 0.5}},
+            {"entity_number": 5, "name": "fast-inserter", "position": {"x": 21.5, "y": 0.5}},
+        ]
+        # Poles 1 and 2 form the main PDN. Pole 3 is an unwired island.
+        wires = [[1, 5, 2, 5]]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        drc17 = [v for v in violations if v.code == "DRC-17"]
+        self.assertEqual(len(drc17), 1)
+        self.assertIn("disconnected electric pole", drc17[0].message)
+
+    def test_drc_power_coverage_duplicate_entity_number_flags_drc17(self) -> None:
+        """Rule DRC-17 flags duplicate entity numbers that corrupt copper wire connections."""
+        entities = [
+            {"entity_number": 1, "name": "medium-electric-pole", "position": {"x": 0.5, "y": 0.5}},
+            {"entity_number": 2, "name": "medium-electric-pole", "position": {"x": 6.5, "y": 0.5}},
+            {"entity_number": 2, "name": "small-lamp", "position": {"x": 1.5, "y": 0.5}},
+        ]
+        wires = [[1, 5, 2, 5]]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(entities, wires=wires)
+        drc17 = [v for v in violations if v.code == "DRC-17"]
+        self.assertTrue(any("Duplicate entity_number #2" in v.message for v in drc17))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -719,6 +719,107 @@ def build_entities(
         entities = prune_dead_end_belts(placement.entities, def_data, netlist_data)
     else:
         entities = list(placement.entities)
+
+    # 6b. Merge chassis base entities before assigning entity numbers and running DRC
+    if def_data.get("blockages"):
+        try:
+            from foundry.chassis import CityBlockChassis
+        except ImportError:
+            from chassis import CityBlockChassis
+
+        units = float(def_data.get("units", 1000))
+        die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
+        die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
+        grid_w = max(1, round(die_w / 100.0))
+        grid_h = max(1, round(die_h / 100.0))
+
+        bp_candidates = [
+            Path("cityblock.bp"),
+            Path(__file__).resolve().parent.parent / "cityblock.bp",
+            Path("/home/atv/src/factorilog/cityblock.bp"),
+        ]
+        chassis: CityBlockChassis | None = None
+        for bp_cand in bp_candidates:
+            if bp_cand.is_file():
+                try:
+                    chassis = CityBlockChassis.from_blueprint_file(bp_cand)
+                    break
+                except Exception:
+                    pass
+        if chassis is None:
+            chassis = CityBlockChassis(pitch=100, core_width=94, core_height=94, channel_width=6)
+
+        base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
+        base_entities = base_bp.get("blueprint", {}).get("entities", [])
+        def_data["_chassis_tiles"] = base_bp.get("blueprint", {}).get("tiles", [])
+
+        entities = jumper_belts_across_chassis_poles(entities, base_entities)
+
+        occupied_tiles: set[tuple[float, float]] = set()
+        for e in entities:
+            pos = e.get("position", {})
+            ex = float(pos.get("x", 0.0))
+            ey = float(pos.get("y", 0.0))
+            ename = e.get("name", "")
+            if "splitter" in ename:
+                d = e.get("direction", 0)
+                if d in (0, 8):
+                    occupied_tiles.add((round(ex - 0.5, 2), round(ey, 2)))
+                    occupied_tiles.add((round(ex + 0.5, 2), round(ey, 2)))
+                else:
+                    occupied_tiles.add((round(ex, 2), round(ey - 0.5, 2)))
+                    occupied_tiles.add((round(ex, 2), round(ey + 0.5, 2)))
+            elif (
+                "assembling-machine" in ename
+                or "electric-furnace" in ename
+                or "lab" in ename
+                or "chemical-plant" in ename
+            ):
+                for dx in (-1.0, 0.0, 1.0):
+                    for dy in (-1.0, 0.0, 1.0):
+                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
+            elif "oil-refinery" in ename:
+                for dx in (-2.0, -1.0, 0.0, 1.0, 2.0):
+                    for dy in (-2.0, -1.0, 0.0, 1.0, 2.0):
+                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
+            else:
+                occupied_tiles.add((round(ex, 2), round(ey, 2)))
+
+        for be in base_entities:
+            if "position" not in be:
+                continue
+            bpos = be.get("position", {})
+            bx = float(bpos.get("x", 0.0))
+            by = float(bpos.get("y", 0.0))
+            bname = be.get("name", "")
+            b_tiles: list[tuple[float, float]] = []
+            if bname == "big-electric-pole":
+                b_tiles.extend(
+                    (round(bx + dx, 2), round(by + dy, 2))
+                    for dx in (-0.5, 0.5)
+                    for dy in (-0.5, 0.5)
+                )
+            elif bname == "radar":
+                b_tiles.extend(
+                    (round(bx + dx, 2), round(by + dy, 2))
+                    for dx in (-1.0, 0.0, 1.0)
+                    for dy in (-1.0, 0.0, 1.0)
+                )
+            else:
+                b_tiles.append((round(bx, 2), round(by, 2)))
+
+            if any(t in occupied_tiles for t in b_tiles):
+                continue
+
+            for t in b_tiles:
+                occupied_tiles.add(t)
+
+            new_be = dict(be)
+            new_be.pop("neighbours", None)
+            new_be.pop("connections", None)
+            new_be.pop("entity_number", None)
+            entities.append(new_be)
+
     grid_entities = {
         (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities
     }
@@ -733,6 +834,55 @@ def build_entities(
         mst_connections,
         pole_entities,
     )
+
+    if def_data.get("blockages"):
+        # Wire chassis big electric poles together into a unified power and circuit bus grid
+        big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
+        seen_pairs: set[tuple[int, int]] = set()
+        if wires is None:
+            wires = []
+
+        for i, bp1 in enumerate(big_poles):
+            p1_num = int(bp1.get("entity_number", 0))
+            p1_pos = bp1.get("position", {})
+            x1, y1 = float(p1_pos.get("x", 0.0)), float(p1_pos.get("y", 0.0))
+            for bp2 in big_poles[i + 1 :]:
+                p2_num = int(bp2.get("entity_number", 0))
+                p2_pos = bp2.get("position", {})
+                x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
+                dx = abs(x1 - x2)
+                dy = abs(y1 - y2)
+                dist = math.hypot(dx, dy)
+                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
+                    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        # 5: copper wire, 1: red wire, 2: green wire
+                        wires.append([pair[0], 5, pair[1], 5])
+                        wires.append([pair[0], 1, pair[1], 1])
+                        wires.append([pair[0], 2, pair[1], 2])
+
+        # Connect medium electric poles to the nearest big electric pole within reach (<= 9.0 tiles)
+        med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
+        for mp in med_poles:
+            mp_num = int(mp.get("entity_number", 0))
+            mp_pos = mp.get("position", {})
+            mx, my = float(mp_pos.get("x", 0.0)), float(mp_pos.get("y", 0.0))
+            best_d = float("inf")
+            best_bp = None
+            for bp in big_poles:
+                bp_pos = bp.get("position", {})
+                bx, by = float(bp_pos.get("x", 0.0)), float(bp_pos.get("y", 0.0))
+                d = math.hypot(mx - bx, my - by)
+                if d < best_d:
+                    best_d = d
+                    best_bp = bp
+            if best_bp is not None and best_d <= 9.0:
+                bp_num = int(best_bp.get("entity_number", 0))
+                pair = (min(mp_num, bp_num), max(mp_num, bp_num))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    wires.append([pair[0], 5, pair[1], 5])
 
     # 8. Physical Design Rule Check (DRC)
     remaining_conflicts = [
@@ -971,7 +1121,7 @@ def def_to_blueprint(
         strict_drc=strict_drc,
         use_maze_router=use_maze_router,
     )
-    return blueprint.encode(entities, label, wires=wires)
+    return blueprint.encode(entities, label, wires=wires, tiles=def_data.get("_chassis_tiles"))
 
 
 def main() -> int:
@@ -1043,153 +1193,7 @@ def main() -> int:
         use_maze_router=args.use_maze_router,
     )
 
-    tiles: list[dict[str, Any]] | None = None
-    if def_data.get("blockages"):
-        try:
-            from foundry.chassis import CityBlockChassis
-        except ImportError:
-            from chassis import CityBlockChassis
-
-        units = float(def_data.get("units", 1000))
-        die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
-        die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
-        grid_w = max(1, round(die_w / 100.0))
-        grid_h = max(1, round(die_h / 100.0))
-
-        bp_candidates = [
-            Path("cityblock.bp"),
-            Path(__file__).resolve().parent.parent / "cityblock.bp",
-            Path("/home/atv/src/factorilog/cityblock.bp"),
-        ]
-        chassis: CityBlockChassis | None = None
-        for bp_cand in bp_candidates:
-            if bp_cand.is_file():
-                try:
-                    chassis = CityBlockChassis.from_blueprint_file(bp_cand)
-                    break
-                except Exception:
-                    pass
-        if chassis is None:
-            chassis = CityBlockChassis(pitch=100, core_width=94, core_height=94, channel_width=6)
-
-        base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
-        base_entities = base_bp.get("blueprint", {}).get("entities", [])
-        tiles = base_bp.get("blueprint", {}).get("tiles", [])
-
-        entities = jumper_belts_across_chassis_poles(entities, base_entities)
-
-        occupied_tiles: set[tuple[float, float]] = set()
-        for e in entities:
-            pos = e.get("position", {})
-            ex = float(pos.get("x", 0.0))
-            ey = float(pos.get("y", 0.0))
-            ename = e.get("name", "")
-            if "splitter" in ename:
-                d = e.get("direction", 0)
-                if d in (0, 8):
-                    occupied_tiles.add((round(ex - 0.5, 2), round(ey, 2)))
-                    occupied_tiles.add((round(ex + 0.5, 2), round(ey, 2)))
-                else:
-                    occupied_tiles.add((round(ex, 2), round(ey - 0.5, 2)))
-                    occupied_tiles.add((round(ex, 2), round(ey + 0.5, 2)))
-            elif (
-                "assembling-machine" in ename
-                or "electric-furnace" in ename
-                or "lab" in ename
-                or "chemical-plant" in ename
-            ):
-                for dx in (-1.0, 0.0, 1.0):
-                    for dy in (-1.0, 0.0, 1.0):
-                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
-            elif "oil-refinery" in ename:
-                for dx in (-2.0, -1.0, 0.0, 1.0, 2.0):
-                    for dy in (-2.0, -1.0, 0.0, 1.0, 2.0):
-                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
-            else:
-                occupied_tiles.add((round(ex, 2), round(ey, 2)))
-
-        for be in base_entities:
-            if "position" not in be:
-                continue
-            bpos = be.get("position", {})
-            bx = float(bpos.get("x", 0.0))
-            by = float(bpos.get("y", 0.0))
-            bname = be.get("name", "")
-            b_tiles: list[tuple[float, float]] = []
-            if bname == "big-electric-pole":
-                b_tiles.extend(
-                    (round(bx + dx, 2), round(by + dy, 2))
-                    for dx in (-0.5, 0.5)
-                    for dy in (-0.5, 0.5)
-                )
-            elif bname == "radar":
-                b_tiles.extend(
-                    (round(bx + dx, 2), round(by + dy, 2))
-                    for dx in (-1.0, 0.0, 1.0)
-                    for dy in (-1.0, 0.0, 1.0)
-                )
-            else:
-                b_tiles.append((round(bx, 2), round(by, 2)))
-
-            if any(t in occupied_tiles for t in b_tiles):
-                continue
-
-            for t in b_tiles:
-                occupied_tiles.add(t)
-
-            new_be = dict(be)
-            new_be.pop("neighbours", None)
-            new_be.pop("connections", None)
-            new_be["entity_number"] = len(entities) + 1
-            entities.append(new_be)
-
-        # Wire chassis big electric poles together into a unified power and circuit bus grid
-        big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
-        seen_pairs: set[tuple[int, int]] = set()
-        if wires is None:
-            wires = []
-
-        for i, bp1 in enumerate(big_poles):
-            p1_num = int(bp1.get("entity_number", 0))
-            p1_pos = bp1.get("position", {})
-            x1, y1 = float(p1_pos.get("x", 0.0)), float(p1_pos.get("y", 0.0))
-            for bp2 in big_poles[i + 1 :]:
-                p2_num = int(bp2.get("entity_number", 0))
-                p2_pos = bp2.get("position", {})
-                x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
-                dx = abs(x1 - x2)
-                dy = abs(y1 - y2)
-                dist = math.hypot(dx, dy)
-                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
-                    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
-                    if pair not in seen_pairs:
-                        seen_pairs.add(pair)
-                        # 5: copper wire, 1: red wire, 2: green wire
-                        wires.append([pair[0], 5, pair[1], 5])
-                        wires.append([pair[0], 1, pair[1], 1])
-                        wires.append([pair[0], 2, pair[1], 2])
-
-        # Connect medium electric poles to the nearest big electric pole within reach (<= 9.0 tiles)
-        med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
-        for mp in med_poles:
-            mp_num = int(mp.get("entity_number", 0))
-            mp_pos = mp.get("position", {})
-            mx, my = float(mp_pos.get("x", 0.0)), float(mp_pos.get("y", 0.0))
-            best_d = float("inf")
-            best_bp = None
-            for bp in big_poles:
-                bp_pos = bp.get("position", {})
-                bx, by = float(bp_pos.get("x", 0.0)), float(bp_pos.get("y", 0.0))
-                d = math.hypot(mx - bx, my - by)
-                if d < best_d:
-                    best_d = d
-                    best_bp = bp
-            if best_bp is not None and best_d <= 9.0:
-                bp_num = int(best_bp.get("entity_number", 0))
-                pair = (min(mp_num, bp_num), max(mp_num, bp_num))
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    wires.append([pair[0], 5, pair[1], 5])
+    tiles: list[dict[str, Any]] | None = def_data.get("_chassis_tiles")
 
     if args.json:
         document: dict[str, Any] = {
