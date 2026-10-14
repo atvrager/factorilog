@@ -233,10 +233,22 @@ script.on_event(defines.events.on_tick, function(event)
                                 local found_source_or_fluid = false
                                 local trace_step = 0
                                 visited_pipes[string.format("%.1f,%.1f", pe.position.x, pe.position.y)] = true
-                                while #q > 0 and trace_step < 100 do
+                                while #q > 0 and trace_step < 300 do
                                     trace_step = trace_step + 1
                                     local cur = table.remove(q, 1)
-                                    for _, d in ipairs({{{{0, 1}}, {{0, -1}}, {{1, 0}}, {{-1, 0}}}}) do
+                                    local step_list = {{{{0, 1}}, {{0, -1}}, {{1, 0}}, {{-1, 0}}}}
+                                    if cur.name == "pipe-to-ground" then
+                                        local udx, udy = 0, 0
+                                        if cur.direction == 0 then udy = 1
+                                        elseif cur.direction == 8 then udy = -1
+                                        elseif cur.direction == 4 then udx = -1
+                                        elseif cur.direction == 12 then udx = 1
+                                        end
+                                        for dist = 1, 10 do
+                                            table.insert(step_list, {{udx * dist, udy * dist}})
+                                        end
+                                    end
+                                    for _, d in ipairs(step_list) do
                                         local npos = {{cur.position.x + d[1], cur.position.y + d[2]}}
                                         local nkey = string.format("%.1f,%.1f", npos[1], npos[2])
                                         if not visited_pipes[nkey] then
@@ -255,7 +267,7 @@ script.on_event(defines.events.on_tick, function(event)
                                                     end
                                                     log(string.format("    TRACE step %d: %s at (%.1f,%.1f) dir=%s fluid=%s energy=%.1f",
                                                         trace_step, ne.name, ne.position.x, ne.position.y, tostring(ne.direction), nf_str, ne.energy or 0))
-                                                    if has_fluid or ne.name == "pump" or ne.name == "infinity-pipe" then
+                                                    if has_fluid or ne.name == "infinity-pipe" then
                                                         found_source_or_fluid = true
                                                     else
                                                         table.insert(q, ne)
@@ -544,7 +556,7 @@ script.on_event(defines.events.on_tick, function(event)
         local productive_machines = productive_asms + productive_furnaces
         local active_ratio = total_machines > 0 and (active_machines / total_machines) or 0.0
 
-        local check_types = {{"assembling-machine", "furnace", "inserter", "lamp", "radar"}}
+        local check_types = {{"assembling-machine", "furnace", "inserter", "lamp", "radar", "pump"}}
         local unpowered = 0
         for _, t in ipairs(check_types) do
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do

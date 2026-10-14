@@ -696,10 +696,54 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         self.assertEqual(len(failed), 0, f"Router failed for nets: {list(failed.keys())}")
         self.assertTrue(placement.router_verif_res.is_valid)
 
+    def test_production_science_factory(self) -> None:
+        """Route the production science factory and diagnose routing performance."""
+        import time
 
+        def_path = None
+        netlist_path = None
+        for base in [
+            Path("flow"),
+            Path("bazel-bin/flow"),
+            Path(os.environ.get("RUNFILES_DIR", "")) / "_main/flow",
+            Path(os.environ.get("TEST_SRCDIR", "")) / "_main/flow",
+            Path(__file__).parent.parent / "flow",
+            Path(__file__).parent.parent / "bazel-bin/flow",
+        ]:
+            c_def = base / "production_science.def" if base.name != "flow" else base.parent / "flow/production_science.def"
+            c_net = base / "production_science_netlist.json" if base.name != "flow" else base.parent / "flow/production_science_netlist.json"
+            if c_def.exists() and c_net.exists():
+                def_path = c_def
+                netlist_path = c_net
+                break
 
+        if not def_path or not netlist_path:
+            self.skipTest("production_science build artifacts not present")
+
+        from foundry.def2bp import parse_def, build_entities
+        t0 = time.perf_counter()
+        def_data = parse_def(def_path.read_text())
+        netlist_data = json.loads(netlist_path.read_text())
+        sys.stderr.write(f"[perf] parse_def took {time.perf_counter() - t0:.2f}s\n")
+
+        entities, wires = build_entities(
+            def_data, netlist_data, strict_drc=True, use_maze_router=True, engine=self.engine
+        )
+        placement = def_data["_placement"]
+        failed = {rn: r for rn, r in placement.router_routes.items() if not r.is_success}
+        for rn, r in list(failed.items())[:25]:
+            sys.stderr.write(f"  FAILED: {rn}: {r.error_message}\n")
+
+        self.assertEqual(len(failed), 0, f"Router failed for {len(failed)} nets: {list(failed.keys())[:20]}")
+        self.assertTrue(placement.router_verif_res.is_valid)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    filt = os.environ.get("TESTBRIDGE_TEST_ONLY")
+    if filt:
+        unittest.main(defaultTest=f"TestDualLaneMazeRouter.{filt.strip('*')}")
+    else:
+        unittest.main()
+
+
 

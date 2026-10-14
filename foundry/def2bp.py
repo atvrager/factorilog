@@ -268,8 +268,10 @@ def route_with_maze_router(
         direction = pin.get("direction", "")
         if direction == "INPUT":
             valid_in_pins.add((float(px), float(py)))
+            obstacles.update(((px - 1, py), (px - 2, py), (px - 1, py - 1), (px - 1, py + 1)))
         elif direction == "OUTPUT":
             valid_out_pins.add((float(px), float(py)))
+            obstacles.update(((px + 1, py), (px + 2, py), (px + 1, py - 1), (px + 1, py + 1)))
 
     fluids = set(netlist_data.get("fluids", [])) or set(placement.fluids or [])
     clean_fluids = (
@@ -405,7 +407,9 @@ def route_with_maze_router(
                 component_headings[(math.floor(cx), math.floor(cy - 0.5))] = d
                 component_headings[(math.floor(cx), math.floor(cy + 0.5))] = d
 
-    if engine is None:
+    if engine is False:
+        engine = None
+    elif engine is None:
         try:
             from foundry.native_engine.engine import FactorioNativeEngine
 
@@ -429,7 +433,7 @@ def route_with_maze_router(
         obstacles=obstacles,
         component_headings=component_headings,
     )
-    routes, entities, verif_res = router.route(net_specs, verify=True)
+    routes, entities, verif_res = router.route(net_specs, verify=engine is not None)
     placement.router_routes = routes
     placement.router_net_specs = net_specs
     placement.router_verif_res = verif_res

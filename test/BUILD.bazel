@@ -307,6 +307,8 @@ py_test(
         "//flow:military_science_netlist.json",
         "//flow:chemical_science.def",
         "//flow:chemical_science_netlist.json",
+        "//flow:production_science.def",
+        "//flow:production_science_netlist.json",
     ],
     local = True,
     main = "test_router.py",

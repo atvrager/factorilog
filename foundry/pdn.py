@@ -83,7 +83,7 @@ def generate_pdn(
     for ent in entities:
         ep = ent["position"]
         ename = ent.get("name", "")
-        w, h = entity_size(ename)
+        w, h = entity_size(ename, ent.get("direction", DIRECTION_NORTH))
         ex, ey = ep["x"], ep["y"]
         min_tx = math.floor(ex - w / 2.0 - 1e-6)
         max_tx = math.floor(ex + w / 2.0 - 1e-6)
@@ -128,7 +128,9 @@ def generate_pdn(
     def is_covered(ent: dict[str, Any], cand_pos: tuple[float, float]) -> bool:
         ex = ent["position"]["x"]
         ey = ent["position"]["y"]
-        cx, cy = entity_collision_half_size(ent.get("name", ""))
+        cx, cy = entity_collision_half_size(
+            ent.get("name", ""), ent.get("direction", DIRECTION_NORTH)
+        )
         return (
             max(
                 max(0.0, abs(ex - cand_pos[0]) - cx),
@@ -193,7 +195,9 @@ def generate_pdn(
         for i, ent in enumerate(domain_powered):
             ex = ent["position"]["x"]
             ey = ent["position"]["y"]
-            cx, cy = entity_collision_half_size(ent.get("name", ""))
+            cx, cy = entity_collision_half_size(
+                ent.get("name", ""), ent.get("direction", DIRECTION_NORTH)
+            )
             reach_x = cx + 3.5
             reach_y = cy + 3.5
             gx_min = int((ex - reach_x) // 6)
@@ -242,7 +246,10 @@ def generate_pdn(
 
         for i in list(uncovered):
             px, py = domain_powered[i]["position"]["x"], domain_powered[i]["position"]["y"]
-            cx, cy = entity_collision_half_size(domain_powered[i].get("name", ""))
+            cx, cy = entity_collision_half_size(
+                domain_powered[i].get("name", ""),
+                domain_powered[i].get("direction", DIRECTION_NORTH),
+            )
             reach = math.ceil(3.5 + max(cx, cy))
             found_cand = False
             for dx in range(-reach, reach + 1):

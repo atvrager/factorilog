@@ -91,14 +91,18 @@ class RoutingGrid:
         self.node_occupants: dict[tuple[int, int, int], set[str]] = {}
         self.historical_cost: dict[tuple[int, int, int], float] = {}
         self.present_cost: dict[tuple[int, int, int], float] = {}
+        self.congestion_gamma: float = 1.5
 
         # Reserved terminals: (x, y) -> set of allowed net names
         self.reserved_terminals: dict[tuple[int, int], set[str]] = {}
+        self.reserved_terminal_bases: dict[tuple[int, int], set[str]] = {}
         self.terminal_headings: dict[tuple[int, int], int] = {}
         self.fluid_terminal_inward_dir: dict[tuple[int, int], int] = {}
+        self.fluid_port_approaches: dict[tuple[int, int], set[str]] = {}
         self.component_headings: dict[tuple[int, int], int] = (
             dict(component_headings) if component_headings else {}
         )
+        self.belt_sink_front_tiles: dict[tuple[int, int], set[str]] = {}
 
         # Active underground spans and hoods to prevent DRC-07 and DRC-15 collisions
         self.active_horiz_spans: dict[tuple[int, int], str] = {}
@@ -157,21 +161,31 @@ class RoutingGrid:
     def register_terminals(self, nets: list[RouterNetSpec]) -> None:
         """Register source and sink terminals for all nets to prevent cross-net encroachment."""
         for net in nets:
+            b_name = base_net_name(net.name)
             self.net_is_fluid[net.name] = net.is_fluid
-            self.net_is_fluid[base_net_name(net.name)] = net.is_fluid
+            self.net_is_fluid[b_name] = net.is_fluid
             self.net_commodity[net.name] = net.commodity
-            self.net_commodity[base_net_name(net.name)] = net.commodity
+            self.net_commodity[b_name] = net.commodity
             self.reserved_terminals.setdefault(net.source, set()).add(net.name)
             self.reserved_terminals.setdefault(net.sink, set()).add(net.name)
+            self.reserved_terminal_bases.setdefault(net.source, set()).add(b_name)
+            self.reserved_terminal_bases.setdefault(net.sink, set()).add(b_name)
             if net.start_heading is not None:
                 self.terminal_headings[net.source] = net.start_heading
             if net.end_heading is not None:
                 self.terminal_headings[net.sink] = net.end_heading
             if net.is_fluid:
+                my_comm = self.get_net_commodity(net.name)
                 if net.source_inward_dir is not None:
                     self.fluid_terminal_inward_dir[net.source] = net.source_inward_dir
+                    odx, ody = DIR_STEPS[net.source_inward_dir]
+                    out_pos = (net.source[0] - odx, net.source[1] - ody)
+                    self.fluid_port_approaches.setdefault(out_pos, set()).add(my_comm)
                 if net.sink_inward_dir is not None:
                     self.fluid_terminal_inward_dir[net.sink] = net.sink_inward_dir
+                    odx, ody = DIR_STEPS[net.sink_inward_dir]
+                    out_pos = (net.sink[0] - odx, net.sink[1] - ody)
+                    self.fluid_port_approaches.setdefault(out_pos, set()).add(my_comm)
 
     def can_place_hood(
         self,
@@ -208,6 +222,18 @@ class RoutingGrid:
 
         if is_fluid and heading is not None:
             my_comm = self.get_net_commodity(net_name)
+            if pos in self.fluid_port_approaches and my_comm not in self.fluid_port_approaches[pos]:
+                return False
+            for odx, ody in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nb = (pos[0] + odx, pos[1] + ody)
+                if nb in self.active_hood_types and self.is_net_fluid(
+                    self.active_hoods.get(nb, "")
+                ):
+                    nb_type, nb_dir = self.active_hood_types[nb]
+                    nb_mouth_dir = OPPOSITE_DIR.get(nb_dir, 0) if nb_type == "input" else nb_dir
+                    nmdx, nmdy = DIR_STEPS[nb_mouth_dir]
+                    if (nb[0] + nmdx, nb[1] + nmdy) == pos:
+                        return False
             mouth_dir = heading if is_output else OPPOSITE_DIR.get(heading, 0)
             if (
                 pos in self.fluid_terminal_inward_dir
@@ -239,9 +265,10 @@ class RoutingGrid:
                     return False
 
             if is_output:
-                if pos in self.reserved_terminals and b_name not in {
-                    base_net_name(n) for n in self.reserved_terminals[pos]
-                }:
+                if (
+                    pos in self.reserved_terminal_bases
+                    and b_name not in self.reserved_terminal_bases[pos]
+                ):
                     return False
                 dx, dy = DIR_STEPS[heading]
                 rear_pos = (pos[0] - dx, pos[1] - dy)
@@ -251,9 +278,10 @@ class RoutingGrid:
                     return False
                 if self.component_headings.get(rear_pos) == heading:
                     return False
-                if rear_pos in self.reserved_terminals and b_name not in {
-                    base_net_name(n) for n in self.reserved_terminals[rear_pos]
-                }:
+                if (
+                    rear_pos in self.reserved_terminal_bases
+                    and b_name not in self.reserved_terminal_bases[rear_pos]
+                ):
                     return False
 
         return True
@@ -286,15 +314,16 @@ class RoutingGrid:
                 return True
             if pt in self.active_horiz_spans or pt in self.active_vert_spans:
                 return True
-            if pt in self.reserved_terminals and b_name not in {
-                base_net_name(n) for n in self.reserved_terminals[pt]
-            }:
+            if (
+                pt in self.reserved_terminal_bases
+                and b_name not in self.reserved_terminal_bases[pt]
+            ):
                 return True
             if self.historical_cost.get((tx, ty, 0), 0.0) > 0.0:
                 return True
             if pt in self.surface_occupancy:
                 current_nets = self.surface_occupancy[pt]
-                if current_nets and {base_net_name(n) for n in current_nets} != {b_name}:
+                if current_nets and any(base_net_name(n) != b_name for n in current_nets):
                     return True
             if not self.can_occupy_surface(pt, net_name, lane):
                 return True
@@ -424,38 +453,29 @@ class RoutingGrid:
         self, node: RouteNode, base_cost: float, net_name: str = "", lane: int = LANE_BOTH
     ) -> float:
         """Compute the dynamic traversal cost with negotiated congestion."""
-        cost = base_cost
-        if node.z == LAYER_SURFACE and net_name:
-            occ = self.surface_occupancy.get((node.x, node.y))
-            b_name = base_net_name(net_name)
-            if occ and b_name not in {base_net_name(n) for n in occ}:
-                lanes = self.surface_lanes.get((node.x, node.y), {})
-                if not (lane != LANE_BOTH and LANE_BOTH not in lanes and lane not in lanes):
-                    cost += 8.0
-        if not self.has_congestion:
-            return cost
-        key = (node.x, node.y, node.z)
-        h = self.historical_cost.get(key, 0.0)
-        p = self.present_cost.get(key, 1.0)
-        return (cost + h) * p
+        return self.get_fast_node_cost(node.x, node.y, node.z, base_cost, net_name, lane)
 
     def get_fast_node_cost(
         self, x: int, y: int, z: int, base_cost: float, net_name: str = "", lane: int = LANE_BOTH
     ) -> float:
         """Compute traversal cost with negotiated congestion using flat lookups."""
         cost = base_cost
+        live_overuse = 0
         if z == LAYER_SURFACE and net_name:
             occ = self.surface_occupancy.get((x, y))
             b_name = base_net_name(net_name)
-            if occ and b_name not in {base_net_name(n) for n in occ}:
+            if occ and any(base_net_name(n) != b_name for n in occ):
                 lanes = self.surface_lanes.get((x, y), {})
                 if not (lane != LANE_BOTH and LANE_BOTH not in lanes and lane not in lanes):
                     cost += 8.0
+                    live_overuse = len(occ)
         if not self.has_congestion:
             return cost
         key = (x, y, z)
         h = self.historical_cost.get(key, 0.0)
         p = self.present_cost.get(key, 1.0)
+        if live_overuse > 0:
+            p = max(p, 1.0 + self.congestion_gamma * live_overuse)
         return (cost + h) * p
 
     def can_occupy_surface(
@@ -470,16 +490,20 @@ class RoutingGrid:
         if self.is_obstacle(pos[0], pos[1]):
             return False
 
-        if pos in self.reserved_terminals and b_name not in {
-            base_net_name(n) for n in self.reserved_terminals[pos]
-        }:
+        if pos in self.reserved_terminal_bases and b_name not in self.reserved_terminal_bases[pos]:
             return False
 
         if pos in self.active_hoods:
             return False
 
+        is_fluid = self.is_net_fluid(net_name)
+        if not is_fluid and pos in self.belt_sink_front_tiles:
+            for sink_base in self.belt_sink_front_tiles[pos]:
+                if sink_base != b_name:
+                    return False
+
         # Rule DRC-03: clearance around underground hoods (belt only)
-        if not self.is_net_fluid(net_name) and heading is not None:
+        if not is_fluid and heading is not None:
             dx, dy = DIR_STEPS[heading]
             front_tile = (pos[0] + dx, pos[1] + dy)
             if front_tile in self.active_hood_types:
@@ -491,23 +515,17 @@ class RoutingGrid:
                     if heading in side_dirs or heading == (h_dir + 8) % 16:
                         return False
 
-            # Prevent another net's terminal belt from feeding into this tile
-            for d_in, (idx, idy) in DIR_STEPS.items():
-                nb = (pos[0] - idx, pos[1] - idy)
-                if nb in self.surface_net_headings and nb not in self.active_hoods:
-                    for nb_net, nb_h in self.surface_net_headings[nb].items():
+            if is_hood:
+                rear_nb = (pos[0] - dx, pos[1] - dy)
+                if rear_nb in self.surface_net_headings and rear_nb not in self.active_hoods:
+                    for nb_net, nb_h in self.surface_net_headings[rear_nb].items():
                         if (
-                            nb_h == d_in
+                            nb_h == heading
                             and base_net_name(nb_net) != b_name
                             and not self.is_net_fluid(nb_net)
                         ):
-                            nb_route = self.net_routes.get(nb_net)
-                            if nb_route and nb_route.nodes and nb_route.nodes[-1].pos == nb:
-                                return False
-                            if is_hood and nb_h == heading:
-                                return False
+                            return False
 
-        is_fluid = self.is_net_fluid(net_name)
         my_comm = self.get_net_commodity(net_name) if is_fluid else ""
         current_nets = self.surface_occupancy.get(pos)
 
@@ -518,6 +536,11 @@ class RoutingGrid:
                         return False
 
             if not is_hood:
+                if (
+                    pos in self.fluid_port_approaches
+                    and my_comm not in self.fluid_port_approaches[pos]
+                ):
+                    return False
                 for odx, ody in ((0, 1), (0, -1), (1, 0), (-1, 0)):
                     nb = (pos[0] + odx, pos[1] + ody)
                     nb_is_fluid, nb_comm, nb_mouth = self.get_surface_fluid_info(nb)
@@ -563,6 +586,13 @@ class RoutingGrid:
             last_node = route.nodes[-1]
             if last_node.z == LAYER_SURFACE:
                 pos = last_node.pos
+                if not self.is_net_fluid(net_name):
+                    fdx, fdy = DIR_STEPS[last_node.heading]
+                    front_pos = (pos[0] + fdx, pos[1] + fdy)
+                    if front_pos in self.belt_sink_front_tiles:
+                        self.belt_sink_front_tiles[front_pos].discard(base_net_name(net_name))
+                        if not self.belt_sink_front_tiles[front_pos]:
+                            del self.belt_sink_front_tiles[front_pos]
                 if pos in self.surface_occupancy:
                     self.surface_occupancy[pos].discard(net_name)
                     if not self.surface_occupancy[pos]:
@@ -598,6 +628,12 @@ class RoutingGrid:
             last_node = route.nodes[-1]
             if last_node.z == LAYER_SURFACE:
                 pos = last_node.pos
+                if not self.is_net_fluid(net_name):
+                    fdx, fdy = DIR_STEPS[last_node.heading]
+                    front_pos = (pos[0] + fdx, pos[1] + fdy)
+                    self.belt_sink_front_tiles.setdefault(front_pos, set()).add(
+                        base_net_name(net_name)
+                    )
                 self.surface_occupancy.setdefault(pos, set()).add(net_name)
                 self.layer_occupancy[LAYER_SURFACE][pos] = net_name
                 lanes = self.surface_lanes.setdefault(pos, {})
@@ -792,6 +828,7 @@ class RoutingGrid:
 
         Returns total number of overused nodes.
         """
+        self.congestion_gamma = gamma
         conflicts = 0
         for node_key, usage in self.usage_count.items():
             capacity = self.get_capacity(node_key)

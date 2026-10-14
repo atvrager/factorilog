@@ -148,7 +148,7 @@ def build_conduit_graph(
         node = ("pipe-to-ground", px, py)
         adj.setdefault(node, set())
 
-        # Surface connection to facing pipe-to-ground mouth-to-mouth
+        # Surface connection to facing pipe-to-ground mouth-to-mouth or pump
         surf_dx, surf_dy = DIR_STEPS.get(d, (0, 0))
         surf_pos = (px + surf_dx, py + surf_dy)
         for c in tile_map.get(surf_pos, []):
@@ -159,6 +159,21 @@ def build_conduit_graph(
                     c_node = ("pipe-to-ground", surf_pos[0], surf_pos[1])
                     adj[node].add(c_node)
                     adj[c_node].add(node)
+            elif c.get("name") == "pump":
+                pump_d = c.get("direction", DIRECTION_NORTH)
+                pos_c = c.get("position", {})
+                pcx = float(pos_c.get("x", 0)) if isinstance(pos_c, dict) else float(pos_c[0])
+                pcy = float(pos_c.get("y", 0)) if isinstance(pos_c, dict) else float(pos_c[1])
+                in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
+                p_dx, p_dy = DIR_STEPS.get(pump_d, (0, 0))
+                if surf_pos == in_t and (px, py) == (in_t[0] - p_dx, in_t[1] - p_dy):
+                    in_node = ("pump_in", id(c), in_t[0], in_t[1])
+                    adj[node].add(in_node)
+                    adj[in_node].add(node)
+                elif surf_pos == out_t and (px, py) == (out_t[0] + p_dx, out_t[1] + p_dy):
+                    out_node = ("pump_out", id(c), out_t[0], out_t[1])
+                    adj[node].add(out_node)
+                    adj[out_node].add(node)
 
         # Underground connection to facing pair within maximum span
         max_pipe_span = get_underground_span("pipe-to-ground", 10)
@@ -228,7 +243,12 @@ def insert_pipeline_pumps(
     scale = 1.0 / float(def_data.get("units", 1000))
     pumps_inserted = 0
 
-    fluids = set(netlist_data.get("fluids") or [])
+    raw_fluids = set(netlist_data.get("fluids") or []) | set(placement.fluids or [])
+    fluids = (
+        {f.replace("-", "_") for f in raw_fluids}
+        | {f.replace("_", "-") for f in raw_fluids}
+        | raw_fluids
+    )
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
     cell_map = netlist_data.get("cells", {})
 
@@ -237,7 +257,7 @@ def insert_pipeline_pumps(
     fluid_sink_tiles: set[tuple[int, int]] = set()
 
     for pin in def_data.get("pins", []):
-        pname = pin.get("name", "")
+        pname = pin.get("name", pin.get("net", ""))
         if pname in fluids or any(f in pname for f in fluids):
             px = math.floor(pin["x"] * scale)
             py = math.floor(pin["y"] * scale)
@@ -257,177 +277,101 @@ def insert_pipeline_pumps(
         for port in cell.get("outputs", []):
             if port in fluids or any(f in port for f in fluids):
                 geom = get_macro_port_geometry(cell, port, is_output=True)
-                ax, ay = geom["approach_pos"]
+                ax, ay = geom["inserter_pos"]
                 fluid_source_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
 
         for port in cell.get("inputs", []):
             if port in fluids or any(f in port for f in fluids):
                 geom = get_macro_port_geometry(cell, port, is_output=False)
-                ax, ay = geom["approach_pos"]
+                ax, ay = geom["inserter_pos"]
                 fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
 
     for _iteration in range(max_pumps):
         adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)
         components = find_fluid_components(adj)
 
-        # Find overextended component with largest extent
-        worst_comp: set[Any] | None = None
-        worst_extent = float(max_segment_extent)
-
+        overextended: list[tuple[float, set[Any]]] = []
         for comp in components:
             ext, _, _, _, _ = component_extent(comp)
-            if ext > worst_extent:
-                worst_extent = ext
-                worst_comp = comp
+            if ext > float(max_segment_extent):
+                overextended.append((ext, comp))
 
-        if worst_comp is None:
+        if not overextended:
             break  # All components are within max_segment_extent
 
-        # Identify sources for this component
-        sources: list[Any] = []
-        sinks: list[Any] = []
-        for node in worst_comp:
-            ntype = node[0]
-            if ntype == "pump_out":
-                sources.append(node)
-            elif ntype == "pump_in":
-                sinks.append(node)
-            elif ntype in ("pipe", "pipe-to-ground"):
-                pt = (node[1], node[2])
-                if pt in fluid_source_tiles:
+        overextended.sort(key=lambda item: item[0], reverse=True)
+
+        candidates: list[
+            tuple[tuple[int, float, int], tuple[int, int], tuple[int, int], int, float, float]
+        ] = []
+        comp_pipes: dict[tuple[int, int], dict[str, Any]] = {}
+
+        for worst_extent, worst_comp in overextended:
+            # Identify sources for this component
+            sources: list[Any] = []
+            sinks: list[Any] = []
+            for node in worst_comp:
+                ntype = node[0]
+                if ntype == "pump_out":
                     sources.append(node)
-                else:
-                    for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                        if (pt[0] + dx, pt[1] + dy) in fluid_source_tiles:
-                            sources.append(node)
-                            break
-                if pt in fluid_sink_tiles:
+                elif ntype == "pump_in":
                     sinks.append(node)
-                else:
-                    for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                        if (pt[0] + dx, pt[1] + dy) in fluid_sink_tiles:
-                            sinks.append(node)
-                            break
+                elif ntype in ("pipe", "pipe-to-ground"):
+                    pt = (node[1], node[2])
+                    if pt in fluid_source_tiles:
+                        sources.append(node)
+                    if pt in fluid_sink_tiles:
+                        sinks.append(node)
 
-        use_sources = bool(sources)
-        ref_nodes = sources if use_sources else sinks
+            use_sources = bool(sources)
+            ref_nodes = sources if use_sources else sinks
 
-        if not ref_nodes:
-            # Fallback: pick node with minimum coordinate as source
-            ref_nodes = [
-                min(
-                    worst_comp,
-                    key=lambda n: (n[2] if len(n) == 4 else n[1], n[3] if len(n) == 4 else n[2]),
-                )
-            ]
-            use_sources = True
+            if not ref_nodes:
+                # Fallback: pick node with minimum coordinate as source
+                ref_nodes = [
+                    min(
+                        worst_comp,
+                        key=lambda n: (
+                            n[2] if len(n) == 4 else n[1],
+                            n[3] if len(n) == 4 else n[2],
+                        ),
+                    )
+                ]
+                use_sources = True
 
-        # Compute BFS distances from reference nodes
-        dist: dict[Any, int] = {}
-        queue: collections.deque[tuple[Any, int]] = collections.deque()
-        for s in ref_nodes:
-            dist[s] = 0
-            queue.append((s, 0))
+            # Compute BFS distances from reference nodes
+            dist: dict[Any, int] = {}
+            queue: collections.deque[tuple[Any, int]] = collections.deque()
+            for s in ref_nodes:
+                dist[s] = 0
+                queue.append((s, 0))
 
-        while queue:
-            curr, d = queue.popleft()
-            for nb in adj.get(curr, ()):
-                if nb in worst_comp and nb not in dist:
-                    dist[nb] = d + 1
-                    queue.append((nb, d + 1))
+            while queue:
+                curr, d = queue.popleft()
+                for nb in adj.get(curr, ()):
+                    if nb in worst_comp and nb not in dist:
+                        dist[nb] = d + 1
+                        queue.append((nb, d + 1))
 
-        # Target distance along path for inserting a pump
-        target_dist = min(max_segment_extent - 40, int(worst_extent // 2))
-        target_dist = max(target_dist, 50)
+            # Target distance along path for inserting a pump
+            target_dist = min(max_segment_extent - 40, int(worst_extent // 2))
+            target_dist = max(target_dist, 50)
 
-        # Search for candidate straight pipe pairs (u, v) in worst_comp
-        candidates: list[tuple[int, tuple[int, int], tuple[int, int], int, float, float]] = []
+            comp_pipes = {
+                (n[1], n[2]): pipe_entities[(n[1], n[2])]
+                for n in worst_comp
+                if n[0] == "pipe" and (n[1], n[2]) in pipe_entities
+            }
+            src_set = set(sources)
+            sink_set = set(sinks)
 
-        comp_pipes = {
-            (n[1], n[2]): pipe_entities[(n[1], n[2])]
-            for n in worst_comp
-            if n[0] == "pipe" and (n[1], n[2]) in pipe_entities
-        }
-
-        for ux, uy in comp_pipes:
-            u_node = ("pipe", ux, uy)
-            u_dist = dist.get(u_node)
-            if u_dist is None:
-                continue
-
-            # Check neighbors: Vertical and Horizontal
-            for vx, vy, is_vertical in ((ux, uy + 1, True), (ux + 1, uy, False)):
-                if (vx, vy) not in comp_pipes:
-                    continue
-                v_node = ("pipe", vx, vy)
-                v_dist = dist.get(v_node)
-                if v_dist is None or u_dist == v_dist:
-                    continue
-
-                # Ensure neither tile is an I/O pin or machine approach tile
-                if (ux + 0.5, uy + 0.5) in routes.pin_tiles or (
-                    vx + 0.5,
-                    vy + 0.5,
-                ) in routes.pin_tiles:
-                    continue
-                if (ux, uy) in fluid_source_tiles or (vx, vy) in fluid_source_tiles:
-                    continue
-                if (ux, uy) in fluid_sink_tiles or (vx, vy) in fluid_sink_tiles:
-                    continue
-
-                # Flow direction depends on whether BFS measured from sources or sinks
-                # Fluid flows from smaller distance if from sources, else towards sinks
-                is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-
-                if is_u_in:
-                    in_t, out_t = (ux, uy), (vx, vy)
-                    in_node, out_node = u_node, v_node
-                    base_dist = u_dist
-                else:
-                    in_t, out_t = (vx, vy), (ux, uy)
-                    in_node, out_node = v_node, u_node
-                    base_dist = v_dist
-
-                # Check degree in component: each pipe should connect to the other and exactly one opposite pipe
-                u_nbs = [nb for nb in adj.get(in_node, ()) if nb in worst_comp]
-                v_nbs = [nb for nb in adj.get(out_node, ()) if nb in worst_comp]
-
-                # We require no orthogonal branches at the pump site
-                if len(u_nbs) != 2 or len(v_nbs) != 2:
-                    continue
-
-                # Check collinearity of connections
-                if is_vertical:
-                    # In-line must connect along Y
-                    if out_t[1] < in_t[1]:  # Flow North
-                        pump_dir = DIRECTION_NORTH
-                        center_x = in_t[0] + 0.5
-                        center_y = float(in_t[1])
-                    else:  # Flow South
-                        pump_dir = DIRECTION_SOUTH
-                        center_x = in_t[0] + 0.5
-                        center_y = float(in_t[1] + 1.0)
-                else:
-                    # In-line must connect along X
-                    if out_t[0] > in_t[0]:  # Flow East
-                        pump_dir = DIRECTION_EAST
-                        center_x = float(in_t[0] + 1.0)
-                        center_y = in_t[1] + 0.5
-                    else:  # Flow West
-                        pump_dir = DIRECTION_WEST
-                        center_x = float(in_t[0])
-                        center_y = in_t[1] + 0.5
-
-                score = abs(base_dist - target_dist)
-                candidates.append((score, in_t, out_t, pump_dir, center_x, center_y))
-
-        if not candidates:
-            # Relax degree requirement if no candidates found
             for ux, uy in comp_pipes:
                 u_node = ("pipe", ux, uy)
                 u_dist = dist.get(u_node)
                 if u_dist is None:
                     continue
+
+                # Check neighbors: Vertical and Horizontal
                 for vx, vy, is_vertical in ((ux, uy + 1, True), (ux + 1, uy, False)):
                     if (vx, vy) not in comp_pipes:
                         continue
@@ -435,12 +379,88 @@ def insert_pipeline_pumps(
                     v_dist = dist.get(v_node)
                     if v_dist is None or u_dist == v_dist:
                         continue
+
+                    # Ensure neither tile is an I/O pin or machine approach tile
+                    if (ux + 0.5, uy + 0.5) in routes.pin_tiles or (
+                        vx + 0.5,
+                        vy + 0.5,
+                    ) in routes.pin_tiles:
+                        continue
                     if (ux, uy) in fluid_source_tiles or (vx, vy) in fluid_source_tiles:
                         continue
                     if (ux, uy) in fluid_sink_tiles or (vx, vy) in fluid_sink_tiles:
                         continue
 
-                    is_u_in = u_dist < v_dist if use_sources else u_dist > v_dist
+                    # Check degree in component: each pipe must connect to the other and one collinear neighbor
+                    u_nbs = [nb for nb in adj.get(u_node, ()) if nb in worst_comp]
+                    v_nbs = [nb for nb in adj.get(v_node, ()) if nb in worst_comp]
+                    if len(u_nbs) != 2 or len(v_nbs) != 2:
+                        continue
+
+                    dx, dy = vx - ux, vy - uy
+                    nb_u = u_nbs[0] if u_nbs[1] == v_node else u_nbs[1]
+                    nb_v = v_nbs[0] if v_nbs[1] == u_node else v_nbs[1]
+                    if nb_u[0] not in ("pipe", "pipe-to-ground") or nb_v[0] not in (
+                        "pipe",
+                        "pipe-to-ground",
+                    ):
+                        continue
+                    if (nb_u[1], nb_u[2]) != (ux - dx, uy - dy) or (nb_v[1], nb_v[2]) != (
+                        vx + dx,
+                        vy + dy,
+                    ):
+                        continue
+
+                    # Partition worst_comp by removing edge (u_node, v_node)
+                    comp_u: set[Any] = {u_node}
+                    q_u: collections.deque[Any] = collections.deque([u_node])
+                    while q_u:
+                        cur = q_u.popleft()
+                        for nb in adj.get(cur, ()):
+                            if nb in worst_comp and nb not in comp_u:
+                                if (cur == u_node and nb == v_node) or (
+                                    cur == v_node and nb == u_node
+                                ):
+                                    continue
+                                comp_u.add(nb)
+                                q_u.append(nb)
+
+                    sep_penalty = 0
+                    if v_node in comp_u:
+                        split_ext = worst_extent
+                        is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
+                        sep_penalty = 1
+                    else:
+                        comp_v = worst_comp - comp_u
+                        u_has_src = bool(comp_u & src_set)
+                        v_has_src = bool(comp_v & src_set)
+                        u_has_sink = bool(comp_u & sink_set)
+                        v_has_sink = bool(comp_v & sink_set)
+
+                        if src_set and sink_set:
+                            if u_has_src and v_has_sink and not (v_has_src and not u_has_src):
+                                if not v_has_src or not u_has_sink:
+                                    is_u_in = True
+                                else:
+                                    is_u_in = (
+                                        (u_dist < v_dist) if use_sources else (u_dist > v_dist)
+                                    )
+                            elif v_has_src and u_has_sink and not (u_has_src and not v_has_src):
+                                if not u_has_src or not v_has_sink:
+                                    is_u_in = False
+                                else:
+                                    is_u_in = (
+                                        (u_dist < v_dist) if use_sources else (u_dist > v_dist)
+                                    )
+                            else:
+                                is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
+                                sep_penalty = 1
+                        else:
+                            is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
+
+                        ext_u, _, _, _, _ = component_extent(comp_u)
+                        ext_v, _, _, _, _ = component_extent(comp_v)
+                        split_ext = max(ext_u, ext_v)
 
                     if is_u_in:
                         in_t, out_t = (ux, uy), (vx, vy)
@@ -450,31 +470,34 @@ def insert_pipeline_pumps(
                         base_dist = v_dist
 
                     if is_vertical:
-                        if out_t[1] < in_t[1]:
+                        if out_t[1] < in_t[1]:  # Flow North
                             pump_dir = DIRECTION_NORTH
                             center_x = in_t[0] + 0.5
                             center_y = float(in_t[1])
-                        else:
+                        else:  # Flow South
                             pump_dir = DIRECTION_SOUTH
                             center_x = in_t[0] + 0.5
                             center_y = float(in_t[1] + 1.0)
                     else:
-                        if out_t[0] > in_t[0]:
+                        if out_t[0] > in_t[0]:  # Flow East
                             pump_dir = DIRECTION_EAST
                             center_x = float(in_t[0] + 1.0)
                             center_y = in_t[1] + 0.5
-                        else:
+                        else:  # Flow West
                             pump_dir = DIRECTION_WEST
                             center_x = float(in_t[0])
                             center_y = in_t[1] + 0.5
 
-                    score = abs(base_dist - target_dist)
+                    score = (sep_penalty, round(split_ext, 2), abs(base_dist - target_dist))
                     candidates.append((score, in_t, out_t, pump_dir, center_x, center_y))
+
+            if candidates:
+                break
 
         if not candidates:
             break
 
-        # Pick candidate with best score (closest to target distance)
+        # Pick candidate with best score (smallest post-split extent, then closest to target distance)
         candidates.sort(key=lambda c: c[0])
         _, best_in, best_out, best_dir, best_cx, best_cy = candidates[0]
 

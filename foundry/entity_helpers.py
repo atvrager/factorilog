@@ -138,11 +138,12 @@ def register_prototype_boxes(prototypes: dict[str, Any]) -> None:
 
 def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
     """Return width and height of named entity."""
+    if name == "pump":
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 2.0, 1.0
+        return 1.0, 2.0
     if name in _PROTOTYPE_BOXES:
         return _PROTOTYPE_BOXES[name]
-    for key, box in _PROTOTYPE_BOXES.items():
-        if key in name or name in key:
-            return box
     if "rocket-silo" in name:
         return 9.0, 9.0
     if "oil-refinery" in name or "nuclear-reactor" in name:
@@ -169,13 +170,14 @@ def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, flo
     return 1.0, 1.0
 
 
-def entity_collision_half_size(name: str) -> tuple[float, float]:
+def entity_collision_half_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, float]:
     """Return half width and half height of entity collision box."""
+    if name == "pump":
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 0.9, 0.29
+        return 0.29, 0.9
     if name in _PROTOTYPE_COLLISIONS:
         return _PROTOTYPE_COLLISIONS[name]
-    for key, coll in _PROTOTYPE_COLLISIONS.items():
-        if key in name or name in key:
-            return coll
     if "rocket-silo" in name:
         return 4.2, 4.2
     if "oil-refinery" in name:
@@ -191,6 +193,8 @@ def entity_collision_half_size(name: str) -> tuple[float, float]:
     if "furnace" in name or "power-switch" in name:
         return 0.7, 0.7
     if "pump" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 0.9, 0.29
         return 0.29, 0.9
     return 0.15, 0.15
 
@@ -222,7 +226,7 @@ def check_power(entities: list[dict[str, Any]], supply_radius: float = 3.5) -> l
     for e in powered:
         ex = e["position"]["x"]
         ey = e["position"]["y"]
-        cx, cy = entity_collision_half_size(e.get("name", ""))
+        cx, cy = entity_collision_half_size(e.get("name", ""), e.get("direction", DIRECTION_NORTH))
         max_dist = supply_radius + max(cx, cy)
         covered = False
         for p in poles:
