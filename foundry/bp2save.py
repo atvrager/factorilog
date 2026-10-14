@@ -137,6 +137,8 @@ script.on_init(function()
 
     local PINS = helpers.json_to_table(PINS_JSON) or {{inputs = {{}}, outputs = {{}}}}
     local surface = game.surfaces[1]
+    surface.always_day = true
+    surface.daytime = 0
 
     -- Request chunks around factory
     for cx = {chunk_min_x}, {chunk_max_x} do

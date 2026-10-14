@@ -35,6 +35,7 @@ class TestBp2Save(unittest.TestCase):
         self.assertIn("Off-chip power supply", lua_code)
         self.assertIn("electric-energy-interface", lua_code)
         self.assertIn("SAVE_GEN_EEIS", lua_code)
+        self.assertIn("surface.always_day = true", lua_code)
 
     def test_build_scenario_archive(self) -> None:
         """Verify scenario archive contains required control.lua and metadata."""
