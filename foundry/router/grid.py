@@ -22,7 +22,12 @@ from foundry.router.types import (
 
 
 def base_net_name(net_name: str) -> str:
-    """Return the base logical net name by stripping driver/sink suffixes."""
+    """Return the base logical net name by stripping driver/sink and hierarchy suffixes."""
+    if net_name.endswith("_hwy"):
+        net_name = net_name[:-4]
+    for sep in ("_export_", "_import_", "_hwy_", "_blk_"):
+        if sep in net_name:
+            net_name = net_name.split(sep)[0]
     idx = net_name.find("_d")
     if idx != -1 and "_s" in net_name[idx:]:
         return net_name[:idx]
@@ -43,6 +48,7 @@ class RoutingGrid:
         prototypes: dict[str, Any] | None = None,
         obstacles: set[tuple[int, int]] | None = None,
         component_headings: dict[tuple[int, int], int] | None = None,
+        no_hood_tiles: set[tuple[int, int]] | None = None,
     ) -> None:
         """Initialize the routing grid with dimensions and prototype parameters."""
         self.min_x = min_x
@@ -102,6 +108,7 @@ class RoutingGrid:
         self.component_headings: dict[tuple[int, int], int] = (
             dict(component_headings) if component_headings else {}
         )
+        self.no_hood_tiles: set[tuple[int, int]] = set(no_hood_tiles) if no_hood_tiles else set()
         self.belt_sink_front_tiles: dict[tuple[int, int], set[str]] = {}
 
         # Active underground spans and hoods to prevent DRC-07 and DRC-15 collisions
@@ -197,6 +204,8 @@ class RoutingGrid:
         """Check if an underground hood can be placed without colliding with active spans."""
         b_name = base_net_name(net_name)
         is_fluid = self.is_net_fluid(net_name)
+        if pos in self.no_hood_tiles:
+            return False
         if self.is_obstacle(pos[0], pos[1]):
             return False
         if pos in self.active_hoods:
@@ -259,6 +268,8 @@ class RoutingGrid:
                 side_nb = (pos[0] - sdx, pos[1] - sdy)
                 if self.surface_headings.get(side_nb) == s_dir:
                     return False
+                if s_dir in self.surface_net_headings.get(side_nb, {}).values():
+                    return False
                 if self.terminal_headings.get(side_nb) == s_dir:
                     return False
                 if self.component_headings.get(side_nb) == s_dir:
@@ -273,6 +284,8 @@ class RoutingGrid:
                 dx, dy = DIR_STEPS[heading]
                 rear_pos = (pos[0] - dx, pos[1] - dy)
                 if self.surface_headings.get(rear_pos) == heading:
+                    return False
+                if heading in self.surface_net_headings.get(rear_pos, {}).values():
                     return False
                 if self.terminal_headings.get(rear_pos) == heading:
                     return False

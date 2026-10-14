@@ -474,7 +474,12 @@ def prune_dead_end_belts(
         gy = comp["y"] * scale
         inst = {i["name"]: i for i in netlist_data.get("instances", [])}.get(comp["name"], {})
         cell_id = inst.get("cell", comp["macro"])
-        if cell_id in ("belt_split2", "belt_merge2", "belt_balancer2"):
+        if cell_id == "belt_merge2" or comp.get("macro") == "belt_merge2":
+            for tx in range(3):
+                for ty in range(3):
+                    protected_inserter_tiles.add((round(gx + tx + 0.5, 1), round(gy + ty + 0.5, 1)))
+            continue
+        if cell_id in ("belt_split2", "belt_balancer2"):
             continue
         cell = netlist_data.get("cells", {}).get(cell_id, {})
         if cell.get("circuit_cell"):

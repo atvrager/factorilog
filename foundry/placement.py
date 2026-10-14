@@ -85,8 +85,50 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
         cell_id = inst.get("cell", "")
         cell = cell_map.get(cell_id, {})
 
-        if macro in ("belt_merge2", "belt_split2", "belt_balancer2") or cell_id in (
-            "belt_merge2",
+        if macro == "belt_merge2" or cell_id == "belt_merge2":
+            orient = comp.get("orient", "N")
+            cw, ch = 3, 3
+            if orient == "W":
+                # Flow North
+                ent = add_entity("splitter", gx + 1.0, gy + 2.5, direction=DIRECTION_NORTH)
+                add_entity("transport-belt", gx + 0.5, gy + 1.5, direction=DIRECTION_NORTH)
+                add_entity("transport-belt", gx + 0.5, gy + 0.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 1.5, gy + 1.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 2.5, gy + 1.5, direction=DIRECTION_NORTH)
+                add_entity("transport-belt", gx + 2.5, gy + 0.5, direction=DIRECTION_WEST)
+                add_entity("transport-belt", gx + 1.5, gy + 0.5, direction=DIRECTION_NORTH)
+            elif orient == "E":
+                # Flow South
+                ent = add_entity("splitter", gx + 1.0, gy + 0.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 0.5, gy + 1.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 0.5, gy + 2.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 1.5, gy + 1.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 2.5, gy + 1.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 2.5, gy + 2.5, direction=DIRECTION_WEST)
+                add_entity("transport-belt", gx + 1.5, gy + 2.5, direction=DIRECTION_SOUTH)
+            elif orient == "S":
+                # Flow West
+                ent = add_entity("splitter", gx + 2.5, gy + 1.0, direction=DIRECTION_WEST)
+                add_entity("transport-belt", gx + 1.5, gy + 0.5, direction=DIRECTION_WEST)
+                add_entity("transport-belt", gx + 0.5, gy + 0.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 1.5, gy + 1.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 1.5, gy + 2.5, direction=DIRECTION_WEST)
+                add_entity("transport-belt", gx + 0.5, gy + 2.5, direction=DIRECTION_NORTH)
+                add_entity("transport-belt", gx + 0.5, gy + 1.5, direction=DIRECTION_WEST)
+            else:
+                # Default orient == "N": Flow East
+                ent = add_entity("splitter", gx + 0.5, gy + 1.0, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 1.5, gy + 0.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 2.5, gy + 0.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 1.5, gy + 1.5, direction=DIRECTION_SOUTH)
+                add_entity("transport-belt", gx + 1.5, gy + 2.5, direction=DIRECTION_EAST)
+                add_entity("transport-belt", gx + 2.5, gy + 2.5, direction=DIRECTION_NORTH)
+                add_entity("transport-belt", gx + 2.5, gy + 1.5, direction=DIRECTION_EAST)
+            inst_to_entity[cname] = ent
+            for tx in range(cw):
+                for ty in range(ch):
+                    occupied_positions.add((round(gx + tx + 0.5, 2), round(gy + ty + 0.5, 2)))
+        elif macro in ("belt_split2", "belt_balancer2") or cell_id in (
             "belt_split2",
             "belt_balancer2",
         ):

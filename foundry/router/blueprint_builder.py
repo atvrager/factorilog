@@ -28,11 +28,23 @@ def build_blueprint_entities(
     entities_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
 
     for net_name, res in routes.items():
-        if not res.is_success or not res.edges:
+        if not res.is_success or not res.nodes:
             continue
 
         net = net_map.get(net_name)
         is_fluid = net.is_fluid if net else False
+
+        if not res.edges:
+            goal = res.nodes[0]
+            pos = (goal.x, goal.y)
+            if pos not in entities_by_pos:
+                name = "pipe" if is_fluid else "transport-belt"
+                entities_by_pos[pos] = {
+                    "name": name,
+                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
+                    "direction": goal.heading,
+                }
+            continue
 
         for edge in res.edges:
             start = edge.start

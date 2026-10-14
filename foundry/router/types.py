@@ -82,6 +82,7 @@ class RouterNetSpec:
     terminal_heading: int | None = None
     source_inward_dir: int | None = None
     sink_inward_dir: int | None = None
+    corridor_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -94,3 +95,4 @@ class RouteResult:
     cost: float
     is_success: bool = True
     error_message: str | None = None
+    failed_frontier: tuple[tuple[int, int], ...] = ()

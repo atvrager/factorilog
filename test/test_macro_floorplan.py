@@ -315,3 +315,83 @@ class TestMacroFloorplan(unittest.TestCase):
         self.assertEqual(floorplan_zero.grid_w, 5)
         self.assertEqual(floorplan_zero.grid_h, 5)
         self.assertEqual(len(floorplan_zero.empty_blocks), 3)
+
+    def test_plan_hierarchical_nets_decomposition(self) -> None:
+        """Verify hierarchical decomposition into 94x94 block specs and street highway specs."""
+        from foundry.router.types import RouterNetSpec
+
+        net_specs = [
+            # Purely intra-block net inside (0, 0)
+            RouterNetSpec(
+                name="local_gear",
+                source=(20, 30),
+                sink=(50, 30),
+                commodity="iron-gear-wheel",
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+            ),
+            # Inter-block net from (0, 0) to (1, 0)
+            RouterNetSpec(
+                name="cross_plate",
+                source=(80, 40),
+                sink=(120, 40),
+                commodity="iron-plate",
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+            ),
+            # External input PIN at (0, 20) to block (1, 0)
+            RouterNetSpec(
+                name="ext_copper",
+                source=(0, 20),
+                sink=(115, 25),
+                commodity="copper-ore",
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+            ),
+            # Multi-terminal fluid net across PIN (0, 60) and two terminals in (1, 0)
+            RouterNetSpec(
+                name="water_mst_0",
+                source=(130, 60),
+                sink=(0, 60),
+                commodity="water",
+                is_fluid=True,
+            ),
+            RouterNetSpec(
+                name="water_mst_1",
+                source=(130, 75),
+                sink=(130, 60),
+                commodity="water",
+                is_fluid=True,
+            ),
+        ]
+        intra_specs, hwy_specs, no_hood_tiles, port_headings, floorplan = (
+            self.floorplanner.plan_hierarchical_nets(
+                net_specs=net_specs,
+                grid_w=2,
+                grid_h=1,
+                obstacles=set(),
+                min_x=0,
+                min_y=0,
+                max_x=200,
+                max_y=100,
+            )
+        )
+        # Intra-block net stays in (0, 0) without highway spec
+        blk00_names = {s.name for s in intra_specs[(0, 0)]}
+        self.assertIn("local_gear", blk00_names)
+        self.assertIn("cross_plate_export_0_0", blk00_names)
+
+        # Block (1, 0) receives import stubs and local fluid MST
+        blk10_names = {s.name for s in intra_specs[(1, 0)]}
+        self.assertIn("cross_plate_import_1_0", blk10_names)
+        self.assertIn("ext_copper_import_1_0", blk10_names)
+        self.assertIn("water_blk_1_0_mst_0", blk10_names)
+        self.assertIn("water_blk_1_0_mst_1", blk10_names)
+
+        # Highway receives only inter-block trunks (and only 1 water trunk for block (1, 0))
+        hwy_names = {s.name for s in hwy_specs}
+        self.assertEqual(hwy_names, {"cross_plate_hwy", "ext_copper_hwy", "water_hwy_mst_0"})
+        self.assertGreaterEqual(len(no_hood_tiles), 8)
+        self.assertGreaterEqual(len(port_headings), 6)
+        self.assertEqual(len(floorplan.ports), 4)
+

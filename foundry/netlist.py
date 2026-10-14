@@ -76,16 +76,15 @@ def split_cell() -> dict[str, Any]:
 def merge_cell() -> dict[str, Any]:
     """The merge cell as a PDK cell record.
 
-    The splitter footprint is 1.8 x 0.8 tiles in the dump; the record
-    snaps it to the tile grid, 2 x 1. Two inputs, one output, and no
-    crafting rate.
+    Uses a 3x3 footprint containing a 1x2 splitter and symmetric opposing
+    side-load belts so both output lanes are balanced 50/50.
     """
     return {
         "cell": MERGE_CELL,
         "machine": "splitter",
         "recipe": "merge2",
-        "width": 1,
-        "height": 2,
+        "width": 3,
+        "height": 3,
         "watts": 0.0,
         "crafts_per_minute": 0.0,
         "inputs": ["a", "b"],
@@ -336,40 +335,30 @@ def build(
     instances_by_depth: dict[int, list[Instance]] = collections.defaultdict(list)
     for inst in nl.instances:
         c = nl.cells.get(inst.cell_key, {})
-        d = max((depths.get(p, 0) for p in c.get("outputs", [])), default=0)
+        d = min((depths.get(p, 0) for p in c.get("outputs", [])), default=0)
         if d == 0:
             d = max((depths.get(p, 0) for p in c.get("inputs", [])), default=0)
         instances_by_depth[d].append(inst)
 
     current_rank = 0
     max_machines_per_row = 5
-    for d in sorted(instances_by_depth.keys()):
-        d_insts = instances_by_depth[d]
-        if d <= 1:
-            by_recipe: dict[str, list[Instance]] = collections.defaultdict(list)
-            for inst in d_insts:
-                by_recipe[inst.recipe].append(inst)
-            for r_name in sorted(by_recipe.keys()):
-                r_insts = by_recipe[r_name]
-                for chunk_start in range(0, len(r_insts), max_machines_per_row):
-                    for inst in r_insts[chunk_start : chunk_start + max_machines_per_row]:
-                        inst.rank = current_rank
-                    current_rank += 1
-        elif d == 2:
-            if len(d_insts) <= 15:
-                for inst in d_insts:
+
+    def _assign_recipe_chunk_ranks(inst_list: list[Instance], sort_recipes: bool = True) -> None:
+        nonlocal current_rank
+        by_recipe: dict[str, list[Instance]] = collections.defaultdict(list)
+        for inst in inst_list:
+            by_recipe[inst.recipe].append(inst)
+        recipe_keys = sorted(by_recipe.keys()) if sort_recipes else list(by_recipe.keys())
+        for r_name in recipe_keys:
+            r_insts = by_recipe[r_name]
+            for chunk_start in range(0, len(r_insts), max_machines_per_row):
+                for inst in r_insts[chunk_start : chunk_start + max_machines_per_row]:
                     inst.rank = current_rank
                 current_rank += 1
-            else:
-                by_recipe = collections.defaultdict(list)
-                for inst in d_insts:
-                    by_recipe[inst.recipe].append(inst)
-                for r_name in sorted(by_recipe.keys()):
-                    r_insts = by_recipe[r_name]
-                    for chunk_start in range(0, len(r_insts), max_machines_per_row):
-                        for inst in r_insts[chunk_start : chunk_start + max_machines_per_row]:
-                            inst.rank = current_rank
-                        current_rank += 1
+
+    for d in sorted(instances_by_depth.keys()):
+        if d <= 2:
+            _assign_recipe_chunk_ranks(instances_by_depth[d], sort_recipes=True)
 
     higher_term: list[Instance] = []
     for d in sorted(instances_by_depth.keys()):
@@ -382,19 +371,9 @@ def build(
                 else:
                     non_term_at_d.append(inst)
             if non_term_at_d:
-                for chunk_start in range(0, len(non_term_at_d), max_machines_per_row):
-                    for inst in non_term_at_d[chunk_start : chunk_start + max_machines_per_row]:
-                        inst.rank = current_rank
-                    current_rank += 1
+                _assign_recipe_chunk_ranks(non_term_at_d, sort_recipes=True)
     if higher_term:
-        by_recipe = collections.defaultdict(list)
-        for inst in higher_term:
-            by_recipe[inst.recipe].append(inst)
-        for r_insts in by_recipe.values():
-            for chunk_start in range(0, len(r_insts), max_machines_per_row):
-                for inst in r_insts[chunk_start : chunk_start + max_machines_per_row]:
-                    inst.rank = current_rank
-                current_rank += 1
+        _assign_recipe_chunk_ranks(higher_term, sort_recipes=False)
     return nl
 
 
@@ -521,7 +500,6 @@ def split_net(
         return []
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
-    targets = [f"{material}__{s}" for s in net.sinks]
     count = [0]
     bal_count = [0]
     inst_by_name = {inst.name: inst for inst in nl.instances}
@@ -606,39 +584,19 @@ def split_net(
             if len(right) > 1:
                 _build_tree(y2_wire, right, tree_rank=right_rank)
 
-    if net.bus_inputs and len(net.bus_inputs) > 1 and bal_entries is not None:
-        bus_wires = [sanitize(b) for b in net.bus_inputs]
-        balanced_outputs = _balance_inputs(
-            nl, material, net.material, bus_wires, bal_entries, bal_count
-        )
-        k = len(balanced_outputs)
-        chunk_size = len(targets) / k
-        for i, out_wire in enumerate(balanced_outputs):
-            start = round(i * chunk_size)
-            end = round((i + 1) * chunk_size)
-            sub_targets = targets[start:end]
-            if synthesize_trees:
-                if len(sub_targets) > 1:
-                    _build_tree(out_wire, sub_targets)
-                elif len(sub_targets) == 1:
-                    for idx, b_entry in enumerate(bal_entries):
-                        b_name, b_a1, b_a2, b_y1, b_y2 = b_entry
-                        if b_y1 == out_wire:
-                            bal_entries[idx] = (b_name, b_a1, b_a2, sub_targets[0], b_y2)
-                        elif b_y2 == out_wire:
-                            bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, sub_targets[0])
-    elif synthesize_trees:
+    def _build_rank_grouped_tree(in_wire: str, sink_names: list[str]) -> None:
         sinks_by_rank: dict[int, list[str]] = collections.defaultdict(list)
-        for s in net.sinks:
+        for s in sink_names:
             inst = inst_by_name.get(s)
             r = inst.rank if inst else rank
             sinks_by_rank[r].append(s)
 
         sorted_sink_ranks = sorted(sinks_by_rank.keys())
+        sub_targets = [f"{material}__{s}" for s in sink_names]
         if len(sorted_sink_ranks) <= 1:
             target_rank = sorted_sink_ranks[0] if sorted_sink_ranks else rank
             chosen_rank = rank if (driver_ranks and not is_primary) else target_rank
-            _build_tree(material, targets, tree_rank=chosen_rank)
+            _build_tree(in_wire, sub_targets, tree_rank=chosen_rank)
         else:
             rank_feeds: list[str] = []
             sub_sink_lists: list[tuple[str, list[str], int]] = []
@@ -654,9 +612,34 @@ def split_net(
                     sub_sink_lists.append((feed_wire, sub_sinks, r))
 
             trunk_rank = rank if rank < min(sorted_sink_ranks) else min(sorted_sink_ranks)
-            _build_tree(material, rank_feeds, tree_rank=trunk_rank)
+            _build_tree(in_wire, rank_feeds, tree_rank=trunk_rank)
             for feed_wire, sub_sinks, r in sub_sink_lists:
                 _build_tree(feed_wire, sub_sinks, tree_rank=r)
+
+    if net.bus_inputs and len(net.bus_inputs) > 1 and bal_entries is not None:
+        bus_wires = [sanitize(b) for b in net.bus_inputs]
+        balanced_outputs = _balance_inputs(
+            nl, material, net.material, bus_wires, bal_entries, bal_count
+        )
+        k = len(balanced_outputs)
+        chunk_size = len(net.sinks) / k
+        for i, out_wire in enumerate(balanced_outputs):
+            start = round(i * chunk_size)
+            end = round((i + 1) * chunk_size)
+            sub_sink_names = net.sinks[start:end]
+            if synthesize_trees:
+                if len(sub_sink_names) > 1:
+                    _build_rank_grouped_tree(out_wire, sub_sink_names)
+                elif len(sub_sink_names) == 1:
+                    single_target = f"{material}__{sub_sink_names[0]}"
+                    for idx, b_entry in enumerate(bal_entries):
+                        b_name, b_a1, b_a2, b_y1, b_y2 = b_entry
+                        if b_y1 == out_wire:
+                            bal_entries[idx] = (b_name, b_a1, b_a2, single_target, b_y2)
+                        elif b_y2 == out_wire:
+                            bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, single_target)
+    elif synthesize_trees:
+        _build_rank_grouped_tree(material, net.sinks)
 
     if entries:
         net.sinks = [entries[0][0]]

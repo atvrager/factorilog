@@ -53,8 +53,10 @@ def get_component_box(
             if orient in ("W", "E"):
                 return cx, cy, h, w
             return cx, cy, w, h
-    if macro in ("belt_split2", "belt_merge2", "belt_balancer2"):
+    if macro in ("belt_split2", "belt_balancer2"):
         cw, ch = (2 * units, units) if orient in ("W", "E") else (units, 2 * units)
+    elif macro == "belt_merge2":
+        cw, ch = 3 * units, 3 * units
     elif "refinery" in macro or "chemical_plant" in macro or "assembling_machine" in macro:
         cw, ch = 5 * units, 5 * units
     elif "furnace" in macro:

@@ -867,3 +867,787 @@ class MacroFloorplanner:
         floorplan = self.plan_grid(clusters, grid_w=grid_w, grid_h=grid_h)
         self.assign_inter_block_routes(floorplan, netlist_data)
         return floorplan
+
+    @staticmethod
+    def _block_of_coord(
+        pos: tuple[int, int],
+        grid_w: int,
+        grid_h: int,
+    ) -> tuple[int, int] | None:
+        """Return (bx, by) if pos lies inside a 94x94 city block core, else None."""
+        x, y = pos
+        bx = x // 100
+        by = y // 100
+        if 0 <= bx < grid_w and 0 <= by < grid_h and 3 <= (x % 100) <= 96 and 3 <= (y % 100) <= 96:
+            return (bx, by)
+        return None
+
+    @staticmethod
+    def _block_core_bbox(blk: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Return the (min_x, min_y, max_x, max_y) tile bounds for a 94x94 core."""
+        bx, by = blk
+        return (bx * 100 + 3, by * 100 + 3, bx * 100 + 96, by * 100 + 96)
+
+    @staticmethod
+    def _highway_corridor_bbox(
+        src: tuple[int, int],
+        snk: tuple[int, int],
+        min_x: int,
+        min_y: int,
+        max_x: int,
+        max_y: int,
+    ) -> tuple[int, int, int, int]:
+        """Return the street channel bounding box enclosing src and snk."""
+        sx, sy = src
+        tx, ty = snk
+        b_min_x = max(0, min(sx, tx) // 100)
+        b_max_x = max(sx, tx) // 100
+        b_min_y = max(0, min(sy, ty) // 100)
+        b_max_y = max(sy, ty) // 100
+        return (
+            max(min_x, b_min_x * 100 - 3),
+            max(min_y, b_min_y * 100 - 3),
+            min(max_x, (b_max_x + 1) * 100 + 2),
+            min(max_y, (b_max_y + 1) * 100 + 2),
+        )
+
+    @staticmethod
+    def _edge_port_geometry(
+        blk: tuple[int, int],
+        edge: str,
+        port_type: str,
+        c: int,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int],
+        tuple[int, int],
+        tuple[int, int],
+        int,
+        tuple[int, int, str],
+    ]:
+        """Return (core_pos, channel_pos, in_pos, out_pos, port_dir, opp_edge_key)."""
+        bx, by = blk
+        if edge == "W":
+            core_pos = (bx * 100 + 3, c)
+            channel_pos = (bx * 100 + 2, c)
+            in_pos = (bx * 100 + 4, c)
+            out_pos = (bx * 100 + 1, c)
+            port_dir = DIRECTION_WEST if port_type == "export" else DIRECTION_EAST
+            opp_key = (bx - 1, by, "E")
+        elif edge == "E":
+            core_pos = (bx * 100 + 96, c)
+            channel_pos = (bx * 100 + 97, c)
+            in_pos = (bx * 100 + 95, c)
+            out_pos = (bx * 100 + 98, c)
+            port_dir = DIRECTION_EAST if port_type == "export" else DIRECTION_WEST
+            opp_key = (bx + 1, by, "W")
+        elif edge == "N":
+            core_pos = (c, by * 100 + 3)
+            channel_pos = (c, by * 100 + 2)
+            in_pos = (c, by * 100 + 4)
+            out_pos = (c, by * 100 + 1)
+            port_dir = DIRECTION_NORTH if port_type == "export" else DIRECTION_SOUTH
+            opp_key = (bx, by - 1, "S")
+        else:
+            core_pos = (c, by * 100 + 96)
+            channel_pos = (c, by * 100 + 97)
+            in_pos = (c, by * 100 + 95)
+            out_pos = (c, by * 100 + 98)
+            port_dir = DIRECTION_SOUTH if port_type == "export" else DIRECTION_NORTH
+            opp_key = (bx, by + 1, "N")
+        return core_pos, channel_pos, in_pos, out_pos, port_dir, opp_key
+
+    def _allocate_block_port(
+        self,
+        blk: tuple[int, int],
+        net_name: str,
+        port_type: str,
+        internal_pt: tuple[int, int],
+        target_pt: tuple[int, int],
+        obstacles: set[tuple[int, int]],
+        used_edge_coords: dict[tuple[int, int, str], list[tuple[int, str]]],
+        pin_reserved_coords: dict[tuple[int, int, str], list[tuple[int, tuple[int, int]]]],
+        all_terminals: set[tuple[int, int]],
+        preferred_edge: str | None = None,
+        preferred_c: int | None = None,
+        tier: str = "fast-transport-belt",
+        grid_w: int = 1,
+        grid_h: int = 1,
+    ) -> tuple[BlockPort, tuple[int, int], tuple[int, int]]:
+        """Allocate a conflict-free BlockPort on the boundary of blk."""
+        bx, by = blk
+        ix, iy = internal_pt
+        tx, ty = target_pt
+
+        def _edge_score(e: str) -> float:
+            if e == "N":
+                px = max(bx * 100 + 5, min(bx * 100 + 94, ix))
+                py = by * 100 + 2
+            elif e == "S":
+                px = max(bx * 100 + 5, min(bx * 100 + 94, ix))
+                py = by * 100 + 97
+            elif e == "W":
+                px = bx * 100 + 2
+                py = max(by * 100 + 5, min(by * 100 + 94, iy))
+            else:
+                px = bx * 100 + 97
+                py = max(by * 100 + 5, min(by * 100 + 94, iy))
+
+            in_cost = 2.2 * float(abs(ix - px)) + 1.0 * float(abs(iy - py))
+            if e in ("W", "E") and abs(px - tx) > 6:
+                vert_d = min(
+                    abs(py - (by * 100 + 2)) + abs((by * 100 + 2) - ty),
+                    abs(py - (by * 100 + 97)) + abs((by * 100 + 97) - ty),
+                )
+                out_cost = float(abs(px - tx) + vert_d)
+            elif e in ("N", "S") and abs(py - ty) > 6:
+                horiz_d = min(
+                    abs(px - (bx * 100 + 2)) + abs((bx * 100 + 2) - tx),
+                    abs(px - (bx * 100 + 97)) + abs((bx * 100 + 97) - tx),
+                )
+                out_cost = float(horiz_d + abs(py - ty))
+            else:
+                out_cost = float(abs(px - tx) + abs(py - ty))
+
+            load_pen = 14.0 * float(len(used_edge_coords.get((bx, by, e), [])))
+            rim_pen = 0.0
+            if grid_w * grid_h > 1:
+                if e == "W" and bx == 0:
+                    rim_pen = -200.0 if (tx <= 2 and by * 100 <= ty <= by * 100 + 99) else 600.0
+                elif e == "E" and bx == grid_w - 1:
+                    rim_pen = (
+                        -200.0
+                        if (tx >= grid_w * 100 - 3 and by * 100 <= ty <= by * 100 + 99)
+                        else 600.0
+                    )
+                elif e == "N" and by == 0:
+                    rim_pen = -200.0 if (ty <= 2 and bx * 100 <= tx <= bx * 100 + 99) else 120.0
+                elif e == "S" and by == grid_h - 1:
+                    rim_pen = (
+                        -200.0
+                        if (ty >= grid_h * 100 - 3 and bx * 100 <= tx <= bx * 100 + 99)
+                        else 120.0
+                    )
+            return in_cost + out_cost + load_pen + rim_pen
+
+        all_edges = ["N", "S", "E", "W"]
+        sorted_by_score = sorted(all_edges, key=_edge_score)
+        if preferred_edge is not None:
+            edge_order = [preferred_edge] + [e for e in sorted_by_score if e != preferred_edge]
+        else:
+            edge_order = sorted_by_score
+
+        for spacing in (3, 2, 1):
+            for edge in edge_order:
+                base = by * 100 if edge in ("W", "E") else bx * 100
+                if preferred_c is not None and base + 5 <= preferred_c <= base + 94:
+                    ideal_c = preferred_c
+                elif edge in ("W", "E"):
+                    if by * 100 + 5 <= ty <= by * 100 + 94 and (
+                        (edge == "W" and tx <= bx * 100 + 2 and bx * 100 - tx <= 6)
+                        or (edge == "E" and tx >= bx * 100 + 97 and tx - (bx * 100 + 99) <= 6)
+                    ):
+                        ideal_c = ty
+                    else:
+                        ideal_c = iy
+                else:
+                    ideal_c = ix
+                ideal_c = max(base + 5, min(base + 94, ideal_c))
+
+                candidates = sorted(
+                    range(base + 5, base + 95),
+                    key=lambda c_val: (abs(c_val - ideal_c), c_val),
+                )
+                edge_key = (bx, by, edge)
+                used_here = used_edge_coords.get(edge_key, [])
+                pin_here = pin_reserved_coords.get(edge_key, [])
+
+                for c_val in candidates:
+                    if any(abs(c_val - uc) < spacing for uc, _ in used_here):
+                        continue
+                    if any(
+                        abs(c_val - pc) < 2 and p_pos not in (internal_pt, target_pt)
+                        for pc, p_pos in pin_here
+                    ):
+                        continue
+                    core_pos, channel_pos, in_pos, out_pos, port_dir, opp_key = (
+                        self._edge_port_geometry(blk, edge, port_type, c_val)
+                    )
+                    used_opp = used_edge_coords.get(opp_key, [])
+                    if any(abs(c_val - uc) < spacing and unet != net_name for uc, unet in used_opp):
+                        continue
+                    if any(pt in obstacles for pt in (core_pos, channel_pos, in_pos, out_pos)):
+                        continue
+                    if any(
+                        pt in all_terminals and pt not in (internal_pt, target_pt)
+                        for pt in (core_pos, channel_pos, in_pos, out_pos)
+                    ):
+                        continue
+
+                    used_edge_coords.setdefault(edge_key, []).append((c_val, net_name))
+                    ch_id = (
+                        f"v_channel_{max(0, bx - 1 if edge == 'W' else bx)}_{by}"
+                        if edge in ("W", "E")
+                        else f"h_channel_{bx}_{max(0, by - 1 if edge == 'N' else by)}"
+                    )
+                    port = BlockPort(
+                        name=f"{net_name}_{port_type}_{bx}_{by}_{edge}_{c_val}",
+                        block=blk,
+                        net_name=net_name,
+                        port_type=port_type,
+                        edge=edge,
+                        position=(float(channel_pos[0]), float(channel_pos[1])),
+                        channel_id=ch_id,
+                        lane_index=0,
+                        direction=port_dir,
+                        tier=tier,
+                        internal_pos=(float(core_pos[0]), float(core_pos[1])),
+                    )
+                    return port, core_pos, channel_pos
+
+        # Fallback if all candidates were constrained
+        edge = edge_order[0]
+        base = by * 100 if edge in ("W", "E") else bx * 100
+        c_val = max(base + 5, min(base + 94, iy if edge in ("W", "E") else ix))
+        core_pos, channel_pos, _in_p, _out_p, port_dir, _opp = self._edge_port_geometry(
+            blk, edge, port_type, c_val
+        )
+        used_edge_coords.setdefault((bx, by, edge), []).append((c_val, net_name))
+        port = BlockPort(
+            name=f"{net_name}_{port_type}_{bx}_{by}_{edge}_{c_val}",
+            block=blk,
+            net_name=net_name,
+            port_type=port_type,
+            edge=edge,
+            position=(float(channel_pos[0]), float(channel_pos[1])),
+            channel_id=f"ch_{bx}_{by}_{edge}",
+            lane_index=0,
+            direction=port_dir,
+            tier=tier,
+            internal_pos=(float(core_pos[0]), float(core_pos[1])),
+        )
+        return port, core_pos, channel_pos
+
+    def plan_hierarchical_nets(
+        self,
+        net_specs: list[Any],
+        grid_w: int,
+        grid_h: int,
+        obstacles: set[tuple[int, int]],
+        min_x: int = 0,
+        min_y: int = 0,
+        max_x: int | None = None,
+        max_y: int | None = None,
+    ) -> tuple[
+        dict[tuple[int, int], list[Any]],
+        list[Any],
+        set[tuple[int, int]],
+        dict[tuple[int, int], int],
+        MacroFloorplan,
+    ]:
+        """Decompose flat RouterNetSpecs into intra-block core specs and street highway specs.
+
+        Returns:
+            intra_block_specs: Mapping of (bx, by) -> list of RouterNetSpec inside that 94x94 core.
+            highway_specs: List of RouterNetSpec for the 6-tile street channels and switchboxes.
+            port_no_hood_tiles: Set of (x, y) boundary tiles where underground hoods are forbidden.
+            port_headings: Mapping of (x, y) -> heading for allocated belt port tiles.
+            floorplan: Populated MacroFloorplan with channels, intersections, ports, and routes.
+        """
+        try:
+            from foundry.router.types import RouterNetSpec
+        except ImportError:
+            from router.types import RouterNetSpec
+
+        if max_x is None:
+            max_x = grid_w * 100
+        if max_y is None:
+            max_y = grid_h * 100
+
+        floorplan = self.plan_grid([], grid_w=grid_w, grid_h=grid_h)
+        floorplan.empty_blocks.clear()
+
+        intra_block_specs: dict[tuple[int, int], list[Any]] = {
+            (bx, by): [] for bx in range(grid_w) for by in range(grid_h)
+        }
+        highway_specs: list[Any] = []
+        port_no_hood_tiles: set[tuple[int, int]] = set()
+        port_headings: dict[tuple[int, int], int] = {}
+        used_edge_coords: dict[tuple[int, int, str], list[tuple[int, str]]] = {}
+        pin_reserved_coords: dict[tuple[int, int, str], list[tuple[int, tuple[int, int]]]] = {}
+
+        all_terminals: set[tuple[int, int]] = set()
+        for spec in net_specs:
+            all_terminals.add(spec.source)
+            all_terminals.add(spec.sink)
+            for pt in (spec.source, spec.sink):
+                if self._block_of_coord(pt, grid_w, grid_h) is None:
+                    px, py = pt
+                    by_pin = max(0, min(grid_h - 1, py // 100))
+                    bx_pin = max(0, min(grid_w - 1, px // 100))
+                    if px <= 2:
+                        pin_reserved_coords.setdefault((0, by_pin, "W"), []).append((py, pt))
+                    elif px >= grid_w * 100 - 3:
+                        pin_reserved_coords.setdefault((grid_w - 1, by_pin, "E"), []).append(
+                            (py, pt)
+                        )
+                    if py <= 2:
+                        pin_reserved_coords.setdefault((bx_pin, 0, "N"), []).append((px, pt))
+                    elif py >= grid_h * 100 - 3:
+                        pin_reserved_coords.setdefault((bx_pin, grid_h - 1, "S"), []).append(
+                            (px, pt)
+                        )
+
+        def _record_inter_block_channel_route(
+            net_name: str,
+            src_blk: tuple[int, int] | None,
+            dst_blk: tuple[int, int] | None,
+            is_fluid: bool,
+            src_port: BlockPort | None = None,
+            dst_port: BlockPort | None = None,
+        ) -> None:
+            tier = "pipe" if is_fluid else self.default_belt_tier
+            t_blks = [dst_blk] if dst_blk is not None else []
+            route = InterBlockRoute(
+                net_name=net_name,
+                source_block=src_blk,
+                target_blocks=t_blks,
+                is_fluid=is_fluid,
+                tier=tier,
+                source_port=src_port,
+                target_ports=[dst_port] if dst_port is not None else [],
+            )
+            if src_blk is not None and dst_blk is not None and src_blk != dst_blk:
+                sx, sy = src_blk
+                tx, ty = dst_blk
+                if sx != tx:
+                    dir_h = DIRECTION_EAST if tx > sx else DIRECTION_WEST
+                    ch_y = sy if sy < grid_h - 1 else max(0, sy - 1)
+                    for col in range(min(sx, tx), max(sx, tx)):
+                        ch_id = f"h_channel_{col}_{ch_y}"
+                        channel = floorplan.channels.get(ch_id)
+                        if channel:
+                            try:
+                                lane = channel.allocate_lane(
+                                    net_name, direction=dir_h, item_type=net_name, tier=tier
+                                )
+                                route.segments.append(
+                                    ChannelRouteSegment(
+                                        channel_id=ch_id,
+                                        lane_index=lane.lane_index,
+                                        orientation="H",
+                                        direction=dir_h,
+                                    )
+                                )
+                            except RuntimeError:
+                                pass
+                if sy != ty:
+                    dir_v = DIRECTION_NORTH if ty > sy else DIRECTION_SOUTH
+                    ch_x = tx if tx < grid_w - 1 else max(0, tx - 1)
+                    for row in range(min(sy, ty), max(sy, ty)):
+                        ch_id = f"v_channel_{ch_x}_{row}"
+                        channel = floorplan.channels.get(ch_id)
+                        if channel:
+                            try:
+                                lane = channel.allocate_lane(
+                                    net_name, direction=dir_v, item_type=net_name, tier=tier
+                                )
+                                route.segments.append(
+                                    ChannelRouteSegment(
+                                        channel_id=ch_id,
+                                        lane_index=lane.lane_index,
+                                        orientation="V",
+                                        direction=dir_v,
+                                    )
+                                )
+                            except RuntimeError:
+                                pass
+                if sx != tx and sy != ty:
+                    corner_x = tx
+                    corner_y = sy if sy < grid_h - 1 else max(1, sy)
+                    intersection = floorplan.intersections.get((corner_x, corner_y))
+                    if intersection:
+                        h_lane_idx = 0
+                        v_lane_idx = 0
+                        for seg in route.segments:
+                            if seg.orientation == "H":
+                                h_lane_idx = seg.lane_index
+                            elif seg.orientation == "V":
+                                v_lane_idx = seg.lane_index
+                        intersection.add_turn("H", h_lane_idx, "V", v_lane_idx)
+                        route.turns.append((corner_x, corner_y, "H", h_lane_idx, "V", v_lane_idx))
+            floorplan.routes[net_name] = route
+
+        # Separate solid nets and fluid nets (grouping fluid MST branches by base fluid net)
+        solid_specs = [s for s in net_specs if not s.is_fluid]
+        fluid_specs = [s for s in net_specs if s.is_fluid]
+
+        for net in solid_specs:
+            src_blk = self._block_of_coord(net.source, grid_w, grid_h)
+            dst_blk = self._block_of_coord(net.sink, grid_w, grid_h)
+
+            if src_blk is not None and src_blk == dst_blk:
+                bbox = self._block_core_bbox(src_blk)
+                intra_block_specs[src_blk].append(
+                    RouterNetSpec(
+                        name=net.name,
+                        source=net.source,
+                        sink=net.sink,
+                        commodity=net.commodity,
+                        lane=net.lane,
+                        is_fluid=False,
+                        start_heading=net.start_heading,
+                        end_heading=net.end_heading,
+                        terminal_heading=net.terminal_heading,
+                        corridor_bbox=bbox,
+                    )
+                )
+                continue
+
+            if src_blk is None and dst_blk is None:
+                highway_specs.append(
+                    RouterNetSpec(
+                        name=f"{net.name}_hwy",
+                        source=net.source,
+                        sink=net.sink,
+                        commodity=net.commodity,
+                        lane=net.lane,
+                        is_fluid=False,
+                        start_heading=net.start_heading,
+                        end_heading=net.end_heading,
+                        terminal_heading=net.terminal_heading,
+                        corridor_bbox=self._highway_corridor_bbox(
+                            net.source, net.sink, min_x, min_y, max_x, max_y
+                        ),
+                    )
+                )
+                continue
+
+            pref_src_edge: str | None = None
+            pref_dst_edge: str | None = None
+            pref_shared_c: int | None = None
+            if (
+                src_blk is not None
+                and dst_blk is not None
+                and abs(src_blk[0] - dst_blk[0]) + abs(src_blk[1] - dst_blk[1]) == 1
+            ):
+                if dst_blk[0] == src_blk[0] + 1:
+                    pref_src_edge, pref_dst_edge = "E", "W"
+                    pref_shared_c = round(0.5 * (net.source[1] + net.sink[1]))
+                elif dst_blk[0] == src_blk[0] - 1:
+                    pref_src_edge, pref_dst_edge = "W", "E"
+                    pref_shared_c = round(0.5 * (net.source[1] + net.sink[1]))
+                elif dst_blk[1] == src_blk[1] + 1:
+                    pref_src_edge, pref_dst_edge = "S", "N"
+                    pref_shared_c = round(0.5 * (net.source[0] + net.sink[0]))
+                else:
+                    pref_src_edge, pref_dst_edge = "N", "S"
+                    pref_shared_c = round(0.5 * (net.source[0] + net.sink[0]))
+
+            p_out: BlockPort | None = None
+            p_in: BlockPort | None = None
+            hwy_src = net.source
+            hwy_start_h = net.start_heading
+            hwy_snk = net.sink
+            hwy_end_h = net.end_heading
+            hwy_term_h = net.terminal_heading
+
+            if src_blk is not None:
+                p_out, out_core, out_chan = self._allocate_block_port(
+                    blk=src_blk,
+                    net_name=net.name,
+                    port_type="export",
+                    internal_pt=net.source,
+                    target_pt=net.sink,
+                    obstacles=obstacles,
+                    used_edge_coords=used_edge_coords,
+                    pin_reserved_coords=pin_reserved_coords,
+                    all_terminals=all_terminals,
+                    preferred_edge=pref_src_edge,
+                    preferred_c=pref_shared_c,
+                    tier=self.default_belt_tier,
+                    grid_w=grid_w,
+                    grid_h=grid_h,
+                )
+                floorplan.ports.append(p_out)
+                port_no_hood_tiles.add(out_core)
+                port_headings[out_core] = p_out.direction
+                port_headings[out_chan] = p_out.direction
+                all_terminals.add(out_core)
+                all_terminals.add(out_chan)
+
+                intra_block_specs[src_blk].append(
+                    RouterNetSpec(
+                        name=f"{net.name}_export_{src_blk[0]}_{src_blk[1]}",
+                        source=net.source,
+                        sink=out_core,
+                        commodity=net.commodity,
+                        lane=net.lane,
+                        is_fluid=False,
+                        start_heading=net.start_heading,
+                        end_heading=p_out.direction,
+                        terminal_heading=p_out.direction,
+                        corridor_bbox=self._block_core_bbox(src_blk),
+                    )
+                )
+                hwy_src = out_chan
+                hwy_start_h = p_out.direction
+                if pref_dst_edge is not None:
+                    pref_shared_c = out_chan[1] if p_out.edge in ("W", "E") else out_chan[0]
+
+            if dst_blk is not None:
+                p_in, in_core, in_chan = self._allocate_block_port(
+                    blk=dst_blk,
+                    net_name=net.name,
+                    port_type="import",
+                    internal_pt=net.sink,
+                    target_pt=hwy_src,
+                    obstacles=obstacles,
+                    used_edge_coords=used_edge_coords,
+                    pin_reserved_coords=pin_reserved_coords,
+                    all_terminals=all_terminals,
+                    preferred_edge=pref_dst_edge,
+                    preferred_c=pref_shared_c,
+                    tier=self.default_belt_tier,
+                    grid_w=grid_w,
+                    grid_h=grid_h,
+                )
+                floorplan.ports.append(p_in)
+                port_no_hood_tiles.add(in_core)
+                port_headings[in_core] = p_in.direction
+                port_headings[in_chan] = p_in.direction
+                all_terminals.add(in_core)
+                all_terminals.add(in_chan)
+
+                intra_block_specs[dst_blk].append(
+                    RouterNetSpec(
+                        name=f"{net.name}_import_{dst_blk[0]}_{dst_blk[1]}",
+                        source=in_core,
+                        sink=net.sink,
+                        commodity=net.commodity,
+                        lane=net.lane,
+                        is_fluid=False,
+                        start_heading=p_in.direction,
+                        end_heading=net.end_heading,
+                        terminal_heading=net.terminal_heading,
+                        corridor_bbox=self._block_core_bbox(dst_blk),
+                    )
+                )
+                hwy_snk = in_chan
+                hwy_end_h = p_in.direction
+                hwy_term_h = p_in.direction
+
+            highway_specs.append(
+                RouterNetSpec(
+                    name=f"{net.name}_hwy",
+                    source=hwy_src,
+                    sink=hwy_snk,
+                    commodity=net.commodity,
+                    lane=net.lane,
+                    is_fluid=False,
+                    start_heading=hwy_start_h,
+                    end_heading=hwy_end_h,
+                    terminal_heading=hwy_term_h,
+                    corridor_bbox=self._highway_corridor_bbox(
+                        hwy_src, hwy_snk, min_x, min_y, max_x, max_y
+                    ),
+                )
+            )
+            _record_inter_block_channel_route(net.name, src_blk, dst_blk, False, p_out, p_in)
+
+        # Group fluid specs by base fluid net name
+        fluid_groups: dict[str, list[Any]] = {}
+        for fspec in fluid_specs:
+            b_name = fspec.name.split("_mst_")[0]
+            if "_d" in b_name and "_s" in b_name:
+                b_name = b_name.split("_d")[0]
+            fluid_groups.setdefault(b_name, []).append(fspec)
+
+        for b_name, f_list in fluid_groups.items():
+            comm = f_list[0].commodity
+            term_map: dict[tuple[int, int], tuple[tuple[int, int], int | None, int | None]] = {}
+            for fs in f_list:
+                if fs.sink not in term_map:
+                    term_map[fs.sink] = (fs.sink, fs.end_heading, fs.sink_inward_dir)
+                if fs.source not in term_map:
+                    term_map[fs.source] = (fs.source, fs.start_heading, fs.source_inward_dir)
+
+            by_blk: dict[
+                tuple[int, int] | None, list[tuple[tuple[int, int], int | None, int | None]]
+            ] = {}
+            for t_pos, t_info in term_map.items():
+                blk_id = self._block_of_coord(t_pos, grid_w, grid_h)
+                by_blk.setdefault(blk_id, []).append(t_info)
+
+            pin_terms = by_blk.get(None, [])
+            blk_terms = {k: v for k, v in by_blk.items() if k is not None}
+
+            if not pin_terms and len(blk_terms) <= 1:
+                only_blk = next(iter(blk_terms.keys()), None)
+                if only_blk is not None:
+                    bbox = self._block_core_bbox(only_blk)
+                    for fs in f_list:
+                        intra_block_specs[only_blk].append(
+                            RouterNetSpec(
+                                name=fs.name,
+                                source=fs.source,
+                                sink=fs.sink,
+                                commodity=fs.commodity,
+                                lane=fs.lane,
+                                is_fluid=True,
+                                start_heading=fs.start_heading,
+                                end_heading=fs.end_heading,
+                                terminal_heading=fs.terminal_heading,
+                                source_inward_dir=fs.source_inward_dir,
+                                sink_inward_dir=fs.sink_inward_dir,
+                                corridor_bbox=bbox,
+                            )
+                        )
+                else:
+                    highway_specs.extend(
+                        RouterNetSpec(
+                            name=f"{fs.name}_hwy",
+                            source=fs.source,
+                            sink=fs.sink,
+                            commodity=fs.commodity,
+                            lane=fs.lane,
+                            is_fluid=True,
+                            start_heading=fs.start_heading,
+                            end_heading=fs.end_heading,
+                            terminal_heading=fs.terminal_heading,
+                            source_inward_dir=fs.source_inward_dir,
+                            sink_inward_dir=fs.sink_inward_dir,
+                            corridor_bbox=self._highway_corridor_bbox(
+                                fs.source, fs.sink, min_x, min_y, max_x, max_y
+                            ),
+                        )
+                        for fs in f_list
+                    )
+                continue
+
+            hwy_nodes: list[tuple[tuple[int, int], int | None, int | None]] = list(pin_terms)
+            sorted_blks = sorted(blk_terms.keys())
+            first_blk: tuple[int, int] | None = sorted_blks[0] if sorted_blks else None
+
+            for blk in sorted_blks:
+                t_list = blk_terms[blk]
+                other_pts = [p[0] for p in pin_terms] + [
+                    p[0] for ob, ol in blk_terms.items() if ob != blk for p in ol
+                ]
+                if other_pts:
+                    avg_tx = round(sum(p[0] for p in other_pts) / len(other_pts))
+                    avg_ty = round(sum(p[1] for p in other_pts) / len(other_pts))
+                    target_pt = min(
+                        other_pts, key=lambda p: abs(p[0] - avg_tx) + abs(p[1] - avg_ty)
+                    )
+                else:
+                    target_pt = (blk[0] * 100 + 50, blk[1] * 100 + 50)
+
+                rep_t = min(
+                    t_list,
+                    key=lambda t_item: (
+                        abs(t_item[0][0] - target_pt[0]) + abs(t_item[0][1] - target_pt[1])
+                    ),
+                )
+                f_port, f_core, f_chan = self._allocate_block_port(
+                    blk=blk,
+                    net_name=b_name,
+                    port_type="import" if pin_terms or blk != first_blk else "export",
+                    internal_pt=rep_t[0],
+                    target_pt=target_pt,
+                    obstacles=obstacles,
+                    used_edge_coords=used_edge_coords,
+                    pin_reserved_coords=pin_reserved_coords,
+                    all_terminals=all_terminals,
+                    tier="pipe",
+                    grid_w=grid_w,
+                    grid_h=grid_h,
+                )
+                floorplan.ports.append(f_port)
+                port_no_hood_tiles.add(f_core)
+                port_no_hood_tiles.add(f_chan)
+                all_terminals.add(f_core)
+                all_terminals.add(f_chan)
+
+                # Build intra-block Prim's MST rooted at the boundary port f_core
+                local_nodes: list[tuple[tuple[int, int], int | None, int | None]] = [
+                    (f_core, None, None),
+                    *t_list,
+                ]
+                in_tree = [local_nodes[0]]
+                remaining = set(local_nodes[1:])
+                edge_idx = 0
+                bbox = self._block_core_bbox(blk)
+                while remaining:
+                    best_dist = float("inf")
+                    best_pair = None
+                    for u in in_tree:
+                        for v in remaining:
+                            d = abs(u[0][0] - v[0][0]) + abs(u[0][1] - v[0][1])
+                            if d < best_dist:
+                                best_dist = d
+                                best_pair = (u, v)
+                    if best_pair is None:
+                        break
+                    u, v = best_pair
+                    in_tree.append(v)
+                    remaining.remove(v)
+                    intra_block_specs[blk].append(
+                        RouterNetSpec(
+                            name=f"{b_name}_blk_{blk[0]}_{blk[1]}_mst_{edge_idx}",
+                            source=v[0],
+                            sink=u[0],
+                            commodity=comm,
+                            is_fluid=True,
+                            start_heading=v[1],
+                            end_heading=None,
+                            terminal_heading=None,
+                            source_inward_dir=v[2],
+                            sink_inward_dir=u[2],
+                            corridor_bbox=bbox,
+                        )
+                    )
+                    edge_idx += 1
+
+                hwy_nodes.append((f_chan, None, None))
+                if first_blk is not None and blk != first_blk:
+                    _record_inter_block_channel_route(b_name, first_blk, blk, True, None, f_port)
+
+            if len(hwy_nodes) >= 2:
+                in_tree = [hwy_nodes[0]]
+                remaining = set(hwy_nodes[1:])
+                edge_idx = 0
+                while remaining:
+                    best_dist = float("inf")
+                    best_pair = None
+                    for u in in_tree:
+                        for v in remaining:
+                            d = abs(u[0][0] - v[0][0]) + abs(u[0][1] - v[0][1])
+                            if d < best_dist:
+                                best_dist = d
+                                best_pair = (u, v)
+                    if best_pair is None:
+                        break
+                    u, v = best_pair
+                    in_tree.append(v)
+                    remaining.remove(v)
+                    highway_specs.append(
+                        RouterNetSpec(
+                            name=f"{b_name}_hwy_mst_{edge_idx}",
+                            source=v[0],
+                            sink=u[0],
+                            commodity=comm,
+                            is_fluid=True,
+                            start_heading=v[1],
+                            end_heading=None,
+                            terminal_heading=None,
+                            source_inward_dir=v[2],
+                            sink_inward_dir=u[2],
+                            corridor_bbox=self._highway_corridor_bbox(
+                                v[0], u[0], min_x, min_y, max_x, max_y
+                            ),
+                        )
+                    )
+                    edge_idx += 1
+
+        return intra_block_specs, highway_specs, port_no_hood_tiles, port_headings, floorplan

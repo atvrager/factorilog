@@ -618,12 +618,115 @@ class BeltDrcChecker:
                 and pickup_tile not in machine_tiles
                 and pickup_tile not in container_tiles
             ):
+                pu_desc = [
+                    f"{e.get('name')}(dir={e.get('direction')},type={e.get('type')})"
+                    for e in pickup_ents
+                ]
+                nb_desc = []
+                for ndx, ndy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                    np = (pickup_tile[0] + ndx, pickup_tile[1] + ndy)
+                    n_ents = tile_map.get(np, [])
+                    if n_ents:
+                        nb_desc.append(
+                            f"{np}:vis={np in visited}:"
+                            + ",".join(
+                                f"{e.get('name')}(d={e.get('direction')},t={e.get('type')})"
+                                for e in n_ents
+                            )
+                        )
+                # Trace upstream to find where the unvisited chain starts
+                trace_curr = pickup_tile
+                trace_seen = {trace_curr}
+                trace_path = [trace_curr]
+                for _ in range(500):
+                    found_prev = None
+                    t_ents = tile_map.get(trace_curr, [])
+                    for te in t_ents:
+                        if "underground-belt" in te.get("name", "") and te.get("type") == "output":
+                            td = te.get("direction", DIRECTION_NORTH)
+                            tdx, tdy = DIR_STEPS.get(td, (0, 0))
+                            max_s = self.span_limits.get(te.get("name", ""), 5)
+                            for sp in range(1, max_s + 1):
+                                in_p = (trace_curr[0] - tdx * sp, trace_curr[1] - tdy * sp)
+                                if any(
+                                    ce.get("name") == te.get("name")
+                                    and ce.get("direction") == td
+                                    and ce.get("type") == "input"
+                                    for ce in tile_map.get(in_p, [])
+                                ):
+                                    found_prev = in_p
+                                    break
+                        elif "splitter" in te.get("name", ""):
+                            spos = te.get("position", {})
+                            scx = (
+                                float(spos.get("x", 0))
+                                if isinstance(spos, dict)
+                                else float(spos[0])
+                            )
+                            scy = (
+                                float(spos.get("y", 0))
+                                if isinstance(spos, dict)
+                                else float(spos[1])
+                            )
+                            sd = te.get("direction", DIRECTION_NORTH)
+                            sdx, sdy = DIR_STEPS.get(sd, (0, 0))
+                            if sd in (DIRECTION_NORTH, DIRECTION_SOUTH):
+                                h1 = (math.floor(scx - 0.5), math.floor(scy))
+                                h2 = (math.floor(scx + 0.5), math.floor(scy))
+                            else:
+                                h1 = (math.floor(scx), math.floor(scy - 0.5))
+                                h2 = (math.floor(scx), math.floor(scy + 0.5))
+                            for hp in (h1, h2):
+                                bp = (hp[0] - sdx, hp[1] - sdy)
+                                if tile_map.get(bp):
+                                    found_prev = bp
+                                    break
+                    if found_prev is None:
+                        for ndx, ndy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                            prev_p = (trace_curr[0] - ndx, trace_curr[1] - ndy)
+                            for pe in tile_map.get(prev_p, []):
+                                pname = pe.get("name", "")
+                                pdir = pe.get("direction", DIRECTION_NORTH)
+                                if DIR_STEPS.get(pdir) == (ndx, ndy) and (
+                                    "transport-belt" in pname
+                                    or ("underground-belt" in pname and pe.get("type") == "output")
+                                    or "splitter" in pname
+                                ):
+                                    found_prev = prev_p
+                                    break
+                            if found_prev is not None:
+                                break
+                    if found_prev is None or found_prev in trace_seen:
+                        break
+                    trace_seen.add(found_prev)
+                    trace_path.append(found_prev)
+                    trace_curr = found_prev
+                    if trace_curr in visited:
+                        break
+                root_ents = [
+                    f"{e.get('name')}(d={e.get('direction')},t={e.get('type')})"
+                    for e in tile_map.get(trace_curr, [])
+                ]
+                root_nbs = []
+                for ndx, ndy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                    rnp = (trace_curr[0] + ndx, trace_curr[1] + ndy)
+                    rn_ents = tile_map.get(rnp, [])
+                    if rn_ents:
+                        root_nbs.append(
+                            f"{rnp}:vis={rnp in visited}:"
+                            + ",".join(
+                                f"{e.get('name')}(d={e.get('direction')},t={e.get('type')})"
+                                for e in rn_ents
+                            )
+                        )
                 violations.append(
                     DrcViolation(
                         code="DRC-05",
                         message=(
                             f"Machine input inserter at ({ix}, {iy}) is not reachable "
-                            f"from upstream supply (pickup at {pickup_tile})"
+                            f"from upstream supply (pickup at {pickup_tile}, ents={pu_desc}, nbs={nb_desc}, "
+                            f"upstream_root={trace_curr}(vis={trace_curr in visited}, len={len(trace_path)}, "
+                            f"ents={root_ents}, nbs={root_nbs}))"
                         ),
                         x=ix,
                         y=iy,

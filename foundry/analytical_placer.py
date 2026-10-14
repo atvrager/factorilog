@@ -294,7 +294,12 @@ class AnalyticalPlacer:
         else:
             w, h = 0, 0
         if w <= 0 or h <= 0:
-            ew, eh = entity_size(macro)
+            if macro == "belt_merge2":
+                ew, eh = 3.0, 3.0
+            elif macro in ("belt_split2", "belt_balancer2"):
+                ew, eh = 1.0, 2.0
+            else:
+                ew, eh = entity_size(macro)
             w = int(ew) if w <= 0 else w
             h = int(eh) if h <= 0 else h
 
@@ -342,7 +347,7 @@ class AnalyticalPlacer:
             cell = nl.cells.get(inst.cell_key)
             if cell is None:
                 if inst.cell_key == "belt_merge2":
-                    cell = {"width": 1, "height": 2, "inputs": ["a", "b"], "outputs": ["y"]}
+                    cell = {"width": 3, "height": 3, "inputs": ["a", "b"], "outputs": ["y"]}
                 elif inst.cell_key == "belt_split2":
                     cell = {"width": 1, "height": 2, "inputs": ["a"], "outputs": ["y1", "y2"]}
                 elif inst.cell_key == "belt_balancer2":
@@ -384,7 +389,7 @@ class AnalyticalPlacer:
                         nodes[m_name].outputs.append(y_w)
                     wire_sinks[a_w].append((m_name, 0.0))
                     wire_sinks[b_w].append((m_name, 1.0))
-                    wire_driver[y_w] = (m_name, 0.5)
+                    wire_driver[y_w] = (m_name, 1.0)
 
         if split_plans:
             for plan in split_plans.values():
@@ -766,8 +771,9 @@ class AnalyticalPlacer:
         core_h: int = 94,
         empty_blocks: set[tuple[int, int]] | None = None,
         distribute_across_blocks: bool = False,
+        edges: list[PlacerEdge] | None = None,
     ) -> dict[tuple[int, int], list[str]]:
-        """Partition nodes into chassis blocks along the perimeter sequence."""
+        """Partition nodes into chassis blocks using domain-coherent phases."""
         active_blocks = _get_chassis_block_sequence(grid_w, grid_h, empty_blocks)
         if len(active_blocks) <= 1 or not nodes:
             blk = active_blocks[0] if active_blocks else (0, 0)
@@ -775,10 +781,10 @@ class AnalyticalPlacer:
                 node.assigned_block = blk
             return {blk: list(nodes.keys())}
 
-        # Compute padded area of all nodes
-        total_padded_area = sum(
-            (n.width + n.pad_w + n.pad_e) * (n.height + n.pad_n + n.pad_s) for n in nodes.values()
-        )
+        def _node_area(nd: PlacerNode) -> float:
+            return float((nd.width + nd.pad_w + nd.pad_e) * (nd.height + nd.pad_n + nd.pad_s))
+
+        total_padded_area = sum(_node_area(n) for n in nodes.values())
         single_core_capacity = float(core_w * core_h) * self.max_core_utilization
 
         if not distribute_across_blocks and total_padded_area <= single_core_capacity:
@@ -787,57 +793,389 @@ class AnalyticalPlacer:
                 node.assigned_block = blk0
             return {blk0: list(nodes.keys())}
 
-        # Partition in topological flow order across blocks
-        ordered_names = sorted(
-            nodes.keys(),
-            key=lambda name: (
-                nodes[name].rank,
-                nodes[name].flow_depth,
-                nodes[name].recipe,
-                _natural_key(name),
-            ),
-        )
         num_blocks = len(active_blocks)
-        target_per_block = max(
-            1.0,
-            total_padded_area / float(num_blocks)
-            if distribute_across_blocks
-            else single_core_capacity,
-        )
-
         block_bins: dict[tuple[int, int], list[str]] = collections.defaultdict(list)
-        cur_blk_idx = 0
-        cur_area = 0.0
+        block_area: dict[tuple[int, int], float] = dict.fromkeys(active_blocks, 0.0)
 
-        # Group by (rank, recipe) so tightly coupled splitter-machine-merger trees stay together
-        by_group: dict[tuple[int, str], list[str]] = collections.defaultdict(list)
-        for name in ordered_names:
-            node = nodes[name]
-            by_group[(node.rank, node.recipe)].append(name)
+        in_drivers: dict[str, list[str]] = collections.defaultdict(list)
+        out_sinks: dict[str, list[str]] = collections.defaultdict(list)
+        if edges:
+            for e in edges:
+                if e.source in nodes and e.sink in nodes and e.source != e.sink:
+                    in_drivers[e.sink].append(e.source)
+                    out_sinks[e.source].append(e.sink)
 
-        groups = [by_group[key] for key in sorted(by_group.keys(), key=lambda k: (k[0], k[1]))]
-
-        for grp in groups:
-            grp_area = sum(
-                (nodes[u].width + nodes[u].pad_w + nodes[u].pad_e)
-                * (nodes[u].height + nodes[u].pad_n + nodes[u].pad_s)
-                for u in grp
+        machine_names = [name for name, nd in nodes.items() if nd.node_type in ("machine", "pump")]
+        if not machine_names or not edges:
+            # Fallback for graphs without machine/pump nodes or without edges
+            ordered_names = sorted(
+                nodes.keys(),
+                key=lambda name: (
+                    nodes[name].rank,
+                    nodes[name].flow_depth,
+                    nodes[name].recipe,
+                    _natural_key(name),
+                ),
             )
-            if (
-                cur_area > 0
-                and cur_area + grp_area > target_per_block
-                and cur_blk_idx < num_blocks - 1
-            ):
-                cur_blk_idx += 1
-                cur_area = 0.0
-
-            blk = active_blocks[cur_blk_idx]
-            for u in grp:
+            multi_block_cap = single_core_capacity * 0.72
+            target_per_block = max(
+                1.0,
+                total_padded_area / float(num_blocks)
+                if (
+                    distribute_across_blocks
+                    or total_padded_area > multi_block_cap * float(num_blocks)
+                )
+                else multi_block_cap,
+            )
+            cur_blk_idx = 0
+            cur_area = 0.0
+            for u in ordered_names:
+                u_area = _node_area(nodes[u])
+                if (
+                    cur_area > 0
+                    and cur_area + u_area > target_per_block
+                    and cur_blk_idx < num_blocks - 1
+                ):
+                    cur_blk_idx += 1
+                    cur_area = 0.0
+                blk = active_blocks[cur_blk_idx]
                 nodes[u].assigned_block = blk
                 block_bins[blk].append(u)
-            cur_area += grp_area
+                cur_area += u_area
+            return dict(block_bins)
 
-        return dict(block_bins)
+        # Phase 1: Partition production machines and pumps by DAG domain
+        fluid_machines: set[str] = set()
+        fwd_adj: dict[str, list[str]] = collections.defaultdict(list)
+        if edges:
+            for e in edges:
+                fwd_adj[e.source].append(e.sink)
+                if e.is_fluid:
+                    if e.source in nodes and nodes[e.source].node_type in ("machine", "pump"):
+                        fluid_machines.add(e.source)
+                    if e.sink in nodes and nodes[e.sink].node_type in ("machine", "pump"):
+                        fluid_machines.add(e.sink)
+
+        # Find reachable PIN_OUT targets for each node to identify dedicated science domains
+        reachable_outs: dict[str, set[str]] = {}
+        for u in machine_names:
+            outs: set[str] = set()
+            seen_u: set[str] = {u}
+            stack_u = list(fwd_adj.get(u, []))
+            while stack_u:
+                cur = stack_u.pop()
+                if cur in seen_u:
+                    continue
+                seen_u.add(cur)
+                if cur.startswith("PIN_OUT:"):
+                    outs.add(cur)
+                elif cur in nodes and nodes[cur].node_type not in ("combinator", "display"):
+                    stack_u.extend(fwd_adj.get(cur, []))
+            reachable_outs[u] = outs
+
+        solid_machine_names = [u for u in machine_names if u not in fluid_machines]
+        fluid_machine_names = [u for u in machine_names if u in fluid_machines]
+
+        furnace_names = [
+            u for u in solid_machine_names if "furnace" in nodes[u].macro or nodes[u].rank <= 1
+        ]
+        furnace_set = set(furnace_names)
+        non_furnace_solid = [u for u in solid_machine_names if u not in furnace_set]
+
+        shared_solid = [u for u in non_furnace_solid if len(reachable_outs.get(u, set())) != 1]
+        dedicated_by_out: dict[str, list[str]] = collections.defaultdict(list)
+        for u in non_furnace_solid:
+            ro = reachable_outs.get(u, set())
+            if len(ro) == 1:
+                dedicated_by_out[next(iter(ro))].append(u)
+
+        def _sort_mach_list(mlist: list[str]) -> list[str]:
+            return sorted(
+                mlist,
+                key=lambda name: (
+                    nodes[name].rank,
+                    nodes[name].flow_depth,
+                    _sanitize(nodes[name].recipe),
+                    _natural_key(name),
+                ),
+            )
+
+        furnace_names = _sort_mach_list(furnace_names)
+        shared_solid = _sort_mach_list(shared_solid)
+        fluid_machine_names = _sort_mach_list(fluid_machine_names)
+
+        max_grp_len = 8
+
+        def _chunk_by_recipe(mlist: list[str], chunk_sz: int = max_grp_len) -> list[list[str]]:
+            by_rec: dict[tuple[int, str], list[str]] = collections.defaultdict(list)
+            for name in mlist:
+                nd = nodes[name]
+                by_rec[(nd.rank, _sanitize(nd.recipe) or name)].append(name)
+            res_grps: list[list[str]] = []
+            for k in sorted(by_rec.keys(), key=lambda key: (key[0], key[1])):
+                rg = by_rec[k]
+                if len(rg) <= chunk_sz:
+                    res_grps.append(rg)
+                else:
+                    res_grps.extend(rg[i : i + chunk_sz] for i in range(0, len(rg), chunk_sz))
+            return res_grps
+
+        groups: list[list[str]] = []
+        atomic_domain_first_nodes: set[str] = set()
+
+        # 1. Smelting domain groups
+        groups.extend(_chunk_by_recipe(furnace_names, max_grp_len))
+
+        # 2. Shared intermediate component domain groups
+        if shared_solid:
+            shared_area = sum(_node_area(nodes[u]) for u in shared_solid)
+            if shared_area <= single_core_capacity * 0.45:
+                groups.append(shared_solid)
+                atomic_domain_first_nodes.add(shared_solid[0])
+            else:
+                groups.extend(_chunk_by_recipe(shared_solid, max_grp_len))
+
+        # 3. Fluid & chemical domain groups
+        if fluid_machine_names:
+            fluid_area = sum(_node_area(nodes[u]) for u in fluid_machine_names)
+            if fluid_area <= single_core_capacity * 0.55:
+                groups.append(fluid_machine_names)
+                atomic_domain_first_nodes.add(fluid_machine_names[0])
+            else:
+                groups.extend(_chunk_by_recipe(fluid_machine_names, 10))
+
+        # 4. Dedicated science pack assembly domains
+        sorted_out_keys = sorted(
+            dedicated_by_out.keys(),
+            key=lambda out_k: (
+                max(nodes[u].rank for u in dedicated_by_out[out_k]),
+                len(dedicated_by_out[out_k]),
+                out_k,
+            ),
+        )
+        for out_k in sorted_out_keys:
+            dom_machs = _sort_mach_list(dedicated_by_out[out_k])
+            dom_area = sum(_node_area(nodes[u]) for u in dom_machs)
+            if dom_area <= single_core_capacity * 0.48:
+                groups.append(dom_machs)
+                atomic_domain_first_nodes.add(dom_machs[0])
+            else:
+                groups.extend(_chunk_by_recipe(dom_machs, max_grp_len))
+
+        def _cluster_weight(nd: PlacerNode) -> float:
+            return _node_area(nd) + 45.0 * float(len(nd.inputs)) + 40.0 * float(len(nd.outputs))
+
+        grp_weights = [
+            min(single_core_capacity * 0.35, sum(_cluster_weight(nodes[u]) for u in grp))
+            if (grp and grp[0] in atomic_domain_first_nodes)
+            else sum(_cluster_weight(nodes[u]) for u in grp)
+            for grp in groups
+        ]
+        pref = [0.0]
+        for gw in grp_weights:
+            pref.append(pref[-1] + gw)
+
+        total_cluster_w = pref[-1]
+        num_groups = len(groups)
+        if distribute_across_blocks:
+            k_bins = min(num_groups, num_blocks)
+        else:
+            k_bins = min(num_groups, num_blocks, max(1, math.ceil(total_cluster_w / 1400.0)))
+
+        assigned: set[str] = set()
+        blk_to_seq_idx = {b: idx for idx, b in enumerate(active_blocks)}
+
+        if k_bins <= 1:
+            blk = active_blocks[0]
+            for grp in groups:
+                for u in grp:
+                    nodes[u].assigned_block = blk
+                    block_bins[blk].append(u)
+                    block_area[blk] += _node_area(nodes[u])
+                    assigned.add(u)
+        else:
+            # Exact DP sequence partitioning into k_bins contiguous non-empty block segments
+            inf_tuple = (float("inf"), float("inf"), -1)
+            dp: list[list[tuple[float, float, int]]] = [
+                [inf_tuple] * (num_groups + 1) for _ in range(k_bins + 1)
+            ]
+            for i in range(1, num_groups - k_bins + 2):
+                w = pref[i]
+                dp[1][i] = (w, w * w, 0)
+            for b_idx in range(2, k_bins + 1):
+                max_i = num_groups - (k_bins - b_idx)
+                for i in range(b_idx, max_i + 1):
+                    best_val = inf_tuple
+                    for p in range(b_idx - 1, i):
+                        prev_max, prev_sq, _ = dp[b_idx - 1][p]
+                        seg_w = pref[i] - pref[p]
+                        cand_max = prev_max if prev_max >= seg_w else seg_w
+                        cand_sq = prev_sq + seg_w * seg_w
+                        if (round(cand_max, 2), round(cand_sq, 2)) < (
+                            round(best_val[0], 2),
+                            round(best_val[1], 2),
+                        ):
+                            best_val = (cand_max, cand_sq, p)
+                    dp[b_idx][i] = best_val
+
+            seg_bounds: list[tuple[int, int]] = []
+            curr_i = num_groups
+            for b_idx in range(k_bins, 0, -1):
+                prev_i = dp[b_idx][curr_i][2]
+                seg_bounds.append((prev_i, curr_i))
+                curr_i = prev_i
+            seg_bounds.reverse()
+
+            for b_idx, (g_start, g_end) in enumerate(seg_bounds):
+                blk = active_blocks[b_idx]
+                for grp in groups[g_start:g_end]:
+                    for u in grp:
+                        nodes[u].assigned_block = blk
+                        block_bins[blk].append(u)
+                        block_area[blk] += _node_area(nodes[u])
+                        assigned.add(u)
+
+        def _assign_to_best_block(u: str, preferred_blk: tuple[int, int]) -> None:
+            u_area = _node_area(nodes[u])
+            nodes[u].assigned_block = preferred_blk
+            block_bins[preferred_blk].append(u)
+            block_area[preferred_blk] += u_area
+            assigned.add(u)
+
+        def _find_upstream_blocks(start_u: str) -> list[tuple[int, int]]:
+            found: list[tuple[int, int]] = []
+            seen: set[str] = {start_u}
+            stack = list(in_drivers.get(start_u, []))
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                if cur in assigned and nodes[cur].assigned_block in block_area:
+                    found.append(nodes[cur].assigned_block)
+                elif cur in nodes:
+                    stack.extend(in_drivers.get(cur, []))
+            return found
+
+        def _find_downstream_blocks(start_u: str) -> list[tuple[int, int]]:
+            found: list[tuple[int, int]] = []
+            seen: set[str] = {start_u}
+            stack = list(out_sinks.get(start_u, []))
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                if cur in assigned and nodes[cur].assigned_block in block_area:
+                    found.append(nodes[cur].assigned_block)
+                elif cur in nodes:
+                    stack.extend(out_sinks.get(cur, []))
+            return found
+
+        # Phase 2: Assign mergers bottom-up in topological order from machine drivers to root
+        rem_merges = [
+            name for name, nd in nodes.items() if name not in assigned and nd.node_type == "merge"
+        ]
+        rem_merges.sort(key=lambda name: (nodes[name].flow_depth, _natural_key(name)))
+        while rem_merges:
+            ready_idx = next(
+                (
+                    idx
+                    for idx, m_name in enumerate(rem_merges)
+                    if all(d in assigned for d in in_drivers.get(m_name, []))
+                ),
+                0,
+            )
+            m_name = rem_merges.pop(ready_idx)
+            drv_blks = [
+                nodes[d].assigned_block
+                for d in in_drivers.get(m_name, [])
+                if d in assigned and nodes[d].assigned_block in block_area
+            ]
+            down_blks = _find_downstream_blocks(m_name)
+            if drv_blks:
+                counts = collections.Counter(drv_blks)
+                cand_blks = list(dict.fromkeys(drv_blks + down_blks))
+                best_blk = min(
+                    cand_blks,
+                    key=lambda b: (
+                        0 if counts[b] > len(drv_blks) // 2 else 1,
+                        sum(abs(b[0] - db[0]) + abs(b[1] - db[1]) for db in drv_blks)
+                        + (
+                            min(abs(b[0] - sb[0]) + abs(b[1] - sb[1]) for sb in down_blks)
+                            if down_blks
+                            else 0
+                        ),
+                        -counts[b],
+                        block_area[b],
+                        blk_to_seq_idx[b],
+                    ),
+                )
+            else:
+                best_blk = down_blks[0] if down_blks else active_blocks[0]
+            _assign_to_best_block(m_name, best_blk)
+
+        # Phase 3: Assign splitters and balancers bottom-up in reverse-topological order from sinks to root
+        rem_splits = [
+            name
+            for name, nd in nodes.items()
+            if name not in assigned and nd.node_type in ("split", "balancer")
+        ]
+        rem_splits.sort(key=lambda name: (-nodes[name].flow_depth, _natural_key(name)))
+        while rem_splits:
+            ready_idx = next(
+                (
+                    idx
+                    for idx, s_name in enumerate(rem_splits)
+                    if all(v in assigned for v in out_sinks.get(s_name, []))
+                ),
+                0,
+            )
+            s_name = rem_splits.pop(ready_idx)
+            snk_blks = [
+                nodes[v].assigned_block
+                for v in out_sinks.get(s_name, [])
+                if v in assigned and nodes[v].assigned_block in block_area
+            ]
+            up_blks = _find_upstream_blocks(s_name)
+            if snk_blks:
+                counts = collections.Counter(snk_blks)
+                cand_blks = list(dict.fromkeys(snk_blks + up_blks))
+                best_blk = min(
+                    cand_blks,
+                    key=lambda b: (
+                        0 if counts[b] > len(snk_blks) // 2 else 1,
+                        sum(abs(b[0] - sb[0]) + abs(b[1] - sb[1]) for sb in snk_blks)
+                        + sum(abs(b[0] - ub[0]) + abs(b[1] - ub[1]) for ub in up_blks),
+                        -counts[b],
+                        block_area[b],
+                        blk_to_seq_idx[b],
+                    ),
+                )
+            else:
+                best_blk = up_blks[0] if up_blks else active_blocks[0]
+            _assign_to_best_block(s_name, best_blk)
+
+        # Phase 4: Assign remaining telemetry combinators and displays to connected driver or co-sink block
+        rem_names = [name for name in nodes if name not in assigned]
+        rem_names.sort(key=lambda name: (nodes[name].flow_depth, _natural_key(name)))
+        for u_name in rem_names:
+            nb_blks = [
+                nodes[nb].assigned_block
+                for nb in in_drivers.get(u_name, []) + out_sinks.get(u_name, [])
+                if nb in assigned and nodes[nb].assigned_block in block_area
+            ]
+            if not nb_blks:
+                nb_blks = [
+                    nodes[co].assigned_block
+                    for drv in in_drivers.get(u_name, [])
+                    for co in out_sinks.get(drv, [])
+                    if co in assigned and nodes[co].assigned_block in block_area
+                ]
+            best_blk = nb_blks[0] if nb_blks else min(active_blocks, key=lambda b: block_area[b])
+            _assign_to_best_block(u_name, best_blk)
+
+        return {blk: block_bins[blk] for blk in active_blocks if block_bins[blk]}
 
     def _solve_continuous_block(
         self,
@@ -885,10 +1223,10 @@ class AnalyticalPlacer:
                 a_x[v_idx, u_idx] -= w
                 b_x[u_idx] -= w * delta_x
                 b_x[v_idx] += w * delta_x
-            elif u_idx is None and v_idx is not None and e.source.startswith("PIN_IN:"):
+            elif u_idx is None and v_idx is not None:
                 a_x[v_idx, v_idx] += w * 0.5
                 b_x[v_idx] += w * 0.5 * (x_lo + 4.0)
-            elif u_idx is not None and v_idx is None and e.sink.startswith("PIN_OUT:"):
+            elif u_idx is not None and v_idx is None:
                 a_x[u_idx, u_idx] += w * 0.5
                 b_x[u_idx] += w * 0.5 * (x_hi - 4.0)
 
@@ -997,7 +1335,7 @@ class AnalyticalPlacer:
         if not block_nodes:
             return core_max_x - core_min_x, core_max_y - core_min_y
 
-        margin_x = 4
+        margin_x = 5
         margin_y = 4
         x_lo = core_min_x + margin_x
         y_lo = core_min_y + margin_y
@@ -1010,24 +1348,30 @@ class AnalyticalPlacer:
         for node in block_nodes:
             raw_cols[node.col_index].append(node)
 
+        def _col_req_h(col: list[PlacerNode]) -> int:
+            if not col:
+                return 0
+            req = 0
+            for idx, nd in enumerate(col):
+                if idx < len(col) - 1:
+                    nxt = col[idx + 1]
+                    v_gap = max(
+                        6 if nd.node_type == "machine" or nxt.node_type == "machine" else 4,
+                        nd.pad_n + nxt.pad_s,
+                    )
+                    step = nd.height + v_gap
+                    req += step + (step % 2)
+                else:
+                    req += nd.height + (nd.height % 2)
+            return req
+
         # Fold any column whose vertical height exceeds usable_h into sub-columns when fixed_core is True
         expanded_cols: list[list[PlacerNode]] = []
         for col_id in sorted(raw_cols.keys()):
             col_nodes = raw_cols[col_id]
             col_nodes.sort(key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)))
 
-            # Calculate required height with comfortable vertical gaps
-            req_h = 0
-            for idx, nd in enumerate(col_nodes):
-                v_gap = (
-                    6
-                    if nd.node_type == "machine"
-                    else 4
-                    if nd.node_type in ("split", "merge", "balancer")
-                    else 2
-                )
-                req_h += nd.height + (v_gap if idx < len(col_nodes) - 1 else 0)
-
+            req_h = _col_req_h(col_nodes)
             num_subcols = max(1, math.ceil(float(req_h) / float(usable_h))) if fixed_core else 1
             if num_subcols == 1:
                 expanded_cols.append(col_nodes)
@@ -1036,6 +1380,69 @@ class AnalyticalPlacer:
                 for idx, nd in enumerate(col_nodes):
                     sub_lists[idx % num_subcols].append(nd)
                 expanded_cols.extend(sl for sl in sub_lists if sl)
+
+        if fixed_core:
+            avail_w = max(10, x_hi - x_lo)
+            node_type_by_name = {nd.name: nd.node_type for nd in block_nodes}
+
+            def _total_min_w(cols: list[list[PlacerNode]]) -> int:
+                if not cols:
+                    return 0
+                w_total = sum(max(nd.width for nd in col) for col in cols)
+                g_total = 0
+                for c_i in range(len(cols) - 1):
+                    max_e = max(nd.pad_e for nd in cols[c_i])
+                    max_w = max(nd.pad_w for nd in cols[c_i + 1])
+                    g_total += max(5, max(max_e, max_w) + 1)
+                return w_total + g_total
+
+            def _total_hard_w(cols: list[list[PlacerNode]]) -> int:
+                if not cols:
+                    return 0
+                return sum(max(nd.width for nd in col) for col in cols) + 4 * (len(cols) - 1)
+
+            for allow_cross in (False, True):
+                while (
+                    len(expanded_cols) > 1
+                    and (
+                        _total_hard_w(expanded_cols) if allow_cross else _total_min_w(expanded_cols)
+                    )
+                    > avail_w
+                ):
+                    best_idx = -1
+                    best_h: int | None = None
+                    for idx in range(len(expanded_cols) - 1):
+                        if not allow_cross:
+                            names_a = {nd.name for nd in expanded_cols[idx]}
+                            names_b = {nd.name for nd in expanded_cols[idx + 1]}
+                            has_cross = any(
+                                node_type_by_name.get(e.source) not in ("combinator", "display")
+                                and node_type_by_name.get(e.sink) not in ("combinator", "display")
+                                and (
+                                    (e.source in names_a and e.sink in names_b)
+                                    or (e.source in names_b and e.sink in names_a)
+                                )
+                                for e in edges
+                            )
+                            if has_cross:
+                                continue
+                        merged_cand = sorted(
+                            expanded_cols[idx] + expanded_cols[idx + 1],
+                            key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)),
+                        )
+                        comb_h = _col_req_h(merged_cand)
+                        if comb_h > usable_h:
+                            continue
+                        if best_h is None or comb_h < best_h:
+                            best_h = comb_h
+                            best_idx = idx
+                    if best_idx < 0:
+                        break
+                    merged_col = sorted(
+                        expanded_cols[best_idx] + expanded_cols[best_idx + 1],
+                        key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)),
+                    )
+                    expanded_cols[best_idx : best_idx + 2] = [merged_col]
 
         used_w = self._legalize_column_band(
             expanded_cols,
@@ -1196,7 +1603,15 @@ class AnalyticalPlacer:
                 col = cols[c]
                 sorted_ideals = [item[0] for item in paired]
                 heights = [nd.height for nd in col]
-                gaps = [max(4, col[i].pad_n + col[i + 1].pad_s) for i in range(len(col) - 1)]
+                gaps = [
+                    max(
+                        6
+                        if col[i].node_type == "machine" or col[i + 1].node_type == "machine"
+                        else 4,
+                        col[i].pad_n + col[i + 1].pad_s,
+                    )
+                    for i in range(len(col) - 1)
+                ]
                 stagger = (c % 3) * 2 if band_h >= 24 else 0
                 c_y_lo = min(y_hi - sum(heights), y_lo + stagger)
                 y_vals = _solve_1d_pav(
@@ -1251,7 +1666,15 @@ class AnalyticalPlacer:
                 col = cols[c]
                 sorted_ideals = [item[0] for item in paired]
                 heights = [nd.height for nd in col]
-                gaps = [max(4, col[i].pad_n + col[i + 1].pad_s) for i in range(len(col) - 1)]
+                gaps = [
+                    max(
+                        6
+                        if col[i].node_type == "machine" or col[i + 1].node_type == "machine"
+                        else 4,
+                        col[i].pad_n + col[i + 1].pad_s,
+                    )
+                    for i in range(len(col) - 1)
+                ]
                 stagger = (c % 3) * 2 if band_h >= 24 else 0
                 c_y_lo = min(y_hi - sum(heights), y_lo + stagger)
                 y_vals = _solve_1d_pav(
@@ -1354,6 +1777,7 @@ class AnalyticalPlacer:
                 core_w=chassis_core_w,
                 core_h=chassis_core_h,
                 distribute_across_blocks=distribute_across_blocks,
+                edges=edges,
             )
 
             for (bx, by), inst_names in block_bins.items():
@@ -1362,6 +1786,10 @@ class AnalyticalPlacer:
                 c_min_y = by * chassis_pitch + margin_y
                 c_max_x = c_min_x + chassis_core_w
                 c_max_y = c_min_y + chassis_core_h
+                local_cols = sorted({nd.flow_depth for nd in blk_nodes})
+                col_remap = {old_c: new_c for new_c, old_c in enumerate(local_cols)}
+                for nd in blk_nodes:
+                    nd.col_index = col_remap[nd.flow_depth]
                 self._solve_continuous_block(
                     blk_nodes,
                     edges,
@@ -1528,6 +1956,8 @@ class AnalyticalPlacer:
             lines.append(f"dict set analytical_coords {name} [list {ix} {iy}]")
 
         grids = [(1, 1), (2, 2), (3, 3)]
+        if len(getattr(nl, "instances", [])) > 150:
+            grids.extend([(4, 4), (5, 5), (6, 6), (7, 7)])
         if extra_chassis_grids:
             for g in extra_chassis_grids:
                 if g not in grids:

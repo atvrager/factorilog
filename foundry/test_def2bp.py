@@ -102,6 +102,16 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(spl["position"], {"x": 30.5, "y": 41.0})
         self.assertEqual(spl["direction"], def2bp.DIRECTION_EAST)
 
+        # Verify 3x3 belt_merge2 opposing side-load lane balancer belts
+        belt_by_pos = {
+            (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e
+            for e in entities
+            if e["name"] == "transport-belt"
+        }
+        self.assertEqual(belt_by_pos[(32.5, 40.5)]["direction"], def2bp.DIRECTION_SOUTH)
+        self.assertEqual(belt_by_pos[(32.5, 42.5)]["direction"], def2bp.DIRECTION_NORTH)
+        self.assertEqual(belt_by_pos[(32.5, 41.5)]["direction"], def2bp.DIRECTION_EAST)
+
         # Check entity numbering is 1-based and sequential
         for idx, ent in enumerate(entities, 1):
             self.assertEqual(ent["entity_number"], idx)

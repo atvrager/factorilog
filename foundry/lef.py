@@ -616,16 +616,16 @@ def tech_lines(tech: dict[str, Any]) -> list[str]:
 
 
 def merge_lines() -> list[str]:
-    """The transport merge cell: one splitter tile, three pins.
+    """The transport merge cell: 3x3 dual-lane balancing splitter macro.
 
-    Inputs a and b enter west on M1. Output y leaves east on M1.
+    Inputs a and b enter west on M1. Output y leaves east on M1 at row 1.
     """
     name = netlist.MERGE_CELL
     return [
         f"MACRO {name}",
         "  CLASS CORE ;",
         "  ORIGIN 0 0 ;",
-        "  SIZE 1.000 BY 2.000 ;",
+        "  SIZE 3.000 BY 3.000 ;",
         "  SITE tile ;",
         '  PROPERTY CELLTYPE "splitter" ;',
         '  PROPERTY ROLE "merge2" ;',
@@ -647,24 +647,27 @@ def merge_lines() -> list[str]:
         "    DIRECTION OUTPUT ;",
         "    USE SIGNAL ;",
         "    PORT LAYER M1 ;",
-        "      RECT 0.500 0.250 1.000 0.750 ;",
+        "      RECT 2.500 1.250 3.000 1.750 ;",
         "    END",
         "  END y",
         "  OBS",
         "    LAYER M1 ;",
-        "      RECT 0.500 1.000 1.000 2.000 ;",
+        "      RECT 0.500 0.000 2.500 3.000 ;",
+        "      RECT 0.000 2.000 0.500 3.000 ;",
+        "      RECT 2.500 0.000 3.000 1.000 ;",
+        "      RECT 2.500 2.000 3.000 3.000 ;",
         "    LAYER M2 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "    LAYER VL1 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "    LAYER M3 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "    LAYER M4 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "    LAYER VL2 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "    LAYER VL3 ;",
-        "      RECT 0.000 0.000 1.000 2.000 ;",
+        "      RECT 0.000 0.000 3.000 3.000 ;",
         "  END",
         f"END {name}",
     ]
