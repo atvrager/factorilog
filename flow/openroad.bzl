@@ -233,8 +233,6 @@ def _factorilog_pnr_impl(ctx):
         "set CHASSIS_CORE_H %d" % ctx.attr.chassis_core_h,
         "set CHASSIS_CHANNEL_W %d" % ctx.attr.chassis_channel_w,
         "set DO_UNTANGLE %s" % ("1" if ctx.attr.do_untangle else "0"),
-        "set SKIP_ROUTER %s" % ("1" if ctx.attr.skip_router else "0"),
-        "set DROUTE_END_ITER 50",
         "source [file join [file dirname [info script]] factorilog.tcl]",
         "EOF",
         "START_NS=$(date +%s%N)",

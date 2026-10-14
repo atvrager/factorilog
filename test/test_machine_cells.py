@@ -3,7 +3,7 @@
 Each test does these steps:
 1. Synthesizes a single-cell netlist with dedicated pins.
 2. Runs OpenROAD floorplanning, pin placement, and detailed routing.
-3. Verifies zero DRC violations in TritonRoute.
+3. Verifies zero DRC violations in physical routing.
 4. Compiles the routed DEF into a Factorio blueprint.
 5. Simulates the blueprint in headless Factorio to verify physical crafting.
 """

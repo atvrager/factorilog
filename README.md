@@ -132,7 +132,7 @@ on the hermetic fixture. A 60 packs-per-minute demand solves with zero
 balance error and lowers to a flat netlist: 1220 instances, 1248 nets, 12
 ports. The PDK carries 39 masters with LEF geometry and Liberty timing
 arcs based on recipe craft duration. OpenROAD places all 1220 blocks on
-the tile grid with no overlap. FastRoute and TritonRoute route all nets
+the tile grid with no overlap. The native 3D maze router routes all nets
 across three layers with zero DRC violations. OpenSTA reports critical
 path timing and slack across the full combinational factory.
 

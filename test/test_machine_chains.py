@@ -3,7 +3,7 @@
 Each test executes these steps:
 1. Synthesize a two-machine netlist with connected material nets.
 2. Run OpenROAD physical placement and detailed routing.
-3. Verify zero DRC violations in TritonRoute.
+3. Verify zero DRC violations in physical routing.
 4. Translate the routed DEF into a Factorio blueprint.
 5. Simulate the blueprint in headless Factorio to verify inter-cell handoffs.
 """

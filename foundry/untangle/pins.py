@@ -694,10 +694,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
 def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
     """Remove reverse input segments entering East-facing splitters from the front (East).
 
-    Splitters face East and only accept inputs on their West face. TritonRoute occasionally
-    routes an input net approaching from the East into an input pin, creating an illegal
-    backwards segment. Removing this segment allows the vertical belt to side-load directly
-    into the splitter output.
+    Splitters face East and only accept inputs on their West face. When an input net
+    approaches from the East into an input pin, it creates an illegal backwards segment.
+    Removing this segment allows the vertical belt to side-load directly into the
+    splitter output.
     """
     for c in def_data.get("components", []):
         macro = c.get("macro", "")
