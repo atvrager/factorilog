@@ -311,7 +311,12 @@ def build(
     for cell in nl.cells.values():
         cell["inputs"] = sorted(cell["inputs"], key=lambda p: (depths.get(p, 0), p))
         inps = cell.get("inputs", [])
-        if inps and not cell.get("compound") and not cell.get("circuit_cell"):
+        if (
+            inps
+            and not cell.get("compound")
+            and not cell.get("circuit_cell")
+            and not cell.get("has_fluids")
+        ):
             faces = assign_gaa_pin_faces(inps, depths=depths)
             cell["port_faces"] = faces
             if any(f in ("N", "S") for f in faces.values()):
@@ -319,6 +324,14 @@ def build(
                 m_h = int(cell.get("machine_height", cell.get("height", 3)))
                 cell["width"] = m_w + 2
                 cell["height"] = m_h + 2
+                w_inps = [p for p in inps if faces.get(p) == "W"]
+                offset_in = 1 + (m_h - len(w_inps)) // 2 if len(w_inps) <= m_h else 1
+                for idx, p in enumerate(w_inps):
+                    cell.setdefault("in_slots", {})[p] = offset_in + idx
+                outs = cell.get("outputs", [])
+                offset_out = 1 + (m_h - len(outs)) // 2 if len(outs) <= m_h else 1
+                for idx, p in enumerate(outs):
+                    cell.setdefault("out_slots", {})[p] = offset_out + idx
     nl.material_depths = depths
     instances_by_depth: dict[int, list[Instance]] = collections.defaultdict(list)
     for inst in nl.instances:

@@ -317,8 +317,9 @@ def route_with_maze_router(
         elif not sinks and drivers and len(conns) >= 2:
             sinks.append(drivers.pop())
 
-        is_fluid = any(cf in nname.replace("-", "_") for cf in clean_fluids)
-        commodity = nname.split("__")[0].replace("_", "-")
+        base_commodity = nname.split("__")[0].replace("-", "_")
+        is_fluid = bool(clean_fluids and base_commodity in clean_fluids)
+        commodity = base_commodity.replace("_", "-")
 
         if is_fluid and (len(drivers) > 1 or len(sinks) > 1):
             all_terms = drivers + sinks

@@ -64,13 +64,15 @@ def get_macro_port_slots(
     inputs = list(cell.get("inputs", []))
     outputs = sorted(cell.get("outputs", []))
     height = int(cell.get("height", 3))
+    port_faces = cell.get("port_faces", {})
 
     in_slots: dict[str, int] = {}
     out_slots: dict[str, int] = {}
 
-    total_in = len(inputs)
+    w_inputs = [p for p in inputs if port_faces.get(p, "W") == "W"] if port_faces else inputs
+    total_in = len(w_inputs)
     offset_in = (height - total_in) // 2 if total_in <= height else 0
-    for idx, p in enumerate(inputs):
+    for idx, p in enumerate(w_inputs):
         in_slots[p] = offset_in + idx
 
     total_out = len(outputs)
@@ -87,7 +89,6 @@ def get_macro_port_geometry(
     """Calculate the face, layer, RECT, inserter position, and approach tile for a macro port."""
     w = float(cell.get("width", 3))
     h = float(cell.get("height", 3))
-    m_h = float(cell.get("machine_height", h - 2 if h > 2 else h))
     port_faces = cell.get("port_faces", {})
 
     face = port_faces.get(port, "E") if is_output else port_faces.get(port, "W")
@@ -101,12 +102,7 @@ def get_macro_port_geometry(
     h_layer = red_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE
     v_layer = green_layer if cell.get("circuit_cell") else pdk.LAYER_SURFACE_V
 
-    if (
-        cell.get("has_fluids")
-        or cell.get("direction", 0) != 0
-        or cell.get("circuit_cell")
-        or cell.get("compound")
-    ):
+    if cell.get("circuit_cell"):
         in_slots, out_slots = get_macro_port_slots(cell)
         if is_output:
             cy = out_slots.get(port, int(h) // 2) + 0.5
@@ -130,12 +126,10 @@ def get_macro_port_geometry(
             "approach_dir": DIRECTION_EAST,
         }
 
-    # Standard GAA machines:
+    in_slots, out_slots = get_macro_port_slots(cell)
+
     if face == "E":
-        in_slots, out_slots = get_macro_port_slots(cell)
         cy = out_slots.get(port, int(h) // 2) + 0.5
-        if h > m_h:
-            cy = h / 2.0
         return {
             "face": "E",
             "layer": h_layer,
@@ -167,10 +161,7 @@ def get_macro_port_geometry(
             "approach_pos": (cx, -0.5),
             "approach_dir": DIRECTION_SOUTH,
         }
-    in_slots, _ = get_macro_port_slots(cell)
     cy = in_slots.get(port, int(h) // 2) + 0.5
-    if h > m_h:
-        cy = h / 2.0
     return {
         "face": "W",
         "layer": h_layer,

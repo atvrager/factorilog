@@ -1229,7 +1229,12 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
         machine = cell.get("machine", "")
         if "assembling-machine" not in machine:
             continue
-        inputs = [p.replace("-", "_") for p in cell.get("inputs", []) if p not in fluids]
+        port_faces = cell.get("port_faces") or {}
+        inputs = [
+            p.replace("-", "_")
+            for p in cell.get("inputs", [])
+            if p not in fluids and port_faces.get(p, "W") == "W"
+        ]
         if len(inputs) < 2:
             continue
         gx = round(c.get("x", 0) * scale * units)

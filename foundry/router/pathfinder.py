@@ -184,8 +184,9 @@ def _a_star_search(
     goal_state: int | None = None
     target_end_h = net.end_heading
 
+    max_states = 40 * 1000
     while open_set:
-        if len(closed_set) >= 40000:
+        if len(closed_set) >= max_states:
             break
         _, _, current = heapq.heappop(open_set)
 

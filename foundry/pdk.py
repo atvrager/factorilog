@@ -439,10 +439,9 @@ class Pdk:
             avail_item_in = [
                 s for s in range(y_offset, y_offset + placed_h) if s not in all_in_pipes
             ]
-            if not avail_item_in:
-                avail_item_in = [
-                    s for s in range(y_offset, y_offset + placed_h) if s not in in_slots.values()
-                ]
+            for s in range(y_offset, y_offset + placed_h):
+                if s not in in_slots.values() and s not in avail_item_in:
+                    avail_item_in.append(s)
             for idx, p in enumerate(item_inputs):
                 if idx < len(avail_item_in):
                     in_slots[p] = avail_item_in[idx]
@@ -470,10 +469,9 @@ class Pdk:
             avail_item_out = [
                 s for s in range(y_offset, y_offset + placed_h) if s not in all_out_pipes
             ]
-            if not avail_item_out:
-                avail_item_out = [
-                    s for s in range(y_offset, y_offset + placed_h) if s not in out_slots.values()
-                ]
+            for s in range(y_offset, y_offset + placed_h):
+                if s not in out_slots.values() and s not in avail_item_out:
+                    avail_item_out.append(s)
             for idx, p in enumerate(item_outputs):
                 if idx < len(avail_item_out):
                     out_slots[p] = avail_item_out[idx]

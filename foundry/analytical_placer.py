@@ -108,7 +108,7 @@ def _classify_node_type(name: str, macro: str, cell_meta: dict[str, Any] | None 
         or (cell_meta and cell_meta.get("circuit_cell"))
         or n_low.startswith(("u_acc_", "u_comb_", "u_dec_", "u_latch_", "u_switch_", "u_params_"))
     ):
-        return "circuit"
+        return "combinator"
     return "machine"
 
 
@@ -304,7 +304,7 @@ class AnalyticalPlacer:
             pad_e = self.split_pad_x
             pad_n = self.split_pad_y
             pad_s = self.split_pad_y
-        elif ntype in ("display", "circuit"):
+        elif ntype in ("display", "combinator"):
             pad_w = 3
             pad_e = 3
             pad_n = 1
@@ -419,7 +419,7 @@ class AnalyticalPlacer:
                 node.inputs.append(w_name)
                 wire_sinks[w_name].append((inst.name, 0.5))
                 continue
-            if node.node_type == "circuit" and inst.name.startswith("u_acc_"):
+            if node.node_type == "combinator" and inst.name.startswith("u_acc_"):
                 mat_w = _sanitize(inst.recipe)
                 c_out = f"c_out_{mat_w}"
                 node.inputs.append(mat_w)
@@ -654,7 +654,10 @@ class AnalyticalPlacer:
             edges,
             key=lambda edge: (
                 1
-                if (edge.source in nodes and nodes[edge.source].node_type in ("circuit", "display"))
+                if (
+                    edge.source in nodes
+                    and nodes[edge.source].node_type in ("combinator", "display")
+                )
                 else 0
             ),
         )
@@ -674,7 +677,7 @@ class AnalyticalPlacer:
             "pump": 1,
             "machine": 2,
             "merge": 3,
-            "circuit": 4,
+            "combinator": 4,
             "display": 5,
         }
         ready = [name for name, d in in_deg.items() if d == 0]
@@ -723,22 +726,22 @@ class AnalyticalPlacer:
 
         # Place telemetry displays and circuit accumulators in the final East column band
         max_non_disp = max(
-            (depth[u] for u in nodes if nodes[u].node_type not in ("display", "circuit")),
+            (depth[u] for u in nodes if nodes[u].node_type not in ("display", "combinator")),
             default=0,
         )
         for u in topo_order:
             node = nodes[u]
-            if node.node_type == "circuit" and u.startswith("u_acc_"):
+            if node.node_type == "combinator" and u.startswith("u_acc_"):
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 depth[u] = max([max_non_disp + 1] + [depth[p] + 1 for p in preds])
             elif node.node_type == "display":
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 depth[u] = max([max_non_disp + 2] + [depth[p] + 1 for p in preds])
 
-        # Backward tightening pass: pull splitters and balancers East toward their sinks
+        # Backward tightening pass: pull splitters, balancers, and machines East toward sinks
         for u in reversed(topo_order):
             node = nodes[u]
-            if node.node_type in ("split", "balancer"):
+            if node.node_type in ("split", "balancer", "machine"):
                 succs = [s for s in adj.get(u, []) if s in depth]
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 min_allowed = max([0] + [depth[p] + 1 for p in preds])
@@ -942,7 +945,7 @@ class AnalyticalPlacer:
             for col_id in sorted(by_col.keys()):
                 for idx in by_col[col_id]:
                     if (
-                        block_nodes[idx].node_type in ("merge", "circuit", "display")
+                        block_nodes[idx].node_type in ("merge", "combinator", "display")
                         and adj_drivers[idx]
                     ):
                         y_band_target[idx] = float(
@@ -1210,11 +1213,13 @@ class AnalyticalPlacer:
             # 2. Forward sweep: pull mergers, pumps, and circuit/display cells to driver centroids
             for c in range(num_cols):
                 col = cols[c]
-                if not any(nd.node_type in ("merge", "pump", "circuit", "display") for nd in col):
+                if not any(
+                    nd.node_type in ("merge", "pump", "combinator", "display") for nd in col
+                ):
                     continue
                 ideals = []
                 for nd in col:
-                    if nd.node_type in ("merge", "pump", "circuit", "display"):
+                    if nd.node_type in ("merge", "pump", "combinator", "display"):
                         drv_ys = [
                             node_map[d_name].y + src_dy - s_dy
                             for d_name, src_dy, s_dy in drivers_of.get(nd.name, [])
