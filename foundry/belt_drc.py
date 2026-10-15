@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import itertools
 import json
 import math
 from dataclasses import dataclass
@@ -1610,5 +1611,348 @@ class BeltDrcChecker:
                         y=ey,
                     )
                 )
+
+        return violations
+
+    def check_chassis_matrix_discipline(
+        self,
+        entities: list[dict[str, Any]],
+        macro_floorplan: Any,
+        router_routes: dict[str, Any] | None = None,
+        highway_specs: list[Any] | None = None,
+        def_data: dict[str, Any] | None = None,
+        netlist_data: dict[str, Any] | None = None,
+        bay_blocks: set[tuple[int, int]] | None = None,
+    ) -> list[DrcViolation]:
+        """Verify chassis port geometry, switchbox discipline, and self-contained cell trees."""
+        violations: list[DrcViolation] = []
+        active_bays = bay_blocks or set()
+
+        grid_w = int(getattr(macro_floorplan, "grid_w", 1))
+        grid_h = int(getattr(macro_floorplan, "grid_h", 1))
+        if def_data and (grid_w * grid_h <= 1):
+            units = float(def_data.get("units", 1000))
+            die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
+            die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
+            grid_w = max(1, round(die_w / 100.0))
+            grid_h = max(1, round(die_h / 100.0))
+
+        tile_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for ent in entities:
+            pos = ent.get("position", {})
+            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            tile_map.setdefault((math.floor(cx), math.floor(cy)), []).append(ent)
+
+        def _in_switchbox(tx: int, ty: int) -> bool:
+            if (tx + 3) % 100 >= 6:
+                return False
+            if (ty + 3) % 100 < 6:
+                return True
+            if 3 <= (ty % 100) <= 16:
+                ix = (tx + 3) // 100
+                by_i = ty // 100
+                return (ix, by_i) in active_bays or (ix - 1, by_i) in active_bays
+            return False
+
+        def _street_seg(
+            coord: tuple[int, int],
+        ) -> tuple[str, int, int] | None:
+            x, y = coord
+            bx, by = x // 100, y // 100
+            rx, ry = x % 100, y % 100
+            if (bx, by) in active_bays and 11 <= rx <= 88 and 3 <= ry <= 16:
+                return ("H", bx, by)
+            in_v = (x + 3) % 100 < 6
+            in_h = (y + 3) % 100 < 6
+            if in_v and not in_h and 0 <= by < grid_h:
+                return ("V", (x + 3) // 100, by)
+            if in_h and not in_v and 0 <= bx < grid_w:
+                return ("H", bx, (y + 3) // 100)
+            return None
+
+        def _core_block(cx: int, cy: int) -> tuple[int, int] | None:
+            bx, by = cx // 100, cy // 100
+            if not (0 <= bx < grid_w and 0 <= by < grid_h):
+                return None
+            rx, ry = cx % 100, cy % 100
+            min_ry = 17 if (bx, by) in active_bays else 3
+            if 3 <= rx <= 96 and min_ry <= ry <= 96:
+                return (bx, by)
+            return None
+
+        # 1. PORT_TAP_GEOMETRY
+        block_ports = list(getattr(macro_floorplan, "block_ports", []))
+        port_channel_coords: set[tuple[int, int]] = set()
+        for port in block_ports:
+            cx, cy = port.core_pos
+            hx, hy = port.channel_pos
+            port_channel_coords.add((hx, hy))
+            if abs(cx - hx) + abs(cy - hy) != 1:
+                violations.append(
+                    DrcViolation(
+                        code="PORT_TAP_GEOMETRY",
+                        message=(
+                            f"Port on {port.net_name} at {port.core_pos} -> {port.channel_pos} "
+                            f"is not an orthogonal 1-tile step across the cell wall"
+                        ),
+                        x=float(cx),
+                        y=float(cy),
+                        net=port.net_name,
+                    )
+                )
+            if port.edge in ("N", "S"):
+                lat = cx % 100
+                valid_lat = 5 <= lat <= 94 and cx == hx
+                if port.block in active_bays and port.edge == "N":
+                    valid_lat = False
+            else:
+                lat = cy % 100
+                min_lat = 19 if port.block in active_bays else 5
+                valid_lat = min_lat <= lat <= 94 and cy == hy
+            if not valid_lat:
+                violations.append(
+                    DrcViolation(
+                        code="PORT_TAP_GEOMETRY",
+                        message=(
+                            f"Port on {port.net_name} at {port.core_pos} (edge {port.edge} of "
+                            f"block {port.block}) violates wall coordinate bounds"
+                        ),
+                        x=float(cx),
+                        y=float(cy),
+                        net=port.net_name,
+                    )
+                )
+            if entities:
+                core_ents = tile_map.get((cx, cy), [])
+                if port.is_fluid:
+                    ok_ent = any("pipe" in e.get("name", "") for e in core_ents)
+                else:
+                    ok_ent = any(
+                        e.get("name") == "transport-belt"
+                        and int(e.get("direction", DIRECTION_NORTH)) == int(port.heading)
+                        for e in core_ents
+                    )
+                if not ok_ent:
+                    violations.append(
+                        DrcViolation(
+                            code="PORT_TAP_GEOMETRY",
+                            message=(
+                                f"Port on {port.net_name} at {port.core_pos} is missing a "
+                                f"perpendicular surface tap entity with heading {port.heading}"
+                            ),
+                            x=float(cx),
+                            y=float(cy),
+                            net=port.net_name,
+                        )
+                    )
+
+        def _route_coords(r_obj: Any) -> list[tuple[int, int]]:
+            r_nodes = getattr(r_obj, "nodes", None)
+            raw_pts = (
+                [(int(n.x), int(n.y)) for n in r_nodes]
+                if r_nodes is not None
+                else [(int(pt[0]), int(pt[1])) for pt in getattr(r_obj, "path", [])]
+            )
+            if len(raw_pts) <= 1:
+                return raw_pts
+            expanded: list[tuple[int, int]] = [raw_pts[0]]
+            for (x0, y0), (x1, y1) in itertools.pairwise(raw_pts):
+                if x0 == x1 and y0 != y1:
+                    step_y = 1 if y1 > y0 else -1
+                    expanded.extend((x0, cy_i) for cy_i in range(y0 + step_y, y1 + step_y, step_y))
+                elif y0 == y1 and x0 != x1:
+                    step_x = 1 if x1 > x0 else -1
+                    expanded.extend((cx_i, y0) for cx_i in range(x0 + step_x, x1 + step_x, step_x))
+                else:
+                    expanded.append((x1, y1))
+            return expanded
+
+        # 2. NO_OPPOSITE_WALL_SHORTCUT & 3. SWITCHBOX_ROUTING_DISCIPLINE
+        checked_hwy_names: set[str] = set()
+        fp_routes = getattr(macro_floorplan, "routes", {})
+        route_objs = list(fp_routes.values()) if isinstance(fp_routes, dict) else list(fp_routes)
+        for route in route_objs:
+            s_port = getattr(route, "source_port", None)
+            if s_port is None:
+                continue
+            s_pos = s_port.channel_pos
+            s_seg = _street_seg(s_pos)
+            t_ports = list(getattr(route, "target_ports", []))
+            for d_port in t_ports:
+                d_pos = d_port.channel_pos
+                d_seg = _street_seg(d_pos)
+                if s_seg is not None and d_seg is not None and s_seg == d_seg:
+                    violations.append(
+                        DrcViolation(
+                            code="NO_OPPOSITE_WALL_SHORTCUT",
+                            message=(
+                                f"Inter-block route {route.net_name} connects ports on the same "
+                                f"street segment {s_seg} ({s_pos} -> {d_pos})"
+                            ),
+                            x=float(s_pos[0]),
+                            y=float(s_pos[1]),
+                            net=route.net_name,
+                        )
+                    )
+                for cand_name in (route.net_name, f"{route.net_name}_hwy"):
+                    if (
+                        router_routes
+                        and cand_name in router_routes
+                        and cand_name not in checked_hwy_names
+                    ):
+                        checked_hwy_names.add(cand_name)
+                        coords = _route_coords(router_routes[cand_name])
+                        if coords and not any(_in_switchbox(tx, ty) for tx, ty in coords):
+                            violations.append(
+                                DrcViolation(
+                                    code="SWITCHBOX_ROUTING_DISCIPLINE",
+                                    message=(
+                                        f"Highway trunk {cand_name} ({s_pos} -> {d_pos}) "
+                                        f"does not pass through any 6x6 corner switchbox"
+                                    ),
+                                    x=float(s_pos[0]),
+                                    y=float(s_pos[1]),
+                                    net=cand_name,
+                                )
+                            )
+
+        for h_spec in highway_specs or []:
+            h_name = getattr(h_spec, "name", "")
+            s_pos = tuple(getattr(h_spec, "source", (0, 0)))
+            d_pos = tuple(getattr(h_spec, "sink", (0, 0)))
+            if s_pos not in port_channel_coords and d_pos not in port_channel_coords:
+                continue
+            s_seg = _street_seg(s_pos)
+            d_seg = _street_seg(d_pos)
+            if s_seg is not None and d_seg is not None and s_seg == d_seg:
+                violations.append(
+                    DrcViolation(
+                        code="NO_OPPOSITE_WALL_SHORTCUT",
+                        message=(
+                            f"Highway net {h_name} connects endpoints on the same "
+                            f"street segment {s_seg} ({s_pos} -> {d_pos})"
+                        ),
+                        x=float(s_pos[0]),
+                        y=float(s_pos[1]),
+                        net=h_name,
+                    )
+                )
+            if router_routes and h_name in router_routes and h_name not in checked_hwy_names:
+                checked_hwy_names.add(h_name)
+                coords = _route_coords(router_routes[h_name])
+                if coords and not any(_in_switchbox(tx, ty) for tx, ty in coords):
+                    violations.append(
+                        DrcViolation(
+                            code="SWITCHBOX_ROUTING_DISCIPLINE",
+                            message=(
+                                f"Highway net {h_name} ({s_pos} -> {d_pos}) "
+                                f"does not pass through any 6x6 corner switchbox"
+                            ),
+                            x=float(s_pos[0]),
+                            y=float(s_pos[1]),
+                            net=h_name,
+                        )
+                    )
+
+        # 4. CELL_SELF_CONTAINED_TREES
+        if def_data:
+            scale = 1.0 / float(def_data.get("units", 1000))
+            comp_map = {c["name"]: c for c in def_data.get("components", [])}
+            inst_map = {i["name"]: i for i in (netlist_data or {}).get("instances", [])}
+            cells_map = (netlist_data or {}).get("cells", {})
+
+            comp_block: dict[str, tuple[int, int] | None] = {}
+            comp_pos: dict[str, tuple[int, int]] = {}
+            for cname, comp in comp_map.items():
+                cx = round(comp["x"] * scale)
+                cy = round(comp["y"] * scale)
+                comp_pos[cname] = (cx, cy)
+                comp_block[cname] = _core_block(cx, cy)
+
+            def _is_telemetry(iname: str) -> bool:
+                if iname.startswith(("u_acc_", "u_disp_")):
+                    return True
+                comp = comp_map.get(iname, {})
+                macro = inst_map.get(iname, {}).get("cell", comp.get("macro", ""))
+                return macro in ("display_panel", "arithmetic_combinator") or bool(
+                    cells_map.get(macro, {}).get("circuit_cell")
+                )
+
+            def _is_drv_port(iname: str, port: str) -> bool:
+                comp = comp_map.get(iname, {})
+                macro = inst_map.get(iname, {}).get("cell", comp.get("macro", ""))
+                if any(k in macro for k in ("split", "merge", "balancer")):
+                    return port in ("y", "y1", "y2")
+                outs = cells_map.get(macro, {}).get("outputs", [])
+                clean_outs = {o.replace("-", "_") for o in outs} | set(outs)
+                return (
+                    port in clean_outs
+                    or port.replace("-", "_") in clean_outs
+                    or port
+                    in (
+                        "y",
+                        "out",
+                    )
+                )
+
+            net_drivers: dict[str, list[str]] = {}
+            net_sinks: dict[str, list[str]] = {}
+            for net in def_data.get("nets", []):
+                nname = net.get("name", "")
+                drvs: list[str] = []
+                snks: list[str] = []
+                for iname, port in net.get("connections", []):
+                    if iname == "PIN" or iname not in comp_map or _is_telemetry(iname):
+                        continue
+                    if _is_drv_port(iname, port):
+                        drvs.append(iname)
+                    else:
+                        snks.append(iname)
+                net_drivers[nname] = drvs
+                net_sinks[nname] = snks
+
+            for net in def_data.get("nets", []):
+                nname = net.get("name", "")
+                for iname, port in net.get("connections", []):
+                    if iname == "PIN" or iname not in comp_map or _is_telemetry(iname):
+                        continue
+                    blk = comp_block.get(iname)
+                    if blk is None:
+                        continue
+                    macro = inst_map.get(iname, {}).get("cell", comp_map[iname].get("macro", ""))
+                    cx, cy = comp_pos[iname]
+                    if ("split" in macro or "balancer" in macro) and _is_drv_port(iname, port):
+                        for s_name in net_sinks.get(nname, []):
+                            s_blk = comp_block.get(s_name)
+                            if s_blk != blk:
+                                violations.append(
+                                    DrcViolation(
+                                        code="CELL_SELF_CONTAINED_TREES",
+                                        message=(
+                                            f"Splitter {iname} inside cell {blk} drives "
+                                            f"{s_name} in {s_blk} on net {nname}"
+                                        ),
+                                        x=float(cx),
+                                        y=float(cy),
+                                        net=nname,
+                                    )
+                                )
+                    elif "merge" in macro and not _is_drv_port(iname, port):
+                        for d_name in net_drivers.get(nname, []):
+                            d_blk = comp_block.get(d_name)
+                            if d_blk != blk:
+                                violations.append(
+                                    DrcViolation(
+                                        code="CELL_SELF_CONTAINED_TREES",
+                                        message=(
+                                            f"Merger {iname} inside cell {blk} receives input "
+                                            f"from {d_name} in {d_blk} on net {nname}"
+                                        ),
+                                        x=float(cx),
+                                        y=float(cy),
+                                        net=nname,
+                                    )
+                                )
 
         return violations

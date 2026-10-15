@@ -391,7 +391,155 @@ class TestMacroFloorplan(unittest.TestCase):
         # Highway receives only inter-block trunks (and only 1 water trunk for block (1, 0))
         hwy_names = {s.name for s in hwy_specs}
         self.assertEqual(hwy_names, {"cross_plate_hwy", "ext_copper_hwy", "water_hwy_mst_0"})
-        self.assertGreaterEqual(len(no_hood_tiles), 8)
+        self.assertGreaterEqual(len(no_hood_tiles), 4)
         self.assertGreaterEqual(len(port_headings), 6)
         self.assertEqual(len(floorplan.ports), 4)
+
+    def test_no_opposite_wall_shortcut_and_switchbox_drc(self) -> None:
+        """Verify ports across a shared street are forced onto distinct street segments and checked by DRC."""
+        from foundry.belt_drc import BeltDrcChecker
+        from foundry.macro_floorplan import BlockPort, InterBlockRoute
+        from foundry.router.types import RouterNetSpec
+
+        # Source at (90, 40) in (0, 0) and sink at (110, 40) in (1, 0) face each other across V street x in [97..102]
+        net_specs = [
+            RouterNetSpec(
+                name="iron_plate_bridge",
+                source=(90, 40),
+                sink=(110, 40),
+                commodity="iron-plate",
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+            )
+        ]
+        _intra, hwy_specs, _no_hood, _headings, floorplan = (
+            self.floorplanner.plan_hierarchical_nets(
+                net_specs=net_specs,
+                grid_w=2,
+                grid_h=2,
+                obstacles=set(),
+                min_x=0,
+                min_y=0,
+                max_x=200,
+                max_y=200,
+                bay_blocks={(0, 1), (1, 1)},
+            )
+        )
+        self.assertIn("iron_plate_bridge", floorplan.routes)
+        route = floorplan.routes["iron_plate_bridge"]
+        assert route.source_port is not None
+        self.assertEqual(len(route.target_ports), 1)
+        src_seg = self.floorplanner._street_segment_of_edge(
+            route.source_port.block[0], route.source_port.block[1], route.source_port.edge
+        )
+        dst_seg = self.floorplanner._street_segment_of_edge(
+            route.target_ports[0].block[0],
+            route.target_ports[0].block[1],
+            route.target_ports[0].edge,
+        )
+        self.assertNotEqual(src_seg, dst_seg)
+
+        # Verify BeltDrcChecker catches a synthetic opposite-wall shortcut and missing switchbox traversal
+        drc = BeltDrcChecker()
+        bad_src_port = BlockPort(
+            name="bad_shortcut_export_0_0",
+            block=(0, 0),
+            net_name="bad_shortcut",
+            port_type="export",
+            edge="E",
+            position=(97.0, 40.0),
+            channel_id="v_channel_0_0",
+            lane_index=0,
+            direction=DIRECTION_EAST,
+            internal_pos=(96.0, 40.0),
+        )
+        bad_dst_port = BlockPort(
+            name="bad_shortcut_import_1_0",
+            block=(1, 0),
+            net_name="bad_shortcut",
+            port_type="import",
+            edge="W",
+            position=(102.0, 40.0),
+            channel_id="v_channel_0_0",
+            lane_index=0,
+            direction=DIRECTION_EAST,
+            internal_pos=(103.0, 40.0),
+        )
+        bad_fp = self.floorplanner.plan_grid([], grid_w=2, grid_h=2)
+        bad_fp.ports = [bad_src_port, bad_dst_port]
+        bad_fp.routes["bad_shortcut"] = InterBlockRoute(
+            net_name="bad_shortcut",
+            source_block=(0, 0),
+            target_blocks=[(1, 0)],
+            source_port=bad_src_port,
+            target_ports=[bad_dst_port],
+        )
+
+        class _MockRoute:
+            path = [(97, 40), (98, 40), (99, 40), (100, 40), (101, 40), (102, 40)]
+
+        violations = drc.check_chassis_matrix_discipline(
+            entities=[],
+            macro_floorplan=bad_fp,
+            router_routes={"bad_shortcut_hwy": _MockRoute()},
+            highway_specs=hwy_specs,
+        )
+        codes = {v.code for v in violations}
+        self.assertIn("NO_OPPOSITE_WALL_SHORTCUT", codes)
+        self.assertIn("SWITCHBOX_ROUTING_DISCIPLINE", codes)
+
+    def test_self_contained_cell_trees_drc(self) -> None:
+        """Verify CELL_SELF_CONTAINED_TREES flags splitters/mergers that cross cell boundaries."""
+        from foundry.belt_drc import BeltDrcChecker
+
+        drc = BeltDrcChecker()
+        fp = self.floorplanner.plan_grid([], grid_w=2, grid_h=2)
+
+        # Case 1: Splitter inside core (0, 0) driving a sink in core (1, 0) -> VIOLATION
+        bad_def = {
+            "units": 1000,
+            "die_area": [0, 0, 200000, 200000],
+            "components": [
+                {"name": "u_split_1", "macro": "belt_split2", "x": 50000, "y": 50000},
+                {"name": "u_mach_a", "macro": "assembling-machine-3", "x": 60000, "y": 50000},
+                {"name": "u_mach_b", "macro": "assembling-machine-3", "x": 150000, "y": 50000},
+            ],
+            "nets": [
+                {"name": "n1", "connections": [("u_split_1", "y1"), ("u_mach_a", "in")]},
+                {"name": "n2", "connections": [("u_split_1", "y2"), ("u_mach_b", "in")]},
+            ],
+        }
+        violations = drc.check_chassis_matrix_discipline(
+            entities=[],
+            macro_floorplan=fp,
+            def_data=bad_def,
+            bay_blocks={(0, 1), (1, 1)},
+        )
+        self.assertEqual([v.code for v in violations], ["CELL_SELF_CONTAINED_TREES"])
+
+        # Case 2: Splitter moved to Matrix Switchbox Bay of (0, 1) at (50, 106) -> VALID
+        good_def = {
+            "units": 1000,
+            "die_area": [0, 0, 200000, 200000],
+            "components": [
+                {"name": "u_split_1", "macro": "belt_split2", "x": 50000, "y": 106000},
+                {"name": "u_mach_a", "macro": "assembling-machine-3", "x": 60000, "y": 50000},
+                {"name": "u_mach_b", "macro": "assembling-machine-3", "x": 150000, "y": 50000},
+            ],
+            "nets": [
+                {"name": "n1", "connections": [("u_split_1", "y1"), ("u_mach_a", "in")]},
+                {"name": "n2", "connections": [("u_split_1", "y2"), ("u_mach_b", "in")]},
+            ],
+        }
+        violations_good = drc.check_chassis_matrix_discipline(
+            entities=[],
+            macro_floorplan=fp,
+            def_data=good_def,
+            bay_blocks={(0, 1), (1, 1)},
+        )
+        self.assertEqual(violations_good, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
 

@@ -312,7 +312,8 @@ class RoutingGrid:
     ) -> bool:
         """Check if obstacle or blockage 1-2 steps ahead warrants diving underground."""
         b_name = base_net_name(net_name)
-        for s in (1, 2):
+        blocked_ahead = False
+        for s in (1, 2, 3):
             tx = x + dx * s
             ty = y + dy * s
             if not (self.min_x <= tx <= self.max_x and self.min_y <= ty <= self.max_y):
@@ -321,24 +322,36 @@ class RoutingGrid:
             if target_pos is not None and pt == target_pos:
                 return False
             idx = (ty - self.min_y) * self.width + (tx - self.min_x)
-            if self.obstacle_bytes[idx] == 1:
-                return True
-            if pt in self.active_hoods:
-                return True
-            if pt in self.active_horiz_spans or pt in self.active_vert_spans:
-                return True
             if (
-                pt in self.reserved_terminal_bases
-                and b_name not in self.reserved_terminal_bases[pt]
+                self.obstacle_bytes[idx] == 1
+                or pt in self.active_hoods
+                or (
+                    pt in self.reserved_terminal_bases
+                    and b_name not in self.reserved_terminal_bases[pt]
+                )
             ):
-                return True
-            if self.historical_cost.get((tx, ty, 0), 0.0) > 0.0:
-                return True
+                blocked_ahead = True
+                break
             if pt in self.surface_occupancy:
                 current_nets = self.surface_occupancy[pt]
                 if current_nets and any(base_net_name(n) != b_name for n in current_nets):
-                    return True
+                    blocked_ahead = True
+                    break
+            if self.has_congestion and self.historical_cost.get((tx, ty, 0), 0.0) > 0.0:
+                blocked_ahead = True
+                break
             if not self.can_occupy_surface(pt, net_name, lane):
+                blocked_ahead = True
+                break
+        if not blocked_ahead:
+            return False
+        for step in range(2, _max_span + 1):
+            ex = x + dx * step
+            ey = y + dy * step
+            if not (self.min_x <= ex <= self.max_x and self.min_y <= ey <= self.max_y):
+                break
+            e_idx = (ey - self.min_y) * self.width + (ex - self.min_x)
+            if self.obstacle_bytes[e_idx] == 0:
                 return True
         return False
 
@@ -486,9 +499,10 @@ class RoutingGrid:
             return cost
         key = (x, y, z)
         h = self.historical_cost.get(key, 0.0)
-        p = self.present_cost.get(key, 1.0)
-        if live_overuse > 0:
-            p = max(p, 1.0 + self.congestion_gamma * live_overuse)
+        if z == LAYER_SURFACE and net_name:
+            p = (1.0 + self.congestion_gamma * live_overuse) if live_overuse > 0 else 1.0
+        else:
+            p = self.present_cost.get(key, 1.0)
         return (cost + h) * p
 
     def can_occupy_surface(
@@ -530,7 +544,7 @@ class RoutingGrid:
 
             if is_hood:
                 rear_nb = (pos[0] - dx, pos[1] - dy)
-                if rear_nb in self.surface_net_headings and rear_nb not in self.active_hoods:
+                if rear_nb in self.surface_net_headings:
                     for nb_net, nb_h in self.surface_net_headings[rear_nb].items():
                         if (
                             nb_h == heading
@@ -711,8 +725,10 @@ class RoutingGrid:
                 domain_spans[pt] = net_name
             for s in range(dist + 1):
                 pt = (start.x + dx * s, start.y + dy * s)
-                self.layer_occupancy[z][pt] = net_name
-                key = (pt[0], pt[1], z)
+                if s == 0 or s == dist or is_horiz:
+                    self.layer_occupancy[z][pt] = net_name
+                key_z = z if (s == 0 or s == dist or is_horiz) else -z
+                key = (pt[0], pt[1], key_z)
                 self.node_occupants.setdefault(key, set()).add(net_name)
                 self.usage_count[key] = len(self.node_occupants[key])
 
@@ -801,7 +817,8 @@ class RoutingGrid:
                 pt = (start.x + dx * s, start.y + dy * s)
                 if self.layer_occupancy[z].get(pt) == net_name:
                     del self.layer_occupancy[z][pt]
-                key = (pt[0], pt[1], z)
+                key_z = z if (s == 0 or s == dist or is_horiz) else -z
+                key = (pt[0], pt[1], key_z)
                 if key in self.node_occupants:
                     self.node_occupants[key].discard(net_name)
                     if not self.node_occupants[key]:

@@ -185,7 +185,7 @@ if {[info exists USE_ANALYTICAL_PLACEMENT] && $USE_ANALYTICAL_PLACEMENT == "1" &
                 set y2 [expr {$y1 + $CHASSIS_CORE_H}]
                 create_blockage -region [list $x1 $y1 $x2 $y2]
             }
-        } elseif {$CHASSIS_GRID_W >= 3 && $CHASSIS_GRID_H >= 3} {
+        } elseif {$CHASSIS_GRID_W == 3 && $CHASSIS_GRID_H == 3} {
             set mid_bx [expr {($CHASSIS_GRID_W - 1) / 2}]
             set mid_by [expr {($CHASSIS_GRID_H - 1) / 2}]
             set x1 [expr {$mid_bx * $CHASSIS_PITCH + $margin_x}]
@@ -248,6 +248,36 @@ if {[info exists USE_ANALYTICAL_PLACEMENT] && $USE_ANALYTICAL_PLACEMENT == "1" &
             $inst setLocation [expr {int($unplaced_x * $dbu)}] [expr {int($unplaced_y * $dbu)}]
             $inst setPlacementStatus PLACED
             set unplaced_x [expr {$unplaced_x + $dw + 6}]
+        }
+    }
+
+    if {$is_chassis} {
+        set rw_dict_name "analytical_rewire_${CHASSIS_GRID_W}x${CHASSIS_GRID_H}"
+        if {[info exists $rw_dict_name]} {
+            set active_rewire [set $rw_dict_name]
+            dict for {r_iname port_list} $active_rewire {
+                set r_inst [$block findInst $r_iname]
+                if {$r_inst != "NULL" && $r_inst != ""} {
+                    foreach {p_name _p_net_name} $port_list {
+                        set p_iterm [$r_inst findITerm $p_name]
+                        if {$p_iterm != "NULL" && $p_iterm != ""} {
+                            odb::dbITerm_disconnect $p_iterm
+                        }
+                    }
+                }
+            }
+            dict for {r_iname port_list} $active_rewire {
+                set r_inst [$block findInst $r_iname]
+                if {$r_inst != "NULL" && $r_inst != ""} {
+                    foreach {p_name p_net_name} $port_list {
+                        set p_iterm [$r_inst findITerm $p_name]
+                        set p_net [$block findNet $p_net_name]
+                        if {$p_iterm != "NULL" && $p_iterm != "" && $p_net != "NULL" && $p_net != ""} {
+                            odb::dbITerm_connect $p_iterm $p_net
+                        }
+                    }
+                }
+            }
         }
     }
 

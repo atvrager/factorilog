@@ -126,18 +126,53 @@ def _a_star_search(
         sorted_goals = sorted(existing_fluid_goals, key=lambda g: abs(g[0] - sx) + abs(g[1] - sy))
         target_goals.extend(sorted_goals[:20])
 
+    is_hwy = "_hwy" in net_name
+    src_bay = (sx // 100, sy // 100) if (3 <= (sx % 100) <= 96 and 3 <= (sy % 100) <= 16) else None
+    snk_bay = (tx // 100, ty // 100) if (3 <= (tx % 100) <= 96 and 3 <= (ty % 100) <= 16) else None
+    snk_h_band = (ty + 3) // 100
+    snk_v_band = (tx + 3) // 100
+    bay_rows = {b[1] for b in (src_bay, snk_bay) if b is not None}
+
     def calc_h(x: int, y: int) -> float:
         if is_fluid and existing_fluid_goals:
             return 1.4 * float(min(abs(x - gx) + abs(y - gy) for gx, gy in target_goals))
-        return 1.4 * float(abs(x - tx) + abs(y - ty))
+        dx_h = abs(x - tx)
+        dy_h = abs(y - ty)
+        if is_hwy:
+            if 3 <= (x % 100) <= 96 and (y + 3) // 100 != snk_h_band:
+                bx_h = x // 100
+                vx_w = bx_h * 100 + 2
+                vx_e = min(grid.max_x, bx_h * 100 + 97)
+                dx_h = min(abs(x - vx_w) + abs(vx_w - tx), abs(x - vx_e) + abs(vx_e - tx))
+            if 17 <= (y % 100) <= 96 and (x + 3) // 100 != snk_v_band:
+                by_h = y // 100
+                hy_n = by_h * 100 + (16 if by_h in bay_rows else 2)
+                hy_s = min(grid.max_y, by_h * 100 + 97)
+                dy_h = max(
+                    dy_h,
+                    min(abs(y - hy_n) + abs(hy_n - ty), abs(y - hy_s) + abs(hy_s - ty)),
+                )
+        return 1.4 * float(dx_h + dy_h)
 
     # open_set stores (f_score, h_val, state_id)
     open_set: list[tuple[float, float, int]] = []
     g_score: dict[int, float] = {}
     came_from: dict[int, tuple[int, str, str, float]] = {}
     path_hoods: dict[int, frozenset[tuple[int, int]]] = {}
-    path_surf: dict[int, frozenset[tuple[int, int]]] = {}
     closed_set: set[int] = set()
+    closed_xy: set[int] = set()
+
+    def _in_ancestor_xy(state_id: int, xy_key: int) -> bool:
+        if xy_key not in closed_xy:
+            return False
+        cur = state_id
+        while True:
+            if (cur >> 8) == xy_key:
+                return True
+            prev = came_from.get(cur)
+            if prev is None:
+                return False
+            cur = prev[0]
 
     start_at_mouth = False
     source_hood_mouth: tuple[int, int] | None = None
@@ -158,7 +193,6 @@ def _a_star_search(
                     h_idx = h >> 2
                     s = pack_state(m_pos[0], m_pos[1], LAYER_SURFACE, h_idx)
                     path_hoods[s] = frozenset()
-                    path_surf[s] = frozenset()
                     base_start_cost = grid.get_fast_node_cost(
                         m_pos[0], m_pos[1], LAYER_SURFACE, 0.0, net_name, lane
                     )
@@ -178,7 +212,6 @@ def _a_star_search(
             h_idx = h >> 2
             s = pack_state(sx, sy, LAYER_SURFACE, h_idx)
             path_hoods[s] = frozenset()
-            path_surf[s] = frozenset()
             base_start_cost = grid.get_fast_node_cost(sx, sy, LAYER_SURFACE, 0.0, net_name, lane)
             g_score[s] = base_start_cost
             h_val = calc_h(sx, sy)
@@ -187,8 +220,66 @@ def _a_star_search(
     goal_state: int | None = None
     target_end_h = net.end_heading
 
+    if not open_set:
+        return RouteResult(
+            net_name=net.name,
+            nodes=[],
+            edges=[],
+            cost=float("inf"),
+            is_success=False,
+            error_message=f"Source {net.source} is blocked.",
+            failed_frontier=(net.source,),
+        )
+
+    valid_end_headings: set[int] = set()
+    if not is_fluid:
+        end_headings = [target_end_h] if target_end_h is not None else list(ALL_DIRECTIONS)
+        for eh in end_headings:
+            can_sink = grid.can_occupy_surface(
+                sink_pos, net_name, lane, heading=eh, is_hood=False
+            ) or (
+                bool(tier_ug_keys)
+                and grid.can_occupy_surface(sink_pos, net_name, lane, heading=eh, is_hood=True)
+                and grid.can_place_hood(sink_pos, net_name, heading=eh, is_output=True)
+            )
+            if not can_sink:
+                continue
+            gdx, gdy = DIR_STEPS[eh]
+            front_pos = (tx + gdx, ty + gdy)
+            front_occ = grid.surface_occupancy.get(front_pos)
+            front_res = grid.reserved_terminals.get(front_pos)
+            bad_front = False
+            if front_occ and any(
+                base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_occ
+            ):
+                bad_front = True
+            if front_res and any(
+                base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_res
+            ):
+                bad_front = True
+            if (
+                front_pos in grid.active_hoods
+                and base_net_name(grid.active_hoods[front_pos]) != b_name
+                and not grid.is_net_fluid(grid.active_hoods[front_pos])
+            ):
+                bad_front = True
+            if front_pos in grid.component_headings and net.terminal_heading is None:
+                bad_front = True
+            if not bad_front:
+                valid_end_headings.add(eh)
+        if not valid_end_headings:
+            return RouteResult(
+                net_name=net.name,
+                nodes=[],
+                edges=[],
+                cost=float("inf"),
+                is_success=False,
+                error_message=f"Sink {sink_pos} or its front tile is blocked.",
+                failed_frontier=(sink_pos,),
+            )
+
     box_area = max(100, (bx1 - bx0 + 1) * (by1 - by0 + 1))
-    cap_states = 48000 if "_hwy" in net_name else 16000
+    cap_states = 24 * 1024
     max_states = min(cap_states, max(4000, box_area * 2))
     while open_set:
         if len(closed_set) >= max_states:
@@ -198,14 +289,20 @@ def _a_star_search(
         if current in closed_set:
             continue
         closed_set.add(current)
+        closed_xy.add(current >> 8)
 
         cx, cy, cz, ch, ch_idx = unpack_state(current)
         curr_hoods = path_hoods.get(current, frozenset())
-        curr_surf = path_surf.get(current, frozenset())
 
         # Check goal condition
         prev_move = came_from[current][1] if current in came_from else None
+        can_surf_here = True
         if cz == LAYER_SURFACE:
+            cpos = (cx, cy)
+            if is_fluid and prev_move != "leap":
+                can_surf_here = grid.can_occupy_surface(
+                    cpos, net_name, lane, heading=ch, is_hood=False
+                )
             if cx == tx and cy == ty and (target_end_h is None or ch == target_end_h):
                 if is_fluid and prev_move == "leap":
                     inward = grid.fluid_terminal_inward_dir.get((tx, ty))
@@ -215,34 +312,18 @@ def _a_star_search(
                         goal_state = current
                         break
                 elif not is_fluid:
-                    gdx, gdy = DIR_STEPS[ch]
-                    front_pos = (tx + gdx, ty + gdy)
-                    front_occ = grid.surface_occupancy.get(front_pos)
-                    front_res = grid.reserved_terminals.get(front_pos)
-                    bad_front = False
-                    if front_occ and any(
-                        base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_occ
-                    ):
-                        bad_front = True
-                    if front_res and any(
-                        base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_res
-                    ):
-                        bad_front = True
-                    if (
-                        front_pos in grid.active_hoods
-                        and base_net_name(grid.active_hoods[front_pos]) != b_name
-                        and not grid.is_net_fluid(grid.active_hoods[front_pos])
-                    ):
-                        bad_front = True
-                    if front_pos in grid.component_headings and net.terminal_heading is None:
-                        bad_front = True
-                    if not bad_front:
+                    if ch in valid_end_headings:
                         goal_state = current
                         break
-                else:
+                elif can_surf_here:
                     goal_state = current
                     break
-            if is_fluid and (cx, cy) in existing_fluid_goals and prev_move != "leap":
+            if (
+                is_fluid
+                and (cx, cy) in existing_fluid_goals
+                and prev_move != "leap"
+                and can_surf_here
+            ):
                 goal_state = current
                 break
             if is_fluid and prev_move == "leap":
@@ -256,30 +337,46 @@ def _a_star_search(
 
         if cz == LAYER_SURFACE:
             cpos = (cx, cy)
-            can_surf_here = True
-            if cx == sx and cy == sy and is_fluid:
-                can_surf_here = grid.can_occupy_surface(
-                    net.source, net_name, lane, heading=ch, is_hood=False
-                )
-
             if can_surf_here:
                 next_visited = (curr_hoods | {cpos}) if is_fluid else curr_hoods
-                next_surf = curr_surf | {cpos}
                 # 1. Straight
                 nx = cx + dx
                 ny = cy + dy
-                if bx0 <= nx <= bx1 and by0 <= ny <= by1:
+                if (
+                    bx0 <= nx <= bx1
+                    and by0 <= ny <= by1
+                    and not (
+                        is_hwy
+                        and 3 <= (nx % 100) <= 96
+                        and 3 <= (ny % 100) <= 16
+                        and (nx // 100, ny // 100) != src_bay
+                        and (nx // 100, ny // 100) != snk_bay
+                    )
+                ):
                     npos = (nx, ny)
-                    if npos not in next_surf:
+                    n_xy = ((nx + 32768) << 16) | (ny + 32768)
+                    if not _in_ancestor_xy(current, n_xy):
                         nxt_s = pack_state(nx, ny, LAYER_SURFACE, ch_idx)
-                        if nxt_s not in closed_set:
+                        if nxt_s not in closed_set and (
+                            is_fluid or nx != tx or ny != ty or ch in valid_end_headings
+                        ):
                             edge_cost = grid.get_fast_node_cost(
                                 nx, ny, LAYER_SURFACE, STEP_COST, net_name, lane
                             )
                             tentative_g = curr_g + edge_cost
-                            if tentative_g < g_score.get(
-                                nxt_s, float("inf")
-                            ) and grid.can_occupy_surface(npos, net_name, lane, heading=ch):
+                            if tentative_g < g_score.get(nxt_s, float("inf")) and (
+                                grid.can_occupy_surface(npos, net_name, lane, heading=ch)
+                                or (
+                                    is_fluid
+                                    and prev_move != "leap"
+                                    and grid.can_occupy_surface(
+                                        npos, net_name, lane, heading=ch, is_hood=True
+                                    )
+                                    and grid.can_place_hood(
+                                        npos, net_name, heading=ch, is_output=False
+                                    )
+                                )
+                            ):
                                 g_score[nxt_s] = tentative_g
                                 came_from[nxt_s] = (
                                     current,
@@ -288,12 +385,18 @@ def _a_star_search(
                                     edge_cost,
                                 )
                                 path_hoods[nxt_s] = next_visited
-                                path_surf[nxt_s] = next_surf
                                 h_val = calc_h(nx, ny)
                                 heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
 
                         # 2. Turns
                         for th in ((ch + 4) & 15, (ch + 12) & 15):
+                            if (
+                                not is_fluid
+                                and nx == tx
+                                and ny == ty
+                                and th not in valid_end_headings
+                            ):
+                                continue
                             th_idx = th >> 2
                             nxt_s = pack_state(nx, ny, LAYER_SURFACE, th_idx)
                             if nxt_s not in closed_set:
@@ -312,7 +415,6 @@ def _a_star_search(
                                         edge_cost,
                                     )
                                     path_hoods[nxt_s] = next_visited
-                                    path_surf[nxt_s] = next_surf
                                     h_val = calc_h(nx, ny)
                                     heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
 
@@ -327,16 +429,51 @@ def _a_star_search(
                     or OPPOSITE_DIR.get(ch, 0) == grid.fluid_terminal_inward_dir[cpos]
                 )
                 and (
-                    is_fluid
+                    (is_fluid and (not can_surf_here or abs(cx - tx) + abs(cy - ty) <= max_ug_span))
                     or grid.should_consider_underground(
                         cx, cy, dx, dy, max_ug_span, net_name, lane, target_pos=sink_pos
                     )
                 )
                 and grid.can_place_hood(cpos, net_name, heading=ch, is_output=False)
+                and (
+                    not is_fluid
+                    or grid.can_occupy_surface(cpos, net_name, lane, heading=ch, is_hood=True)
+                )
             ):
                 new_dive_hoods = curr_hoods | {cpos}
-                new_dive_surf = curr_surf | {cpos}
+                is_horiz_dive = dx != 0
+                dive_axis_spans = (
+                    (grid.active_pipe_horiz_spans if is_horiz_dive else grid.active_pipe_vert_spans)
+                    if is_fluid
+                    else (
+                        grid.active_belt_horiz_spans
+                        if is_horiz_dive
+                        else grid.active_belt_vert_spans
+                    )
+                )
+                prev_reach = 0
                 for target_z in tier_ug_keys:
+                    t_reach = grid.get_tier_span(target_z)
+                    if not is_fluid and prev_reach > 0:
+                        blocked_early = False
+                        for s_chk in range(1, prev_reach + 1):
+                            ex_c = cx + dx * s_chk
+                            ey_c = cy + dy * s_chk
+                            if not (bx0 <= ex_c <= bx1 and by0 <= ey_c <= by1):
+                                blocked_early = True
+                                break
+                            pt_c = (ex_c, ey_c)
+                            if pt_c in dive_axis_spans or pt_c in curr_hoods:
+                                blocked_early = True
+                                break
+                            if pt_c in grid.active_hoods and not grid.is_net_fluid(
+                                grid.active_hoods[pt_c]
+                            ):
+                                blocked_early = True
+                                break
+                        if blocked_early:
+                            break
+                    prev_reach = t_reach
                     nxt_s = pack_state(cx, cy, target_z, ch_idx)
                     if nxt_s not in closed_set:
                         tier_cost = grid.get_tier_cost(target_z)
@@ -353,7 +490,6 @@ def _a_star_search(
                             )
                             came_from[nxt_s] = (current, "dive", tier_name, edge_cost)
                             path_hoods[nxt_s] = new_dive_hoods
-                            path_surf[nxt_s] = new_dive_surf
                             h_val = calc_h(cx, cy)
                             heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
 
@@ -361,14 +497,14 @@ def _a_star_search(
                 nx = cx + dx
                 ny = cy + dy
                 npos = (nx, ny)
+                n_xy = ((nx + 32768) << 16) | (ny + 32768)
                 if (
                     grid.is_in_bounds(nx, ny)
-                    and npos not in curr_surf
+                    and not _in_ancestor_xy(current, n_xy)
                     and grid.can_place_hood(npos, net_name, heading=ch, is_output=False)
                     and grid.can_occupy_surface(npos, net_name, lane, heading=ch, is_hood=True)
                 ):
                     new_dive_hoods = curr_hoods | {npos}
-                    new_dive_surf = curr_surf | {cpos, npos}
                     for target_z in tier_ug_keys:
                         nxt_s = pack_state(nx, ny, target_z, ch_idx)
                         if nxt_s not in closed_set:
@@ -382,29 +518,52 @@ def _a_star_search(
                                 tier_name = grid.pipe_tiers[target_z]["name"]
                                 came_from[nxt_s] = (current, "dive", tier_name, edge_cost)
                                 path_hoods[nxt_s] = new_dive_hoods
-                                path_surf[nxt_s] = new_dive_surf
                                 h_val = calc_h(nx, ny)
                                 heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
         else:
             # Subterranean leaps
             max_span = grid.get_tier_span(cz)
             is_horiz = dx != 0
-            occ = grid.layer_occupancy.get(cz, {})
             if is_fluid:
                 axis_spans = (
                     grid.active_pipe_horiz_spans if is_horiz else grid.active_pipe_vert_spans
                 )
+                min_step = 1
             else:
                 axis_spans = (
                     grid.active_belt_horiz_spans if is_horiz else grid.active_belt_vert_spans
                 )
+                min_step = 2
+                for k_idx, kz in enumerate(tier_ug_keys):
+                    if kz == cz and k_idx > 0:
+                        min_step = max(2, grid.get_tier_span(tier_ug_keys[k_idx - 1]) + 1)
+                        break
             tier_name = (
                 grid.pipe_tiers.get(cz, {}).get("name", "pipe-to-ground")
                 if is_fluid
                 else grid.belt_tiers.get(cz, {}).get("name", "underground-belt")
             )
 
-            for step in range(1, max_span + 1):
+            blocked_tunnel = False
+            for s_pre in range(1, min_step):
+                ex_p = cx + dx * s_pre
+                ey_p = cy + dy * s_pre
+                if not (bx0 <= ex_p <= bx1 and by0 <= ey_p <= by1):
+                    blocked_tunnel = True
+                    break
+                pt_p = (ex_p, ey_p)
+                if pt_p in axis_spans or pt_p in curr_hoods:
+                    blocked_tunnel = True
+                    break
+                if pt_p in grid.active_hoods and (
+                    grid.is_net_fluid(grid.active_hoods[pt_p]) == is_fluid
+                ):
+                    blocked_tunnel = True
+                    break
+            if blocked_tunnel:
+                continue
+
+            for step in range(min_step, max_span + 1):
                 ex = cx + dx * step
                 ey = cy + dy * step
                 if not (bx0 <= ex <= bx1 and by0 <= ey <= by1):
@@ -417,12 +576,21 @@ def _a_star_search(
                     continue
                 if pt in axis_spans:
                     break
-                if pt in occ:
-                    break
 
                 if pt in curr_hoods:
                     break
-                if pt in curr_surf:
+                if (
+                    is_hwy
+                    and 3 <= (ex % 100) <= 96
+                    and 3 <= (ey % 100) <= 16
+                    and (ex // 100, ey // 100) != src_bay
+                    and (ex // 100, ey // 100) != snk_bay
+                ):
+                    continue
+                if not is_fluid and ex == tx and ey == ty and ch not in valid_end_headings:
+                    continue
+                e_xy = ((ex + 32768) << 16) | (ey + 32768)
+                if _in_ancestor_xy(current, e_xy):
                     continue
 
                 nxt_s = pack_state(ex, ey, LAYER_SURFACE, ch_idx)
@@ -448,7 +616,6 @@ def _a_star_search(
                     g_score[nxt_s] = tentative_g
                     came_from[nxt_s] = (current, "leap", tier_name, edge_cost)
                     path_hoods[nxt_s] = curr_hoods | {pt}
-                    path_surf[nxt_s] = curr_surf | {pt}
                     h_val = calc_h(ex, ey)
                     heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
 
@@ -469,7 +636,7 @@ def _a_star_search(
             is_success=False,
             error_message=(
                 f"No route found from {net.source} to {net.sink}. "
-                f"Explored {len(closed_set)} states. Coords: {coords[:40]}."
+                f"Explored {len(closed_set)} states. Frontier: {frontier}. Coords: {coords[:20]}."
             ),
             failed_frontier=frontier,
         )
@@ -524,7 +691,7 @@ def route_single_net(
     max_y = max(net.source[1], net.sink[1])
 
     span = (max_x - min_x) + (max_y - min_y)
-    if span > 120:
+    if span > 120 and "_hwy" not in net.name:
         margin = max(margin, min(60, span // 8))
 
     my_mst = mst_index(net.name)
@@ -560,11 +727,10 @@ def route_single_net(
     if net.corridor_bbox is not None:
         cbx0, cby0, cbx1, cby1 = net.corridor_bbox
         if "_hwy" in net.name:
-            h_pad = 105 if margin > 10 else 0
-            bx_min = max(grid.min_x, cbx0 - h_pad)
-            by_min = max(grid.min_y, cby0 - h_pad)
-            bx_max = min(grid.max_x, cbx1 + h_pad)
-            by_max = min(grid.max_y, cby1 + h_pad)
+            bx_min = max(grid.min_x, cbx0)
+            by_min = max(grid.min_y, cby0)
+            bx_max = min(grid.max_x, cbx1)
+            by_max = min(grid.max_y, cby1)
         else:
             bx_min = max(cbx0, bx_min)
             by_min = max(cby0, by_min)
@@ -574,7 +740,7 @@ def route_single_net(
     first_bbox = (bx_min, by_min, bx_max, by_max)
     grid.active_bbox = first_bbox
     res = _a_star_search(net, grid)
-    if not res.is_success:
+    if not res.is_success and "is blocked." not in (res.error_message or ""):
         first_frontier = res.failed_frontier
         if net.corridor_bbox is not None and "_hwy" not in net.name:
             cbx0, cby0, cbx1, cby1 = net.corridor_bbox
@@ -583,6 +749,15 @@ def route_single_net(
                 max(grid.min_y, cby0),
                 min(grid.max_x, cbx1),
                 min(grid.max_y, cby1),
+            )
+        elif "_hwy" in net.name and net.corridor_bbox is not None:
+            cbx0, cby0, cbx1, cby1 = net.corridor_bbox
+            fb_pad = 105
+            fallback_bbox = (
+                max(grid.min_x, cbx0 - fb_pad),
+                max(grid.min_y, cby0 - fb_pad),
+                min(grid.max_x, cbx1 + fb_pad),
+                min(grid.max_y, cby1 + fb_pad),
             )
         elif "_hwy" in net.name:
             fallback_bbox = (grid.min_x, grid.min_y, grid.max_x, grid.max_y)
@@ -642,74 +817,104 @@ def route_all_nets(
     net_map = {n.name: n for n in nets}
     ever_failed: dict[str, int] = {}
 
+    def _is_net_over_capacity(res: RouteResult) -> bool:
+        if not res.is_success:
+            return True
+        for node in res.nodes:
+            node_key = (node.x, node.y, node.z)
+            if grid.usage_count.get(node_key, 0) > grid.get_capacity(node_key):
+                return True
+        for edge in res.edges:
+            if edge.move_type == "leap":
+                start = edge.start
+                end = edge.end
+                dx = 1 if end.x > start.x else (-1 if end.x < start.x else 0)
+                dy = 1 if end.y > start.y else (-1 if end.y < start.y else 0)
+                dist = max(abs(end.x - start.x), abs(end.y - start.y))
+                is_horiz = dx != 0
+                for s in range(dist + 1):
+                    key_z = start.z if (s == 0 or s == dist or is_horiz) else -start.z
+                    node_key = (start.x + dx * s, start.y + dy * s, key_z)
+                    if grid.usage_count.get(node_key, 0) > grid.get_capacity(node_key):
+                        return True
+        return False
+
     # Negotiated congestion iterations
     for iter_idx in range(max_iterations):
         congested_nets: set[str] = set()
         failed_bases: set[str] = set()
+        failed_blockers: set[str] = set()
+        pin_blockers: set[str] = set()
+        over_cap_nets: set[str] = set()
+        neighbor_blockers: set[str] = set()
         for net_name, res in grid.net_routes.items():
             if not res.is_success:
                 ever_failed[net_name] = ever_failed.get(net_name, 0) + 1
-                if ever_failed[net_name] > 4:
+                if ever_failed[net_name] > 12 and "_hwy" not in net_name:
                     continue
                 congested_nets.add(net_name)
                 failed_bases.add(base_net_name(net_name))
                 f_spec = net_map[net_name]
                 rx = 12 if len(nets) > 100 else 6
-                probe_pts = (f_spec.source, f_spec.sink, *res.failed_frontier)
+                pin_pts = {f_spec.source, f_spec.sink}
+                if f_spec.end_heading is not None:
+                    fdx, fdy = DIR_STEPS[f_spec.end_heading]
+                    pin_pts.add((f_spec.sink[0] + fdx, f_spec.sink[1] + fdy))
+                if f_spec.start_heading is not None:
+                    sdx, sdy = DIR_STEPS[f_spec.start_heading]
+                    pin_pts.add((f_spec.source[0] + sdx, f_spec.source[1] + sdy))
+                probe_pts = [*pin_pts, *res.failed_frontier]
                 for term_pos in probe_pts:
+                    is_pin_pt = term_pos in pin_pts
                     for odx in range(-rx, rx + 1):
                         for ody in range(-6, 7):
                             nb = (term_pos[0] + odx, term_pos[1] + ody)
                             if nb in grid.surface_occupancy:
                                 congested_nets |= grid.surface_occupancy[nb]
+                                failed_blockers |= grid.surface_occupancy[nb]
+                                if is_pin_pt and abs(odx) <= 1 and abs(ody) <= 1:
+                                    pin_blockers |= grid.surface_occupancy[nb]
                                 if abs(odx) <= 3 and abs(ody) <= 3:
                                     h_key = (nb[0], nb[1], 0)
                                     grid.historical_cost[h_key] = (
-                                        grid.historical_cost.get(h_key, 0.0) + 1.0
+                                        grid.historical_cost.get(h_key, 0.0) + 1.5
                                     )
                                     grid.has_congestion = True
                             if nb in grid.active_hoods:
-                                congested_nets.add(grid.active_hoods[nb])
+                                h_net = grid.active_hoods[nb]
+                                congested_nets.add(h_net)
+                                failed_blockers.add(h_net)
+                                if abs(odx) <= 2 and abs(ody) <= 2:
+                                    pin_blockers.add(h_net)
                                 h_key = (nb[0], nb[1], 0)
                                 grid.historical_cost[h_key] = (
-                                    grid.historical_cost.get(h_key, 0.0) + 2.0
+                                    grid.historical_cost.get(h_key, 0.0) + 2.5
                                 )
                                 grid.has_congestion = True
-            else:
-                is_congested = False
-                for node in res.nodes:
-                    node_key = (node.x, node.y, node.z)
-                    if grid.usage_count.get(node_key, 0) > grid.get_capacity(node_key):
-                        congested_nets.add(net_name)
-                        is_congested = True
-                        if node.z == LAYER_SURFACE and iter_idx >= 8:
+            elif _is_net_over_capacity(res):
+                congested_nets.add(net_name)
+                over_cap_nets.add(net_name)
+                if iter_idx >= 8:
+                    for node in res.nodes:
+                        node_key = (node.x, node.y, node.z)
+                        if node.z == LAYER_SURFACE and grid.usage_count.get(
+                            node_key, 0
+                        ) > grid.get_capacity(node_key):
                             for odx in range(-2, 3):
                                 for ody in range(-2, 3):
                                     nb = (node.x + odx, node.y + ody)
                                     if nb in grid.surface_occupancy:
                                         congested_nets |= grid.surface_occupancy[nb]
+                                        neighbor_blockers |= grid.surface_occupancy[nb]
                                     if nb in grid.active_hoods:
                                         congested_nets.add(grid.active_hoods[nb])
-                        break
-                if not is_congested:
-                    for edge in res.edges:
-                        if edge.move_type == "leap":
-                            start = edge.start
-                            end = edge.end
-                            dx = 1 if end.x > start.x else (-1 if end.x < start.x else 0)
-                            dy = 1 if end.y > start.y else (-1 if end.y < start.y else 0)
-                            dist = max(abs(end.x - start.x), abs(end.y - start.y))
-                            for s in range(dist + 1):
-                                node_key = (start.x + dx * s, start.y + dy * s, start.z)
-                                if grid.usage_count.get(node_key, 0) > grid.get_capacity(node_key):
-                                    congested_nets.add(net_name)
-                                    is_congested = True
-                                    break
-                            if is_congested:
-                                break
+                                        neighbor_blockers.add(grid.active_hoods[nb])
+                            break
 
         if not congested_nets:
             break
+
+        neighbor_blockers -= over_cap_nets
 
         # When an MST branch rips up, also rip up its descendant MST branches
         # And if an MST branch failed, rip up all branches of its base net so the tree routes before blockers
@@ -738,7 +943,13 @@ def route_all_nets(
         sorted_congested = sorted(
             congested_nets,
             key=lambda n: (
-                0 if n in prev_failed else 1,
+                0
+                if n in prev_failed
+                else (
+                    1
+                    if n in pin_blockers
+                    else (2 if n in failed_blockers else (3 if n in over_cap_nets else 4))
+                ),
                 -ever_failed.get(n, 0),
                 1 if (iter_idx % 2 == 1 and mst_index(n) is None) else 0,
                 *net_sort_key(net_map[n]),
@@ -746,22 +957,54 @@ def route_all_nets(
         )
         if iter_idx % 2 == 1:
             non_fail = [
-                n for n in sorted_congested if n not in prev_failed and mst_index(n) is None
+                n
+                for n in sorted_congested
+                if n not in prev_failed
+                and n not in pin_blockers
+                and n not in neighbor_blockers
+                and mst_index(n) is None
             ]
             if len(non_fail) > 1:
                 non_fail_rev = list(reversed(non_fail))
                 nf_iter = iter(non_fail_rev)
                 sorted_congested = [
-                    next(nf_iter) if (n not in prev_failed and mst_index(n) is None) else n
+                    next(nf_iter)
+                    if (
+                        n not in prev_failed
+                        and n not in pin_blockers
+                        and n not in neighbor_blockers
+                        and mst_index(n) is None
+                    )
+                    else n
                     for n in sorted_congested
                 ]
+
+        pre_rip = (
+            prev_failed | pin_blockers | {n for n in sorted_congested if mst_index(n) is not None}
+        )
         for net_name in sorted_congested:
-            grid.rip_up_net(net_name)
+            if net_name in pre_rip:
+                grid.rip_up_net(net_name)
 
         for net_name in sorted_congested:
+            if net_name not in pre_rip:
+                cur_res = grid.net_routes.get(net_name)
+                if (
+                    cur_res is not None
+                    and not _is_net_over_capacity(cur_res)
+                    and net_name not in failed_blockers
+                ):
+                    continue
+                grid.rip_up_net(net_name)
             net = net_map[net_name]
             margin = (
-                35 if (net_name in prev_failed or net_name in ever_failed or iter_idx >= 1) else 10
+                35
+                if (
+                    net_name in prev_failed
+                    or net_name in ever_failed
+                    or (iter_idx >= 1 and "_hwy" not in net_name)
+                )
+                else 10
             )
             res = route_single_net(net, grid, margin=margin)
             grid.net_routes[net.name] = res
@@ -770,10 +1013,13 @@ def route_all_nets(
 
         failed_cur = [n for n, r in grid.net_routes.items() if not r.is_success]
         has_failed = bool(failed_cur)
-        conflicts = grid.update_congestion(beta=1.5 if (iter_idx >= 30 and not has_failed) else 0.5)
+        conflicts = grid.update_congestion(
+            beta=1.5 if iter_idx >= 4 else 0.5,
+            gamma=2.5 if iter_idx >= 6 else 1.5,
+        )
         if conflicts == 0 and not has_failed:
             break
-        if conflicts == 0 and has_failed and all(ever_failed.get(n, 0) >= 4 for n in failed_cur):
+        if conflicts == 0 and has_failed and all(ever_failed.get(n, 0) >= 12 for n in failed_cur):
             break
 
     return grid.net_routes

@@ -473,6 +473,15 @@ def route_with_maze_router(
             hwy_max_x = max(hwy_max_x, ns.source[0], ns.sink[0])
             hwy_max_y = max(hwy_max_y, ns.source[1], ns.sink[1])
 
+        bay_blocks: set[tuple[int, int]] = set()
+        for comp in def_data.get("components", []):
+            cx_t = round(comp["x"] * scale)
+            cy_t = round(comp["y"] * scale)
+            bx_c = cx_t // 100
+            by_c = cy_t // 100
+            if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and 3 <= (cy_t % 100) <= 16:
+                bay_blocks.add((bx_c, by_c))
+
         macro_planner = MacroFloorplanner()
         (
             intra_block_specs,
@@ -489,22 +498,24 @@ def route_with_maze_router(
             min_y=hwy_min_y,
             max_x=hwy_max_x,
             max_y=hwy_max_y,
+            bay_blocks=bay_blocks,
         )
         def_data["_macro_floorplan"] = h_floorplan
+        def_data["_bay_blocks"] = bay_blocks
+        def_data["_highway_specs"] = highway_specs
         merged_headings = {**component_headings, **port_headings}
 
         routes: dict[str, Any] = {}
         entities_by_pos: dict[tuple[float, float], dict[str, Any]] = {}
         all_routed_specs: list[RouterNetSpec] = []
 
-        # Stage 1: Route each occupied 94x94 city block core independently
+        # Stage 1: Route each occupied city block core independently
         for (bx, by), blk_nets in sorted(intra_block_specs.items()):
             if not blk_nets:
                 continue
-            b_min_x = bx * 100 + 3
-            b_min_y = by * 100 + 3
-            b_max_x = bx * 100 + 96
-            b_max_y = by * 100 + 96
+            b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
+                (bx, by), bay_blocks
+            )
             blk_obstacles = {
                 pt
                 for pt in obstacles
@@ -540,14 +551,24 @@ def route_with_maze_router(
                 pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
                 entities_by_pos[pkey] = ent
 
-        # Stage 2: Route inter-block highway trunks through 6-tile street channels and switchboxes
+        # Stage 2: Route inter-block highway trunks through 6-tile street channels, switchboxes, and matrix bays
         if highway_specs:
-            hwy_obstacles = set(obstacles)
+            hwy_obstacles: set[tuple[int, int]] = set()
             for bx in range(grid_w):
                 for by in range(grid_h):
                     for cx_tile in range(bx * 100 + 3, bx * 100 + 97):
                         for cy_tile in range(by * 100 + 3, by * 100 + 97):
                             hwy_obstacles.add((cx_tile, cy_tile))
+            for comp in def_data.get("components", []):
+                cx_t = round(comp["x"] * scale)
+                cy_t = round(comp["y"] * scale)
+                bx_c = cx_t // 100
+                by_c = cy_t // 100
+                if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and 3 <= (cy_t % 100) <= 16:
+                    for nx_t in range(bx_c * 100 + 3, bx_c * 100 + 97):
+                        for ny_t in range(by_c * 100 + 3, by_c * 100 + 17):
+                            hwy_obstacles.discard((nx_t, ny_t))
+            hwy_obstacles.update(obstacles)
             for ns in highway_specs:
                 hwy_obstacles.discard(ns.source)
                 hwy_obstacles.discard(ns.sink)
@@ -564,7 +585,7 @@ def route_with_maze_router(
                 no_hood_tiles=port_no_hood_tiles,
             )
             h_routes, h_entities, _ = hwy_router.route(
-                highway_specs, max_iterations=80, verify=False
+                highway_specs, max_iterations=40, verify=False
             )
             routes.update(h_routes)
             all_routed_specs.extend(highway_specs)
@@ -724,8 +745,9 @@ def build_entities(
                 bpos = be.get("position", {})
                 bx = float(bpos.get("x", 0.0))
                 by = float(bpos.get("y", 0.0))
-                clr_y = 14.0 if (bx < 3.0 or bx > die_w - 3.0) else 3.5
-                if any(abs(bx - px) <= 3.5 and abs(by - py) <= clr_y for px, py in pin_coords):
+                if bx <= 4.5 or bx >= die_w - 4.5 or by <= 4.5 or by >= die_h - 4.5:
+                    continue
+                if any(abs(bx - px) <= 3.5 and abs(by - py) <= 3.5 for px, py in pin_coords):
                     continue
                 bname = be.get("name", "")
                 if bname == "big-electric-pole":
@@ -955,7 +977,11 @@ def build_entities(
             else:
                 occupied_tiles.add((round(ex, 2), round(ey, 2)))
 
-        for be in chassis_base_entities:
+        sorted_base_entities = sorted(
+            chassis_base_entities,
+            key=lambda item: 0 if item.get("name") == "big-electric-pole" else 1,
+        )
+        for be in sorted_base_entities:
             if "position" not in be:
                 continue
             bpos = be.get("position", {})
@@ -980,6 +1006,24 @@ def build_entities(
 
             if any(t in occupied_tiles for t in b_tiles):
                 continue
+
+            if bname == "small-lamp":
+                has_pole = any(
+                    (
+                        e.get("name") == "big-electric-pole"
+                        and abs(float(e["position"]["x"]) - bx) <= 2.0
+                        and abs(float(e["position"]["y"]) - by) <= 2.0
+                    )
+                    or (
+                        e.get("name") == "medium-electric-pole"
+                        and abs(float(e["position"]["x"]) - bx) <= 3.5
+                        and abs(float(e["position"]["y"]) - by) <= 3.5
+                    )
+                    for e in entities
+                    if "position" in e
+                )
+                if not has_pole:
+                    continue
 
             for t in b_tiles:
                 occupied_tiles.add(t)
@@ -1169,6 +1213,18 @@ def build_entities(
         tile_to_nets=routes.tile_to_nets,
         fluids=placement.fluids,
     )
+    if def_data.get("_macro_floorplan") is not None:
+        violations.extend(
+            drc.check_chassis_matrix_discipline(
+                entities=entities,
+                macro_floorplan=def_data["_macro_floorplan"],
+                router_routes=getattr(placement, "router_routes", None),
+                highway_specs=def_data.get("_highway_specs"),
+                def_data=def_data,
+                netlist_data=netlist_data,
+                bay_blocks=def_data.get("_bay_blocks"),
+            )
+        )
     if violations:
         for v in violations:
             sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")

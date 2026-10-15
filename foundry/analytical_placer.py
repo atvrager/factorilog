@@ -54,6 +54,7 @@ class PlacerNode:
     flow_depth: int = 0
     col_index: int = 0
     assigned_block: tuple[int, int] = (0, 0)
+    is_matrix_node: bool = False
     cont_x: float = 0.0
     cont_y: float = 0.0
     x: int = 0
@@ -86,6 +87,8 @@ class AnalyticalPlacementResult:
     grid_w: int
     grid_h: int
     hpwl: float
+    rewired_ports: dict[str, dict[str, str]] = field(default_factory=dict)
+    matrix_nodes: set[str] = field(default_factory=set)
 
 
 def _classify_node_type(name: str, macro: str, cell_meta: dict[str, Any] | None = None) -> str:
@@ -226,34 +229,14 @@ def _get_chassis_block_sequence(
     grid_h: int,
     empty_blocks: set[tuple[int, int]] | None = None,
 ) -> list[tuple[int, int]]:
-    """Return the perimeter-first snake sequence of active city blocks."""
+    """Return the West-to-East column-snake sequence of active city blocks."""
     cells: list[tuple[int, int]] = []
-    min_x, max_x = 0, grid_w - 1
-    min_y, max_y = 0, grid_h - 1
-
-    while min_x <= max_x and min_y <= max_y:
-        if min_x == max_x and min_y == max_y:
-            cells.append((min_x, min_y))
-            break
-        if min_x == max_x:
-            cells.extend((min_x, y) for y in range(min_y, max_y + 1))
-            break
-        if min_y == max_y:
-            cells.extend((x, min_y) for x in range(min_x, max_x + 1))
-            break
-
-        cells.extend((x, min_y) for x in range(min_x, max_x))
-        cells.extend((max_x, y) for y in range(min_y, max_y))
-        cells.extend((x, max_y) for x in range(max_x, min_x, -1))
-        cells.extend((min_x, y) for y in range(max_y, min_y, -1))
-
-        min_x += 1
-        max_x -= 1
-        min_y += 1
-        max_y -= 1
+    for bx in range(grid_w):
+        y_range = range(grid_h) if (bx % 2 == 0) else range(grid_h - 1, -1, -1)
+        cells.extend((bx, by) for by in y_range)
 
     blocked = set(empty_blocks) if empty_blocks else set()
-    if not blocked and grid_w >= 3 and grid_h >= 3:
+    if not blocked and grid_w == 3 and grid_h == 3:
         blocked.add(((grid_w - 1) // 2, (grid_h - 1) // 2))
 
     active = [b for b in cells if b not in blocked]
@@ -926,16 +909,7 @@ class AnalyticalPlacer:
         # 1. Smelting domain groups
         groups.extend(_chunk_by_recipe(furnace_names, max_grp_len))
 
-        # 2. Shared intermediate component domain groups
-        if shared_solid:
-            shared_area = sum(_node_area(nodes[u]) for u in shared_solid)
-            if shared_area <= single_core_capacity * 0.45:
-                groups.append(shared_solid)
-                atomic_domain_first_nodes.add(shared_solid[0])
-            else:
-                groups.extend(_chunk_by_recipe(shared_solid, max_grp_len))
-
-        # 3. Fluid & chemical domain groups
+        # 2. Fluid & chemical domain groups (fed by West PIN_IN crude-oil, water, coal)
         if fluid_machine_names:
             fluid_area = sum(_node_area(nodes[u]) for u in fluid_machine_names)
             if fluid_area <= single_core_capacity * 0.55:
@@ -943,6 +917,15 @@ class AnalyticalPlacer:
                 atomic_domain_first_nodes.add(fluid_machine_names[0])
             else:
                 groups.extend(_chunk_by_recipe(fluid_machine_names, 10))
+
+        # 3. Shared intermediate component domain groups
+        if shared_solid:
+            shared_area = sum(_node_area(nodes[u]) for u in shared_solid)
+            if shared_area <= single_core_capacity * 0.45:
+                groups.append(shared_solid)
+                atomic_domain_first_nodes.add(shared_solid[0])
+            else:
+                groups.extend(_chunk_by_recipe(shared_solid, max_grp_len))
 
         # 4. Dedicated science pack assembly domains
         sorted_out_keys = sorted(
@@ -1042,8 +1025,44 @@ class AnalyticalPlacer:
             block_area[preferred_blk] += u_area
             assigned.add(u)
 
-        def _find_upstream_blocks(start_u: str) -> list[tuple[int, int]]:
-            found: list[tuple[int, int]] = []
+        self._last_rewired_ports: dict[str, dict[str, str]] = {}
+        if len(active_blocks) > 1 and edges:
+            self._last_rewired_ports = self._rewire_trees_for_blocks(
+                nodes=nodes,
+                edges=edges,
+                blk_to_seq_idx=blk_to_seq_idx,
+                assigned=assigned,
+                assign_fn=_assign_to_best_block,
+            )
+            if self._last_rewired_ports:
+                in_drivers.clear()
+                out_sinks.clear()
+                for e in edges:
+                    if e.source in nodes and e.sink in nodes and e.source != e.sink:
+                        out_sinks[e.source].append(e.sink)
+                        in_drivers[e.sink].append(e.source)
+                self._compute_flow_depths_and_columns(nodes, edges)
+
+        pin_in_nodes: set[str] = set()
+        pin_out_nodes: set[str] = set()
+        if edges:
+            for e in edges:
+                if e.source.startswith("PIN_IN:") and e.sink in nodes:
+                    pin_in_nodes.add(e.sink)
+                if e.sink.startswith("PIN_OUT:") and e.source in nodes:
+                    pin_out_nodes.add(e.source)
+
+        def _blk_pt(u: str) -> tuple[int, float]:
+            ub = nodes[u].assigned_block
+            return (
+                ub[0],
+                (float(ub[1]) - 0.5) if nodes[u].is_matrix_node else float(ub[1]),
+            )
+
+        def _find_upstream_pts(start_u: str, ref_by: float = 1.0) -> list[tuple[int, float]]:
+            found: list[tuple[int, float]] = []
+            if start_u in pin_in_nodes:
+                found.append((0, float(ref_by)))
             seen: set[str] = {start_u}
             stack = list(in_drivers.get(start_u, []))
             while stack:
@@ -1052,13 +1071,17 @@ class AnalyticalPlacer:
                     continue
                 seen.add(cur)
                 if cur in assigned and nodes[cur].assigned_block in block_area:
-                    found.append(nodes[cur].assigned_block)
+                    found.append(_blk_pt(cur))
                 elif cur in nodes:
+                    if cur in pin_in_nodes:
+                        found.append((0, float(ref_by)))
                     stack.extend(in_drivers.get(cur, []))
             return found
 
-        def _find_downstream_blocks(start_u: str) -> list[tuple[int, int]]:
-            found: list[tuple[int, int]] = []
+        def _find_downstream_pts(start_u: str, ref_by: float = 1.0) -> list[tuple[int, float]]:
+            found: list[tuple[int, float]] = []
+            if start_u in pin_out_nodes:
+                found.append((max(0, grid_w - 1), float(ref_by)))
             seen: set[str] = {start_u}
             stack = list(out_sinks.get(start_u, []))
             while stack:
@@ -1067,10 +1090,14 @@ class AnalyticalPlacer:
                     continue
                 seen.add(cur)
                 if cur in assigned and nodes[cur].assigned_block in block_area:
-                    found.append(nodes[cur].assigned_block)
+                    found.append(_blk_pt(cur))
                 elif cur in nodes:
+                    if cur in pin_out_nodes:
+                        found.append((max(0, grid_w - 1), float(ref_by)))
                     stack.extend(out_sinks.get(cur, []))
             return found
+
+        bay_counts: dict[tuple[int, int], int] = collections.Counter()
 
         # Phase 2: Assign mergers bottom-up in topological order from machine drivers to root
         rem_merges = [
@@ -1087,33 +1114,64 @@ class AnalyticalPlacer:
                 0,
             )
             m_name = rem_merges.pop(ready_idx)
+            is_mat = nodes[m_name].is_matrix_node
             drv_blks = [
                 nodes[d].assigned_block
                 for d in in_drivers.get(m_name, [])
                 if d in assigned and nodes[d].assigned_block in block_area
             ]
-            down_blks = _find_downstream_blocks(m_name)
-            if drv_blks:
+            drv_pts = [
+                _blk_pt(d)
+                for d in in_drivers.get(m_name, [])
+                if d in assigned and nodes[d].assigned_block in block_area
+            ]
+            ref_by_m = (
+                sum(pt[1] for pt in drv_pts) / len(drv_pts)
+                if drv_pts
+                else float(max(1, grid_h // 2))
+            )
+            down_pts = _find_downstream_pts(m_name, ref_by=ref_by_m)
+            down_blks = [(pt[0], min(grid_h - 1, max(0, round(pt[1])))) for pt in down_pts]
+            if drv_blks or is_mat:
                 counts = collections.Counter(drv_blks)
-                cand_blks = list(dict.fromkeys(drv_blks + down_blks))
+                cand_blks = (
+                    list(active_blocks)
+                    if is_mat
+                    else list(dict.fromkeys(drv_blks + down_blks)) or list(active_blocks)
+                )
+                ref_pts = drv_pts or down_pts or [(active_blocks[0][0], float(active_blocks[0][1]))]
+                down_wt = (0.45 if is_mat else 1.0) / max(1, len(down_pts))
                 best_blk = min(
                     cand_blks,
                     key=lambda b: (
-                        0 if counts[b] > len(drv_blks) // 2 else 1,
-                        sum(abs(b[0] - db[0]) + abs(b[1] - db[1]) for db in drv_blks)
-                        + (
-                            min(abs(b[0] - sb[0]) + abs(b[1] - sb[1]) for sb in down_blks)
-                            if down_blks
-                            else 0
+                        1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0,
+                        (bay_counts[b] // 6) if is_mat else 0,
+                        0 if (not is_mat and counts[b] > len(drv_blks) // 2) else 1,
+                        round(
+                            sum(
+                                abs(b[0] - dpt[0])
+                                + abs(((float(b[1]) - 0.5) if is_mat else float(b[1])) - dpt[1])
+                                for dpt in ref_pts
+                            )
+                            + down_wt
+                            * sum(
+                                abs(b[0] - spt[0])
+                                + abs(((float(b[1]) - 0.5) if is_mat else float(b[1])) - spt[1])
+                                for spt in down_pts
+                            )
+                            + (0.35 * bay_counts[b] if is_mat else 0.0),
+                            3,
                         ),
                         -counts[b],
-                        block_area[b],
+                        bay_counts[b] if is_mat else block_area[b],
                         blk_to_seq_idx[b],
                     ),
                 )
             else:
                 best_blk = down_blks[0] if down_blks else active_blocks[0]
             _assign_to_best_block(m_name, best_blk)
+            if is_mat:
+                bay_counts[best_blk] += 1
 
         # Phase 3: Assign splitters and balancers bottom-up in reverse-topological order from sinks to root
         rem_splits = [
@@ -1132,29 +1190,67 @@ class AnalyticalPlacer:
                 0,
             )
             s_name = rem_splits.pop(ready_idx)
+            is_mat = nodes[s_name].is_matrix_node
             snk_blks = [
                 nodes[v].assigned_block
                 for v in out_sinks.get(s_name, [])
                 if v in assigned and nodes[v].assigned_block in block_area
             ]
-            up_blks = _find_upstream_blocks(s_name)
-            if snk_blks:
+            snk_pts = [
+                _blk_pt(v)
+                for v in out_sinks.get(s_name, [])
+                if v in assigned and nodes[v].assigned_block in block_area
+            ]
+            ref_by_s = (
+                sum(pt[1] for pt in snk_pts) / len(snk_pts)
+                if snk_pts
+                else float(max(1, grid_h // 2))
+            )
+            up_pts = _find_upstream_pts(s_name, ref_by=ref_by_s)
+            up_blks = [(pt[0], min(grid_h - 1, max(0, round(pt[1])))) for pt in up_pts]
+            if snk_blks or is_mat:
                 counts = collections.Counter(snk_blks)
-                cand_blks = list(dict.fromkeys(snk_blks + up_blks))
+                cand_blks = (
+                    list(active_blocks)
+                    if is_mat
+                    else list(dict.fromkeys(snk_blks + up_blks)) or list(active_blocks)
+                )
+                ref_pts = snk_pts or up_pts or [(active_blocks[0][0], float(active_blocks[0][1]))]
+                in_port_cnt = (
+                    2.0 if nodes[s_name].node_type == "balancer" else (0.45 if is_mat else 1.0)
+                )
+                up_wt = in_port_cnt / max(1, len(up_pts))
                 best_blk = min(
                     cand_blks,
                     key=lambda b: (
-                        0 if counts[b] > len(snk_blks) // 2 else 1,
-                        sum(abs(b[0] - sb[0]) + abs(b[1] - sb[1]) for sb in snk_blks)
-                        + sum(abs(b[0] - ub[0]) + abs(b[1] - ub[1]) for ub in up_blks),
+                        1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0,
+                        (bay_counts[b] // 6) if is_mat else 0,
+                        0 if (not is_mat and counts[b] > len(snk_blks) // 2) else 1,
+                        round(
+                            sum(
+                                abs(b[0] - spt[0])
+                                + abs(((float(b[1]) - 0.5) if is_mat else float(b[1])) - spt[1])
+                                for spt in ref_pts
+                            )
+                            + up_wt
+                            * sum(
+                                abs(b[0] - upt[0])
+                                + abs(((float(b[1]) - 0.5) if is_mat else float(b[1])) - upt[1])
+                                for upt in up_pts
+                            )
+                            + (0.35 * bay_counts[b] if is_mat else 0.0),
+                            3,
+                        ),
                         -counts[b],
-                        block_area[b],
+                        bay_counts[b] if is_mat else block_area[b],
                         blk_to_seq_idx[b],
                     ),
                 )
             else:
                 best_blk = up_blks[0] if up_blks else active_blocks[0]
             _assign_to_best_block(s_name, best_blk)
+            if is_mat:
+                bay_counts[best_blk] += 1
 
         # Phase 4: Assign remaining telemetry combinators and displays to connected driver or co-sink block
         rem_names = [name for name in nodes if name not in assigned]
@@ -1176,6 +1272,440 @@ class AnalyticalPlacer:
             _assign_to_best_block(u_name, best_blk)
 
         return {blk: block_bins[blk] for blk in active_blocks if block_bins[blk]}
+
+    def _rewire_trees_for_blocks(
+        self,
+        nodes: dict[str, PlacerNode],
+        edges: list[PlacerEdge],
+        blk_to_seq_idx: dict[tuple[int, int], int],
+        assigned: set[str],
+        assign_fn: Any,
+    ) -> dict[str, dict[str, str]]:
+        """Re-parenthesize merger and splitter trees so each block has self-contained local trees."""
+        rewire_map: dict[str, dict[str, str]] = {}
+        in_edges: dict[str, list[PlacerEdge]] = collections.defaultdict(list)
+        out_edges: dict[str, list[PlacerEdge]] = collections.defaultdict(list)
+        for e in edges:
+            if e.source != e.sink:
+                out_edges[e.source].append(e)
+                in_edges[e.sink].append(e)
+
+        # 1. Re-parenthesize belt_merge2 connected components
+        merge_names = [n for n, nd in nodes.items() if nd.node_type == "merge"]
+        merge_set = set(merge_names)
+        m_adj: dict[str, set[str]] = collections.defaultdict(set)
+        for e in edges:
+            if (
+                e.source in merge_set
+                and e.sink in merge_set
+                and nodes[e.source].recipe == nodes[e.sink].recipe
+            ):
+                m_adj[e.source].add(e.sink)
+                m_adj[e.sink].add(e.source)
+
+        seen_m: set[str] = set()
+        m_comps: list[list[str]] = []
+        for m in sorted(merge_names, key=_natural_key):
+            if m in seen_m:
+                continue
+            comp: list[str] = []
+            q = [m]
+            seen_m.add(m)
+            while q:
+                cur = q.pop(0)
+                comp.append(cur)
+                for nb in sorted(m_adj.get(cur, ()), key=_natural_key):
+                    if nb not in seen_m:
+                        seen_m.add(nb)
+                        q.append(nb)
+            m_comps.append(comp)
+
+        for comp in m_comps:
+            comp_set = set(comp)
+            out_w: dict[str, str] = {}
+            valid_m = True
+            for m in comp:
+                ow_set = {e.wire for e in out_edges.get(m, [])}
+                iw_list = [e.wire for e in in_edges.get(m, [])]
+                if len(ow_set) != 1 or len(iw_list) != 2 or len(set(iw_list)) != 2:
+                    valid_m = False
+                    break
+                out_w[m] = next(iter(ow_set))
+            if not valid_m:
+                continue
+
+            internal_m = [m for m in comp if any(e.sink in comp_set for e in out_edges.get(m, []))]
+            root_m = [m for m in comp if m not in internal_m]
+            leaf_edges = [e for m in comp for e in in_edges.get(m, []) if e.source not in comp_set]
+            if (
+                len(root_m) != 1
+                or len(internal_m) != len(comp) - 1
+                or len(leaf_edges) != len(comp) + 1
+                or len({e.wire for e in leaf_edges}) != len(leaf_edges)
+                or not all(e.source in assigned and e.source in nodes for e in leaf_edges)
+            ):
+                continue
+
+            avail_pairs = [(m, out_w[m]) for m in sorted(internal_m, key=_natural_key)]
+            root_pair = (root_m[0], out_w[root_m[0]])
+
+            by_blk: dict[tuple[int, int], list[PlacerEdge]] = collections.defaultdict(list)
+            for e in leaf_edges:
+                by_blk[nodes[e.source].assigned_block].append(e)
+            sorted_blks = sorted(by_blk.keys(), key=lambda b: blk_to_seq_idx.get(b, 0))
+            for b in sorted_blks:
+                by_blk[b].sort(
+                    key=lambda e: (
+                        nodes[e.source].rank,
+                        nodes[e.source].flow_depth,
+                        _natural_key(e.source),
+                        _natural_key(e.wire),
+                    )
+                )
+
+            def _build_merge_subtree(
+                wires: list[str],
+                _avail: list[tuple[str, str]] = avail_pairs,
+                _root: tuple[str, str] = root_pair,
+                use_root: bool = False,
+            ) -> tuple[str, list[str]]:
+                if len(wires) == 1:
+                    return wires[0], []
+                if len(wires) == 2:
+                    m_name, y_w = _root if use_root else _avail.pop(0)
+                    rewire_map[m_name] = {"a": wires[0], "b": wires[1], "y": y_w}
+                    return y_w, [m_name]
+                mid = (len(wires) + 1) // 2
+                w_left, used_l = _build_merge_subtree(wires[:mid], _avail, _root, use_root=False)
+                w_right, used_r = _build_merge_subtree(wires[mid:], _avail, _root, use_root=False)
+                m_name, y_w = _root if use_root else _avail.pop(0)
+                rewire_map[m_name] = {"a": w_left, "b": w_right, "y": y_w}
+                return y_w, used_l + used_r + [m_name]
+
+            def _build_spatial_merge_subtree(
+                blk_items: list[tuple[str, tuple[int, int]]],
+                _avail: list[tuple[str, str]] = avail_pairs,
+                _root: tuple[str, str] = root_pair,
+                use_root: bool = False,
+            ) -> tuple[str, list[str]]:
+                if len(blk_items) == 1:
+                    return blk_items[0][0], []
+                if len(blk_items) == 2:
+                    m_name, y_w = _root if use_root else _avail.pop(0)
+                    rewire_map[m_name] = {
+                        "a": blk_items[0][0],
+                        "b": blk_items[1][0],
+                        "y": y_w,
+                    }
+                    return y_w, [m_name]
+                xs = [b[0] for _, b in blk_items]
+                ys = [b[1] for _, b in blk_items]
+                if (max(xs) - min(xs)) >= (max(ys) - min(ys)):
+                    ordered = sorted(
+                        blk_items, key=lambda it: (it[1][0], it[1][1], _natural_key(it[0]))
+                    )
+                else:
+                    ordered = sorted(
+                        blk_items, key=lambda it: (it[1][1], it[1][0], _natural_key(it[0]))
+                    )
+                mid = (len(ordered) + 1) // 2
+                w_left, used_l = _build_spatial_merge_subtree(
+                    ordered[:mid], _avail, _root, use_root=False
+                )
+                w_right, used_r = _build_spatial_merge_subtree(
+                    ordered[mid:], _avail, _root, use_root=False
+                )
+                m_name, y_w = _root if use_root else _avail.pop(0)
+                rewire_map[m_name] = {"a": w_left, "b": w_right, "y": y_w}
+                return y_w, used_l + used_r + [m_name]
+
+            if len(sorted_blks) == 1:
+                only_b = sorted_blks[0]
+                _rw, used_m = _build_merge_subtree([e.wire for e in by_blk[only_b]], use_root=True)
+                for m_name in used_m:
+                    nodes[m_name].is_matrix_node = False
+                    assign_fn(m_name, only_b)
+            else:
+                blk_export_items: list[tuple[str, tuple[int, int]]] = []
+                for b in sorted_blks:
+                    b_wires = [e.wire for e in by_blk[b]]
+                    exp_w, used_local = _build_merge_subtree(b_wires, use_root=False)
+                    blk_export_items.append((exp_w, b))
+                    for m_name in used_local:
+                        nodes[m_name].is_matrix_node = False
+                        assign_fn(m_name, b)
+                _rw, used_mat = _build_spatial_merge_subtree(blk_export_items, use_root=True)
+                for m_name in used_mat:
+                    nodes[m_name].is_matrix_node = True
+
+        # 2. Re-parenthesize belt_split2 forests by material
+        split_names = [n for n, nd in nodes.items() if nd.node_type == "split"]
+        split_set = set(split_names)
+        s_adj: dict[str, set[str]] = collections.defaultdict(set)
+        for e in edges:
+            if (
+                e.source in split_set
+                and e.sink in split_set
+                and nodes[e.source].recipe == nodes[e.sink].recipe
+            ):
+                s_adj[e.source].add(e.sink)
+                s_adj[e.sink].add(e.source)
+
+        seen_s: set[str] = set()
+        s_comps: list[list[str]] = []
+        for s in sorted(split_names, key=_natural_key):
+            if s in seen_s:
+                continue
+            comp = []
+            q = [s]
+            seen_s.add(s)
+            while q:
+                cur = q.pop(0)
+                comp.append(cur)
+                for nb in sorted(s_adj.get(cur, ()), key=_natural_key):
+                    if nb not in seen_s:
+                        seen_s.add(nb)
+                        q.append(nb)
+            s_comps.append(comp)
+
+        valid_s_by_recipe: dict[str, list[tuple[str, list[str], set[str], list[PlacerEdge]]]] = (
+            collections.defaultdict(list)
+        )
+        for comp in s_comps:
+            comp_set = set(comp)
+            in_w: dict[str, str] = {}
+            valid_s = True
+            for s in comp:
+                iw_set = {e.wire for e in in_edges.get(s, [])}
+                ow_set = {e.wire for e in out_edges.get(s, [])}
+                if len(iw_set) != 1 or len(ow_set) != 2:
+                    valid_s = False
+                    break
+                in_w[s] = next(iter(iw_set))
+            if not valid_s:
+                continue
+
+            int_wires = {e.wire for e in edges if e.source in comp_set and e.sink in comp_set}
+            root_s = [s for s in comp if in_w[s] not in int_wires]
+            leaf_edges = [e for s in comp for e in out_edges.get(s, []) if e.sink not in comp_set]
+            if (
+                len(root_s) != 1
+                or len(int_wires) != len(comp) - 1
+                or len(leaf_edges) != len(comp) + 1
+                or len({e.wire for e in leaf_edges}) != len(leaf_edges)
+                or not all(e.sink in assigned and e.sink in nodes for e in leaf_edges)
+            ):
+                continue
+
+            r_wire = in_w[root_s[0]]
+            r_key = nodes[root_s[0]].recipe or r_wire.split("__")[0]
+            valid_s_by_recipe[r_key].append((r_wire, comp, int_wires, leaf_edges))
+
+        for _r_key, comp_infos in sorted(valid_s_by_recipe.items()):
+            comp_infos.sort(key=lambda item: _natural_key(item[0]))
+            root_wires = [item[0] for item in comp_infos]
+            orig_sizes = [len(item[3]) for item in comp_infos]
+            avail_splits = sorted((s for item in comp_infos for s in item[1]), key=_natural_key)
+            avail_int_w = sorted((w for item in comp_infos for w in item[2]), key=_natural_key)
+            all_leaves = [e for item in comp_infos for e in item[3]]
+            all_leaves.sort(
+                key=lambda e: (
+                    blk_to_seq_idx.get(nodes[e.sink].assigned_block, 0),
+                    nodes[e.sink].rank,
+                    nodes[e.sink].flow_depth,
+                    _natural_key(e.sink),
+                    _natural_key(e.wire),
+                )
+            )
+
+            total_s = len(all_leaves)
+            k_trees = len(root_wires)
+            cuts = [0]
+            cum = 0
+            max_b_size = max(max(orig_sizes), 24)
+            blk_bounds = [
+                idx
+                for idx in range(1, total_s)
+                if nodes[all_leaves[idx].sink].assigned_block
+                != nodes[all_leaves[idx - 1].sink].assigned_block
+            ]
+            for t_idx in range(k_trees - 1):
+                cum += orig_sizes[t_idx]
+                best_c = cum
+                rem_trees = k_trees - 1 - t_idx
+                for b_cut in sorted(blk_bounds, key=lambda x: abs(x - cum)):
+                    if (
+                        abs(b_cut - cum) <= 6
+                        and 2 <= (b_cut - cuts[-1]) <= max_b_size
+                        and 2 * rem_trees <= (total_s - b_cut) <= max_b_size * rem_trees
+                    ):
+                        best_c = b_cut
+                        break
+                cuts.append(best_c)
+            cuts.append(total_s)
+
+            def _build_split_subtree(
+                in_wire: str,
+                out_wires: list[str],
+                _avail_s: list[str] = avail_splits,
+                _avail_w: list[str] = avail_int_w,
+            ) -> list[str]:
+                if len(out_wires) < 2:
+                    return []
+                s_name = _avail_s.pop(0)
+                if len(out_wires) == 2:
+                    rewire_map[s_name] = {
+                        "a": in_wire,
+                        "y1": out_wires[0],
+                        "y2": out_wires[1],
+                    }
+                    return [s_name]
+                mid = len(out_wires) // 2
+                left_o = out_wires[:mid]
+                right_o = out_wires[mid:]
+                w_l = left_o[0] if len(left_o) == 1 else _avail_w.pop(0)
+                w_r = right_o[0] if len(right_o) == 1 else _avail_w.pop(0)
+                rewire_map[s_name] = {"a": in_wire, "y1": w_l, "y2": w_r}
+                used = [s_name]
+                if len(left_o) > 1:
+                    used.extend(_build_split_subtree(w_l, left_o, _avail_s, _avail_w))
+                if len(right_o) > 1:
+                    used.extend(_build_split_subtree(w_r, right_o, _avail_s, _avail_w))
+                return used
+
+            def _build_spatial_split_subtree(
+                in_wire: str,
+                blk_items: list[tuple[str, tuple[int, int]]],
+                _avail_s: list[str] = avail_splits,
+                _avail_w: list[str] = avail_int_w,
+            ) -> list[str]:
+                if len(blk_items) < 2:
+                    return []
+                s_name = _avail_s.pop(0)
+                if len(blk_items) == 2:
+                    rewire_map[s_name] = {
+                        "a": in_wire,
+                        "y1": blk_items[0][0],
+                        "y2": blk_items[1][0],
+                    }
+                    return [s_name]
+                xs = [b[0] for _, b in blk_items]
+                ys = [b[1] for _, b in blk_items]
+                if (max(xs) - min(xs)) >= (max(ys) - min(ys)):
+                    ordered = sorted(
+                        blk_items, key=lambda it: (it[1][0], it[1][1], _natural_key(it[0]))
+                    )
+                else:
+                    ordered = sorted(
+                        blk_items, key=lambda it: (it[1][1], it[1][0], _natural_key(it[0]))
+                    )
+                mid = len(ordered) // 2
+                left_o = ordered[:mid]
+                right_o = ordered[mid:]
+                w_l = left_o[0][0] if len(left_o) == 1 else _avail_w.pop(0)
+                w_r = right_o[0][0] if len(right_o) == 1 else _avail_w.pop(0)
+                rewire_map[s_name] = {"a": in_wire, "y1": w_l, "y2": w_r}
+                used = [s_name]
+                if len(left_o) > 1:
+                    used.extend(_build_spatial_split_subtree(w_l, left_o, _avail_s, _avail_w))
+                if len(right_o) > 1:
+                    used.extend(_build_spatial_split_subtree(w_r, right_o, _avail_s, _avail_w))
+                return used
+
+            for t_idx in range(k_trees):
+                b_leaves = all_leaves[cuts[t_idx] : cuts[t_idx + 1]]
+                r_wire = root_wires[t_idx]
+                by_b: dict[tuple[int, int], list[PlacerEdge]] = collections.defaultdict(list)
+                b_blks: list[tuple[int, int]] = []
+                for e in b_leaves:
+                    b = nodes[e.sink].assigned_block
+                    if b not in by_b:
+                        b_blks.append(b)
+                    by_b[b].append(e)
+
+                if len(b_blks) == 1:
+                    only_b = b_blks[0]
+                    used_s = _build_split_subtree(r_wire, [e.wire for e in b_leaves])
+                    for s_name in used_s:
+                        nodes[s_name].is_matrix_node = False
+                        assign_fn(s_name, only_b)
+                else:
+                    blk_feed_items: list[tuple[str, tuple[int, int]]] = []
+                    for b in b_blks:
+                        bw = [e.wire for e in by_b[b]]
+                        if len(bw) == 1:
+                            blk_feed_items.append((bw[0], b))
+                        else:
+                            fw = avail_int_w.pop(0)
+                            blk_feed_items.append((fw, b))
+                            used_local = _build_split_subtree(fw, bw)
+                            for s_name in used_local:
+                                nodes[s_name].is_matrix_node = False
+                                assign_fn(s_name, b)
+                    used_mat = _build_spatial_split_subtree(r_wire, blk_feed_items)
+                    for s_name in used_mat:
+                        nodes[s_name].is_matrix_node = True
+
+        # 3. Mark belt_balancer2 cells as matrix nodes in multi-block chassis
+        for nd in nodes.values():
+            if nd.node_type == "balancer":
+                nd.is_matrix_node = True
+
+        # 4. Update nodes and edges in-place from rewire_map
+        if rewire_map:
+            wire_meta: dict[str, tuple[float, bool]] = {}
+            wire_drv: dict[str, tuple[str, float]] = {}
+            wire_snks: dict[str, list[tuple[str, float]]] = collections.defaultdict(list)
+            wire_order: list[str] = []
+
+            for e in edges:
+                if e.wire not in wire_meta:
+                    wire_meta[e.wire] = (e.weight, e.is_fluid)
+                    wire_order.append(e.wire)
+                if not (e.source in rewire_map and nodes[e.source].node_type in ("merge", "split")):
+                    wire_drv[e.wire] = (e.source, e.source_dy)
+                if not (e.sink in rewire_map and nodes[e.sink].node_type in ("merge", "split")):
+                    pair = (e.sink, e.sink_dy)
+                    if pair not in wire_snks[e.wire]:
+                        wire_snks[e.wire].append(pair)
+
+            for iname, pmap in rewire_map.items():
+                nd = nodes[iname]
+                if nd.node_type == "merge":
+                    nd.inputs = [pmap["a"], pmap["b"]]
+                    nd.outputs = [pmap["y"]]
+                    wire_snks[pmap["a"]].append((iname, 0.0))
+                    wire_snks[pmap["b"]].append((iname, 1.0))
+                    wire_drv[pmap["y"]] = (iname, 0.5)
+                elif nd.node_type == "split":
+                    nd.inputs = [pmap["a"]]
+                    nd.outputs = [pmap["y1"], pmap["y2"]]
+                    wire_snks[pmap["a"]].append((iname, 0.5))
+                    wire_drv[pmap["y1"]] = (iname, 0.0)
+                    wire_drv[pmap["y2"]] = (iname, 1.0)
+
+            new_edges: list[PlacerEdge] = []
+            for w in wire_order:
+                if w not in wire_drv:
+                    continue
+                drv, d_dy = wire_drv[w]
+                w_wt, w_fl = wire_meta.get(w, (1.0, False))
+                for snk, s_dy in wire_snks.get(w, []):
+                    if drv != snk:
+                        new_edges.append(
+                            PlacerEdge(
+                                source=drv,
+                                sink=snk,
+                                wire=w,
+                                weight=w_wt,
+                                source_dy=d_dy,
+                                sink_dy=s_dy,
+                                is_fluid=w_fl,
+                            )
+                        )
+            edges[:] = new_edges
+
+        return rewire_map
 
     def _solve_continuous_block(
         self,
@@ -1780,38 +2310,64 @@ class AnalyticalPlacer:
                 edges=edges,
             )
 
+            if getattr(self, "_last_rewired_ports", None):
+                self._compute_flow_depths_and_columns(nodes, edges)
+
             for (bx, by), inst_names in block_bins.items():
                 blk_nodes = [nodes[name] for name in inst_names]
-                c_min_x = bx * chassis_pitch + margin_x
-                c_min_y = by * chassis_pitch + margin_y
-                c_max_x = c_min_x + chassis_core_w
-                c_max_y = c_min_y + chassis_core_h
-                local_cols = sorted({nd.flow_depth for nd in blk_nodes})
-                col_remap = {old_c: new_c for new_c, old_c in enumerate(local_cols)}
-                for nd in blk_nodes:
-                    nd.col_index = col_remap[nd.flow_depth]
-                self._solve_continuous_block(
-                    blk_nodes,
-                    edges,
-                    float(c_min_x + 4),
-                    float(c_min_y + 4),
-                    float(c_max_x - 4),
-                    float(c_max_y - 4),
-                )
-                self._legalize_block(
-                    blk_nodes,
-                    edges,
-                    c_min_x,
-                    c_min_y,
-                    c_max_x,
-                    c_max_y,
-                    fixed_core=True,
-                )
+                mat_nodes = [nd for nd in blk_nodes if nd.is_matrix_node]
+                core_nodes = [nd for nd in blk_nodes if not nd.is_matrix_node]
+
+                if mat_nodes:
+                    mat_nodes.sort(key=lambda nd: (nd.flow_depth, _natural_key(nd.name)))
+                    bay_slots = (
+                        (18, 45, 72)
+                        if len(mat_nodes) <= 3
+                        else (16, 36, 56, 76)
+                        if len(mat_nodes) == 4
+                        else (14, 28, 42, 56, 70, 84)
+                    )
+                    for m_idx, nd in enumerate(mat_nodes):
+                        cur_mx = bx * chassis_pitch + bay_slots[m_idx % len(bay_slots)]
+                        bay_y = by * chassis_pitch + (6 if (m_idx % 2 == 0) else 11)
+                        nd.x = cur_mx
+                        nd.y = bay_y
+                        nd.cont_x = float(cur_mx)
+                        nd.cont_y = float(bay_y)
+
+                if core_nodes:
+                    c_min_x = bx * chassis_pitch + margin_x
+                    c_min_y = by * chassis_pitch + margin_y + (14 if gw * gh > 1 else 0)
+                    c_max_x = bx * chassis_pitch + margin_x + chassis_core_w
+                    c_max_y = by * chassis_pitch + margin_y + chassis_core_h
+                    local_cols = sorted({nd.flow_depth for nd in core_nodes})
+                    col_remap = {old_c: new_c for new_c, old_c in enumerate(local_cols)}
+                    for nd in core_nodes:
+                        nd.col_index = col_remap[nd.flow_depth]
+                    self._solve_continuous_block(
+                        core_nodes,
+                        edges,
+                        float(c_min_x + 4),
+                        float(c_min_y + 4),
+                        float(c_max_x - 4),
+                        float(c_max_y - 4),
+                    )
+                    self._legalize_block(
+                        core_nodes,
+                        edges,
+                        c_min_x,
+                        c_min_y,
+                        c_max_x,
+                        c_max_y,
+                        fixed_core=True,
+                    )
         else:
+            self._last_rewired_ports = {}
             # Single-core adaptive die sizing
             all_nodes = list(nodes.values())
             for nd in all_nodes:
                 nd.assigned_block = (0, 0)
+                nd.is_matrix_node = False
 
             padded_area = sum(
                 (nd.width + nd.pad_w + nd.pad_e) * (nd.height + nd.pad_n + nd.pad_s)
@@ -1878,6 +2434,8 @@ class AnalyticalPlacer:
             name: (round(nd.cont_x, 2), round(nd.cont_y, 2)) for name, nd in nodes.items()
         }
         blk_map = {name: nd.assigned_block for name, nd in nodes.items()}
+        mat_set = {name for name, nd in nodes.items() if nd.is_matrix_node}
+        rewired = dict(getattr(self, "_last_rewired_ports", {}))
         hpwl = self._compute_graph_hpwl(nodes, edges, die_w)
 
         return AnalyticalPlacementResult(
@@ -1890,6 +2448,8 @@ class AnalyticalPlacer:
             grid_w=gw,
             grid_h=gh,
             hpwl=hpwl,
+            rewired_ports=rewired,
+            matrix_nodes=mat_set,
         )
 
     def _compute_graph_hpwl(
@@ -1978,6 +2538,13 @@ class AnalyticalPlacer:
             for name in sorted(ch_res.coords.keys(), key=_natural_key):
                 ix, iy = ch_res.coords[name]
                 lines.append(f"dict set {dict_name} {name} [list {ix} {iy}]")
+            if ch_res.rewired_ports:
+                rw_name = f"analytical_rewire_{gw}x{gh}"
+                lines.append(f"set {rw_name} [dict create]")
+                for iname in sorted(ch_res.rewired_ports.keys(), key=_natural_key):
+                    pmap = ch_res.rewired_ports[iname]
+                    flat_kv = " ".join(f"{k} {v}" for k, v in pmap.items())
+                    lines.append(f"dict set {rw_name} {iname} [list {flat_kv}]")
 
         return "\n".join(lines) + "\n"
 
@@ -2009,6 +2576,9 @@ class AnalyticalPlacer:
             chassis_core_h=chassis_core_h,
             distribute_across_blocks=distribute_across_blocks,
         )
+
+        if res.rewired_ports:
+            apply_port_rewiring_to_def(updated, res.rewired_ports)
 
         updated["die_area"] = [0, 0, res.die_width * dbu, res.die_height * dbu]
         if use_chassis:
@@ -2108,6 +2678,30 @@ class AnalyticalPlacer:
             for p_obj, yv in zip(sorted_pins, y_vals, strict=False):
                 p_obj["x"] = int(x_edge * dbu)
                 p_obj["y"] = int(yv * dbu)
+
+
+def apply_port_rewiring_to_def(
+    def_data: dict[str, Any],
+    rewire_map: dict[str, dict[str, str]],
+) -> None:
+    """Apply splitter and merger port-to-net rewirings to a parsed DEF dictionary."""
+    if not rewire_map:
+        return
+    net_map = {n["name"]: n for n in def_data.get("nets", [])}
+    for net_obj in def_data.get("nets", []):
+        conns = net_obj.get("connections", [])
+        net_obj["connections"] = [
+            (iname, port)
+            for iname, port in conns
+            if not (iname in rewire_map and port in rewire_map[iname])
+        ]
+    for iname, pmap in rewire_map.items():
+        for port, target_net in pmap.items():
+            t_net_obj = net_map.get(target_net)
+            if t_net_obj is not None:
+                pair = (iname, port)
+                if pair not in t_net_obj["connections"]:
+                    t_net_obj["connections"].append(pair)
 
 
 def untangle_splitter_merger_ports(
