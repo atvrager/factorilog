@@ -465,6 +465,8 @@ script.on_init(function()
                 }}
                 if chest then
                     chest.set_infinity_container_filter(1, {{name = pin.name, count = 100, index = 1}})
+                else
+                    log(string.format("ERROR: Failed to place infinity-chest for input pin %s at (%.1f,%.1f)", pin.name, px, py))
                 end
 
                 -- Loader unloads both lanes from chest onto belt
@@ -475,7 +477,11 @@ script.on_init(function()
                     force = game.forces.player,
                     type = "output"
                 }}
-                if loader then loader.loader_type = "output" end
+                if loader then
+                    loader.loader_type = "output"
+                else
+                    log(string.format("ERROR: Failed to place loader for input pin %s at (%.1f,%.1f)", pin.name, px, py))
+                end
             end
         end
     end
@@ -530,6 +536,8 @@ script.on_init(function()
                     chest.set_infinity_container_filter(1, {{name = pin.name, count = 2000, mode = "at-most"}})
                     chest.remove_unfiltered_items = true
                     chest.insert{{name = pin.name, count = 50}}
+                else
+                    log(string.format("ERROR: Failed to place infinity-chest for output pin %s at (%.1f,%.1f)", pin.name, px, py))
                 end
 
                 -- Loader loads both lanes from belt into chest
@@ -540,7 +548,11 @@ script.on_init(function()
                     force = game.forces.player,
                     type = "input"
                 }}
-                if loader then loader.loader_type = "input" end
+                if loader then
+                    loader.loader_type = "input"
+                else
+                    log(string.format("ERROR: Failed to place loader for output pin %s at (%.1f,%.1f)", pin.name, px, py))
+                end
             end
         end
     end
@@ -691,6 +703,11 @@ def build_save(
             ]
             for pl in pin_lines:
                 sys.stderr.write(f"bp2save: {pl}\n")
+            err_lines = [line for line in pin_lines if "ERROR:" in line]
+            if err_lines:
+                raise RuntimeError(
+                    "bp2save failed to place external pin entities:\n" + "\n".join(err_lines)
+                )
 
         generated_save = work_dir / "saves" / f"{scenario_name}.zip"
         if not generated_save.is_file():

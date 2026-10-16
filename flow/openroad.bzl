@@ -807,10 +807,13 @@ def factorilog_science_factory(
     )
 
     test_name = name + "_test"
-    demand_tokens = demand.split(" ")
-    primary_item = test_expected_item if test_expected_item else (demand_tokens[0] if demand_tokens else "automation-science-pack")
+    demand_tokens = [t for t in demand.split(" ") if t]
+    demand_items = [demand_tokens[i] for i in range(0, len(demand_tokens), 2)]
+    if test_expected_item and test_expected_item not in demand_items:
+        demand_items.append(test_expected_item)
+    primary_item = ",".join(demand_items) if demand_items else (test_expected_item or "automation-science-pack")
     test_tags = list(merged_tags)
-    for t in ("local", "no-sandbox", "manual"):
+    for t in ("local", "no-sandbox"):
         if t not in test_tags:
             test_tags.append(t)
 

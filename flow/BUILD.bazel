@@ -286,7 +286,6 @@ factorilog_science_factory(
     use_chassis = True,
     use_row_placement = True,
     tags = [
-        "manual",
         "science",
         "chassis",
         "automation_logistic_chassis",
@@ -314,7 +313,6 @@ factorilog_science_factory(
     use_chassis = True,
     use_row_placement = True,
     tags = [
-        "manual",
         "science",
         "chassis",
         "automation_logistic_military_chassis",
@@ -342,7 +340,6 @@ factorilog_science_factory(
     use_chassis = True,
     use_row_placement = True,
     tags = [
-        "manual",
         "science",
         "chassis",
         "automation_logistic_military_chemical_chassis",

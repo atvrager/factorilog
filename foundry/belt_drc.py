@@ -492,12 +492,54 @@ class BeltDrcChecker:
             elif pickup_tile in machine_tiles:
                 machine_output_drop_tiles.add(drop_tile)
 
-        # 4. Determine BFS supply sources
+        # 4. Determine BFS supply sources and validate external input pin loader clearance
         sources: set[tuple[int, int]] = set(machine_output_drop_tiles) | container_tiles
+        reserved_loader_tiles: set[tuple[int, int]] = set()
         if input_pins is not None:
             for pin in input_pins:
                 if isinstance(pin, (list, tuple)) and len(pin) >= 2:
-                    sources.add((math.floor(pin[0]), math.floor(pin[1])))
+                    px, py = math.floor(pin[0]), math.floor(pin[1])
+                    pin_ents = tile_map.get((px, py), [])
+                    belt_ent = next(
+                        (
+                            e
+                            for e in pin_ents
+                            if "transport-belt" in e.get("name", "")
+                            or "underground-belt" in e.get("name", "")
+                        ),
+                        None,
+                    )
+                    if belt_ent is not None:
+                        b_dir = belt_ent.get("direction", DIRECTION_NORTH)
+                        dx, dy = DIR_STEPS.get(b_dir, (0, -1))
+                        loader_tiles = (
+                            (px - dx, py - dy),
+                            (px - 2 * dx, py - 2 * dy),
+                            (px - 3 * dx, py - 3 * dy),
+                        )
+                        blocked_loader = any(
+                            bool(tile_map.get(lt)) or lt in reserved_loader_tiles
+                            for lt in loader_tiles
+                        )
+                        bad_boundary_dir = (px == 0 and b_dir != DIRECTION_EAST) or (
+                            py == 0 and px > 0 and b_dir != DIRECTION_SOUTH
+                        )
+                        if blocked_loader or bad_boundary_dir:
+                            violations.append(
+                                DrcViolation(
+                                    code="DRC-05",
+                                    message=(
+                                        f"External input pin at ({px}, {py}) with direction {b_dir} "
+                                        f"has blocked or misoriented external loader/infinity-chest "
+                                        f"tiles {loader_tiles}"
+                                    ),
+                                    x=px,
+                                    y=py,
+                                )
+                            )
+                            continue
+                        reserved_loader_tiles.update(loader_tiles)
+                    sources.add((px, py))
         else:
             incoming_targets: set[tuple[int, int]] = set()
             for t_pos, ents in tile_map.items():
@@ -787,10 +829,48 @@ class BeltDrcChecker:
 
         # 3. Identify machine input pickup tiles and machine output inserters
         sink_tiles: set[tuple[int, int]] = set(container_tiles)
+        reserved_out_loader_tiles: set[tuple[int, int]] = set()
         if output_pins is not None:
             for pin in output_pins:
                 if isinstance(pin, (list, tuple)) and len(pin) >= 2:
-                    sink_tiles.add((math.floor(pin[0]), math.floor(pin[1])))
+                    px, py = math.floor(pin[0]), math.floor(pin[1])
+                    pin_ents = tile_map.get((px, py), [])
+                    belt_ent = next(
+                        (
+                            e
+                            for e in pin_ents
+                            if "transport-belt" in e.get("name", "")
+                            or "underground-belt" in e.get("name", "")
+                        ),
+                        None,
+                    )
+                    if belt_ent is not None:
+                        b_dir = belt_ent.get("direction", DIRECTION_NORTH)
+                        dx, dy = DIR_STEPS.get(b_dir, (0, -1))
+                        loader_tiles = (
+                            (px + dx, py + dy),
+                            (px + 2 * dx, py + 2 * dy),
+                            (px + 3 * dx, py + 3 * dy),
+                        )
+                        blocked_loader = any(
+                            bool(tile_map.get(lt)) or lt in reserved_out_loader_tiles
+                            for lt in loader_tiles
+                        )
+                        if blocked_loader:
+                            violations.append(
+                                DrcViolation(
+                                    code="DRC-06",
+                                    message=(
+                                        f"External output pin at ({px}, {py}) with direction {b_dir} "
+                                        f"has blocked external loader/infinity-chest tiles {loader_tiles}"
+                                    ),
+                                    x=px,
+                                    y=py,
+                                )
+                            )
+                            continue
+                        reserved_out_loader_tiles.update(loader_tiles)
+                    sink_tiles.add((px, py))
 
         output_inserters: list[tuple[int, int, tuple[int, int]]] = []
         for ent in entities:

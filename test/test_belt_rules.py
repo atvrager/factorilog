@@ -919,6 +919,29 @@ END DESIGN
         drc17 = [v for v in violations if v.code == "DRC-17"]
         self.assertTrue(any("Duplicate entity_number #2" in v.message for v in drc17))
 
+    def test_drc_external_input_pin_blocked_loader_flags_drc05(self) -> None:
+        """Rule DRC-05 flags West boundary input pin whose belt points North into another pin."""
+        entities = [
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 0.5, "y": 204.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 0.5, "y": 206.5},
+            },
+        ]
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(
+            entities,
+            input_pins=[(0.0, 204.0), (0.0, 206.0)],
+        )
+        drc05 = [v for v in violations if v.code == "DRC-05"]
+        self.assertEqual(len(drc05), 1)
+        self.assertIn("External input pin at (0, 204)", drc05[0].message)
+
 
 if __name__ == "__main__":
     unittest.main()

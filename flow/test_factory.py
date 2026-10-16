@@ -727,7 +727,11 @@ end)
         raise FileNotFoundError(f"Simulation log not written at {log_file}")
 
     log_text = log_file.read_text(encoding="utf-8")
+    production_stats: dict[str, int] = {}
     for line in log_text.splitlines():
+        m_pstat = re.search(r"PRODUCTION_STAT:\s*(\S+)\s*=\s*(\d+)", line)
+        if m_pstat:
+            production_stats[m_pstat.group(1)] = int(m_pstat.group(2))
         if (
             "ASM_INFO:" in line
             or "ZERO_PROD_ASM:" in line
@@ -765,6 +769,7 @@ end)
 
     return {
         "produced": int(m_prod.group(1)) if m_prod else 0,
+        "production_stats": production_stats,
         "active_machines": int(m_active.group(1)) if m_active else 0,
         "total_machines": int(m_active.group(2)) if m_active else 0,
         "active_ratio": float(m_ratio.group(1)) if m_ratio else 0.0,
@@ -784,7 +789,7 @@ def main() -> None:
         "--expected-item",
         type=str,
         default="automation-science-pack",
-        help="Expected produced item name",
+        help="Expected produced item name (or comma-separated list of item names)",
     )
     parser.add_argument(
         "--min-produced", type=int, default=20, help="Minimum produced items required"
@@ -810,8 +815,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    expected_items = [it.strip() for it in args.expected_item.split(",") if it.strip()]
+    primary_expected_item = expected_items[-1] if expected_items else args.expected_item
 
-    print(f"factorilog: Starting physical test for {args.expected_item}")
+    print(f"factorilog: Starting physical test for {', '.join(expected_items)}")
 
     # 1. Routing DRC check
     if args.drc_rpt:
@@ -849,13 +856,14 @@ def main() -> None:
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="factorilog-sim-") as tmp:
         metrics = run_factory_simulation(
             save_zip=args.save,
-            expected_item=args.expected_item,
+            expected_item=primary_expected_item,
             ticks=args.ticks,
             game_bin=game_bin,
             work_dir=Path(tmp),
         )
 
     produced = metrics["produced"]
+    production_stats = metrics.get("production_stats", {})
     active_ratio = metrics["active_ratio"]
     active_cnt = metrics["active_machines"]
     total_cnt = metrics["total_machines"]
@@ -864,9 +872,13 @@ def main() -> None:
     productive_cnt = metrics["productive_machines"]
     zero_prod = metrics["zero_prod"]
 
+    prod_summary = ", ".join(
+        f"{production_stats.get(it, produced if it == primary_expected_item else 0)} {it}"
+        for it in expected_items
+    )
     print(
         f"factorilog: Simulation completed at tick {args.ticks}: "
-        f"{produced} {args.expected_item} produced (required >= {args.min_produced}), "
+        f"{prod_summary} produced (required >= {args.min_produced} each), "
         f"active machines: {active_cnt}/{total_cnt} ({active_ratio * 100:.1f}%), "
         f"productive machines: {productive_cnt}/{total_cnt} ({productive_cnt / total_cnt * 100:.1f}%), "
         f"unpowered machines: {unpowered}"
@@ -875,10 +887,12 @@ def main() -> None:
         print(f"factorilog: Zero-production machines: {zero_prod}")
 
     failures = []
-    if produced < args.min_produced:
-        failures.append(
-            f"Production below target: {produced} {args.expected_item} < minimum {args.min_produced}"
-        )
+    for it in expected_items:
+        it_prod = production_stats.get(it, produced if it == primary_expected_item else 0)
+        if it_prod < args.min_produced:
+            failures.append(
+                f"Production below target: {it_prod} {it} < minimum {args.min_produced}"
+            )
     if productive_cnt < total_cnt:
         failures.append(
             f"Machine productivity below 100%: {productive_cnt}/{total_cnt} machines produced items. "

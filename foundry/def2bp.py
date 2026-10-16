@@ -98,8 +98,26 @@ def _resolve_terminal(
         if pos is None:
             return None
         is_driver = (float(pos[0]), float(pos[1])) in valid_in_pins
-        inward_dir = DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else None
-        return (pos, is_driver, None, inward_dir)
+        base_comm = net_name.split("__")[0].replace("-", "_")
+        is_fluid_pin = bool(
+            clean_fluids and (base_comm in clean_fluids or port.replace("-", "_") in clean_fluids)
+        )
+        if is_fluid_pin:
+            inward_dir = DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else None
+            return (pos, is_driver, None, inward_dir)
+        if is_driver:
+            pin_head = (
+                DIRECTION_EAST
+                if pos[0] == 0
+                else DIRECTION_SOUTH
+                if pos[1] == 0
+                else DIRECTION_EAST
+            )
+            return (pos, True, pin_head, pin_head)
+        pin_head = (
+            DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else DIRECTION_EAST
+        )
+        return (pos, False, pin_head, pin_head)
 
     if inst_name not in comp_map:
         return None
@@ -407,7 +425,18 @@ def route_with_maze_router(
         min_y = min(min_y, nspec.source[1] - 2, nspec.sink[1] - 2)
         max_y = max(max_y, nspec.source[1] + 2, nspec.sink[1] + 2)
 
+    pin_no_hood_tiles: set[tuple[int, int]] = set()
     component_headings: dict[tuple[int, int], int] = {}
+    for nspec in net_specs:
+        if not nspec.is_fluid:
+            if (float(nspec.source[0]), float(nspec.source[1])) in valid_in_pins:
+                pin_no_hood_tiles.add(nspec.source)
+                if nspec.start_heading is not None:
+                    component_headings[nspec.source] = nspec.start_heading
+            if (float(nspec.sink[0]), float(nspec.sink[1])) in valid_out_pins:
+                pin_no_hood_tiles.add(nspec.sink)
+                if nspec.end_heading is not None:
+                    component_headings[nspec.sink] = nspec.end_heading
     for ent in placement.entities:
         ename = ent.get("name", "")
         if "splitter" in ename:
@@ -500,6 +529,7 @@ def route_with_maze_router(
             max_y=hwy_max_y,
             bay_blocks=bay_blocks,
         )
+        port_no_hood_tiles.update(pin_no_hood_tiles)
         def_data["_macro_floorplan"] = h_floorplan
         def_data["_bay_blocks"] = bay_blocks
         def_data["_highway_specs"] = highway_specs
@@ -626,6 +656,7 @@ def route_with_maze_router(
             prototypes=prototypes,
             obstacles=obstacles,
             component_headings=component_headings,
+            no_hood_tiles=pin_no_hood_tiles,
         )
         routes, entities, verif_res = router.route(net_specs, verify=engine is not None)
         placement.router_routes = routes
