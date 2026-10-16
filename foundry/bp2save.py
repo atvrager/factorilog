@@ -139,6 +139,9 @@ script.on_init(function()
     local surface = game.surfaces[1]
     surface.always_day = true
     surface.daytime = 0
+    surface.peaceful_mode = true
+    game.map_settings.enemy_expansion.enabled = false
+    game.map_settings.pollution.enabled = false
 
     -- Request chunks around factory
     for cx = {chunk_min_x}, {chunk_max_x} do
@@ -564,6 +567,14 @@ end)
 
 script.on_event(defines.events.on_player_created, function(event)
     setup_player(game.get_player(event.player_index))
+end)
+
+script.on_event(defines.events.on_chunk_generated, function(event)
+    for _, entity in pairs(event.surface.find_entities_filtered{{area = event.area, force = "enemy"}}) do
+        if entity.valid then
+            entity.destroy()
+        end
+    end
 end)
 """
 

@@ -479,10 +479,19 @@ class RoutingGrid:
         self, node: RouteNode, base_cost: float, net_name: str = "", lane: int = LANE_BOTH
     ) -> float:
         """Compute the dynamic traversal cost with negotiated congestion."""
-        return self.get_fast_node_cost(node.x, node.y, node.z, base_cost, net_name, lane)
+        return self.get_fast_node_cost(
+            node.x, node.y, node.z, base_cost, net_name, lane, heading=node.heading
+        )
 
     def get_fast_node_cost(
-        self, x: int, y: int, z: int, base_cost: float, net_name: str = "", lane: int = LANE_BOTH
+        self,
+        x: int,
+        y: int,
+        z: int,
+        base_cost: float,
+        net_name: str = "",
+        lane: int = LANE_BOTH,
+        heading: int | None = None,
     ) -> float:
         """Compute traversal cost with negotiated congestion using flat lookups."""
         cost = base_cost
@@ -495,6 +504,13 @@ class RoutingGrid:
                 if not (lane != LANE_BOTH and LANE_BOTH not in lanes and lane not in lanes):
                     cost += 8.0
                     live_overuse = len(occ)
+                    if heading is not None:
+                        net_h = self.surface_net_headings.get((x, y))
+                        if net_h and any(
+                            base_net_name(n) != b_name and (nh % 8) == (heading % 8)
+                            for n, nh in net_h.items()
+                        ):
+                            cost += 16.0
         if not self.has_congestion:
             return cost
         key = (x, y, z)
@@ -533,7 +549,9 @@ class RoutingGrid:
         if not is_fluid and heading is not None:
             dx, dy = DIR_STEPS[heading]
             front_tile = (pos[0] + dx, pos[1] + dy)
-            if front_tile in self.active_hood_types:
+            if front_tile in self.active_hood_types and not self.is_net_fluid(
+                self.active_hoods.get(front_tile, "")
+            ):
                 h_type, h_dir = self.active_hood_types[front_tile]
                 if h_type == "output":
                     return False

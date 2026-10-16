@@ -74,6 +74,7 @@ def untangle_def(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any] | None = None,
     max_iterations: int = 3,
+    pins_only: bool = False,
 ) -> None:
     """Execute the three-phase DEF routing untangle pipeline.
 
@@ -103,6 +104,11 @@ def untangle_def(
     untangle_splitter_outputs(def_data)
     if netlist_data is not None:
         untangle_machine_inputs(def_data, netlist_data)
+
+    if pins_only:
+        fix_reverse_splitter_inputs(def_data)
+        relocate_blocked_splitter_inputs(def_data)
+        return
 
     # Phase 2 & 3: Iterative geometric simplification and physical clearance loop
     for _ in range(max_iterations):

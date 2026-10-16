@@ -23,6 +23,11 @@ if (fs.existsSync(bpInput)) {
 
 const server = http.createServer({ maxHeaderSize: 32 * 1024 * 1024 }, (req, res) => {
     const parsedUrl = new URL(req.url, 'http://127.0.0.1');
+    if (parsedUrl.pathname === '/corsproxy') {
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end(bpStr);
+        return;
+    }
     let filePath = path.join(distDir, parsedUrl.pathname === '/' ? 'index.html' : parsedUrl.pathname);
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const ext = path.extname(filePath);
@@ -61,20 +66,17 @@ const browser = await puppeteer.launch({
 
 try {
     const page = await browser.newPage();
-    page.on('console', async msg => {
-        try {
-            const args = await Promise.all(msg.args().map(a => a.jsonValue().catch(() => a.toString())));
-            console.error('PAGE LOG:', msg.type(), JSON.stringify(args));
-        } catch {
-            console.error('PAGE LOG:', msg.text());
+    page.on('console', msg => {
+        if (msg.type() === 'error' || msg.type() === 'warn') {
+            console.error('PAGE LOG:', msg.type(), msg.text());
         }
     });
     page.on('pageerror', err => console.error('PAGE ERROR:', err.toString()));
-    await page.goto(`http://127.0.0.1:${port}/?source=${encodeURIComponent(bpStr)}`, { waitUntil: 'load' });
+    await page.goto(`http://127.0.0.1:${port}/?source=local.host/bp.txt`, { waitUntil: 'load', timeout: 180000 });
     await page.waitForFunction(() => {
         const el = document.getElementById('loadingScreen');
         return el && !el.classList.contains('active') && window.editor;
-    }, { timeout: 60000 });
+    }, { timeout: 180000 });
 
     await new Promise(r => setTimeout(r, 1000));
 

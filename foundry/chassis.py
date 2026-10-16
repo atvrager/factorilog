@@ -59,7 +59,11 @@ class CityBlockChassis(ChassisTemplate):
         core_height: int = 94,
         channel_width: int = 6,
         template_document: dict[str, Any] | None = None,
+        programmatic: bool = False,
     ) -> None:
+        if channel_width != 6 and core_width == 94 and core_height == 94:
+            core_width = pitch - channel_width
+            core_height = pitch - channel_width
         self.pitch_x = pitch
         self.pitch_y = pitch
         self.core_width = core_width
@@ -74,6 +78,95 @@ class CityBlockChassis(ChassisTemplate):
             bp = template_document.get("blueprint", template_document)
             self.template_tiles = bp.get("tiles", [])
             self.template_entities = bp.get("entities", [])
+        elif programmatic:
+            self._build_programmatic_template()
+
+    def _build_programmatic_template(self) -> None:
+        """Generate street pavement tiles and perimeter power poles programmatically."""
+        mx = self.core_margin_x
+        my = self.core_margin_y
+        px = self.pitch_x
+        py = self.pitch_y
+        for y in range(py):
+            for x in range(px):
+                if x < mx or x >= px - mx or y < my or y >= py - my:
+                    is_border = (x in (mx - 1, px - mx) and my <= y < py - my) or (
+                        y in (my - 1, py - my) and mx <= x < px - mx
+                    )
+                    t_name = "refined-hazard-concrete-left" if is_border else "refined-concrete"
+                    self.template_tiles.append({"position": {"x": x, "y": y}, "name": t_name})
+
+        # Place perimeter big-electric-poles along the outer rim at 30-tile intervals
+        lo_x = float(mx) + 1.0
+        hi_x = float(px - mx) - 1.0
+        lo_y = float(my) + 1.0
+        hi_y = float(py - my) - 1.0
+        span_x = max(1.0, hi_x - lo_x)
+        n_segs_x = max(1, math.ceil(span_x / 30.0))
+        xs = [round(lo_x + i * (span_x / n_segs_x), 1) for i in range(n_segs_x + 1)]
+        span_y = max(1.0, hi_y - lo_y)
+        n_segs_y = max(1, math.ceil(span_y / 30.0))
+        ys = [round(lo_y + i * (span_y / n_segs_y), 1) for i in range(n_segs_y + 1)]
+        seen_p: set[tuple[float, float]] = set()
+        seen_l: set[tuple[float, float]] = set()
+        ent_num = 1
+
+        def _add_lamp(lx: float, ly: float) -> None:
+            nonlocal ent_num
+            pt = (round(lx, 2), round(ly, 2))
+            if pt not in seen_l:
+                seen_l.add(pt)
+                self.template_entities.append(
+                    {
+                        "entity_number": ent_num,
+                        "name": "small-lamp",
+                        "position": {"x": pt[0], "y": pt[1]},
+                    }
+                )
+                ent_num += 1
+
+        for x_val in xs:
+            for y_val in (lo_y, hi_y):
+                if (x_val, y_val) not in seen_p:
+                    seen_p.add((x_val, y_val))
+                    self.template_entities.append(
+                        {
+                            "entity_number": ent_num,
+                            "name": "big-electric-pole",
+                            "position": {"x": x_val, "y": y_val},
+                        }
+                    )
+                    ent_num += 1
+                ly_off = -0.5 if y_val == lo_y else 0.5
+                if x_val > lo_x:
+                    _add_lamp(x_val - 1.5, y_val + ly_off)
+                if x_val < hi_x:
+                    _add_lamp(x_val + 1.5, y_val + ly_off)
+        for y_val in ys:
+            for x_val in (lo_x, hi_x):
+                if (x_val, y_val) not in seen_p:
+                    seen_p.add((x_val, y_val))
+                    self.template_entities.append(
+                        {
+                            "entity_number": ent_num,
+                            "name": "big-electric-pole",
+                            "position": {"x": x_val, "y": y_val},
+                        }
+                    )
+                    ent_num += 1
+                lx_off = -0.5 if x_val == lo_x else 0.5
+                if y_val > lo_y:
+                    _add_lamp(x_val + lx_off, y_val - 1.5)
+                if y_val < hi_y:
+                    _add_lamp(x_val + lx_off, y_val + 1.5)
+
+        self.template_entities.append(
+            {
+                "entity_number": ent_num,
+                "name": "radar",
+                "position": {"x": round(hi_x - 2.5, 2), "y": round(lo_y + 2.5, 2)},
+            }
+        )
 
     @classmethod
     def from_blueprint_file(

@@ -539,6 +539,66 @@ class TestMacroFloorplan(unittest.TestCase):
         )
         self.assertEqual(violations_good, [])
 
+    def test_programmatic_8_lane_chassis_and_drc(self) -> None:
+        """Verify 8-lane programmatic chassis (92x92 core, 8x8 switchboxes) on a 2x2 grid."""
+        from foundry.belt_drc import BeltDrcChecker
+        from foundry.chassis import CityBlockChassis
+        from foundry.router.types import RouterNetSpec
+
+        chassis_8 = CityBlockChassis(pitch=100, channel_width=8, programmatic=True)
+        self.assertEqual(chassis_8.core_width, 92)
+        self.assertEqual(chassis_8.core_height, 92)
+        self.assertEqual(chassis_8.core_margin_x, 4)
+        self.assertEqual(chassis_8.core_margin_y, 4)
+        bp_doc = chassis_8.emit_base_blueprint(2, 2)
+        bp_ents = bp_doc["blueprint"]["entities"]
+        radars = [e for e in bp_ents if e.get("name") == "radar"]
+        poles = [e for e in bp_ents if e.get("name") == "big-electric-pole"]
+        lamps = [e for e in bp_ents if e.get("name") == "small-lamp"]
+        self.assertEqual(len(radars), 4)
+        self.assertEqual(len(poles), 48)
+        self.assertEqual(len(lamps), 96)
+
+        fp_8 = MacroFloorplanner(chassis=chassis_8)
+        net_specs = [
+            RouterNetSpec(
+                name="iron_plate_8lane",
+                source=(80, 40),
+                sink=(120, 40),
+                commodity="iron-plate",
+                start_heading=DIRECTION_EAST,
+                end_heading=DIRECTION_EAST,
+            )
+        ]
+        intra, hwy_specs, _no_hood, _headings, floorplan = fp_8.plan_hierarchical_nets(
+            net_specs=net_specs,
+            grid_w=2,
+            grid_h=2,
+            obstacles=set(),
+            min_x=0,
+            min_y=0,
+            max_x=200,
+            max_y=200,
+        )
+        self.assertEqual(len(floorplan.ports), 2)
+        for p in floorplan.ports:
+            cx, cy = p.core_pos
+            hx, hy = p.channel_pos
+            self.assertEqual(abs(cx - hx) + abs(cy - hy), 1)
+            self.assertTrue((cx % 100) in (4, 95) or (cy % 100) in (4, 95))
+            self.assertTrue((hx % 100) in (3, 96) or (hy % 100) in (3, 96))
+
+        # Check core bbox uses margin=4 -> [4, 95]
+        self.assertEqual(intra[(0, 0)][0].corridor_bbox, (4, 4, 95, 95))
+
+        drc = BeltDrcChecker()
+        violations = drc.check_chassis_matrix_discipline(
+            entities=[],
+            macro_floorplan=floorplan,
+            highway_specs=hwy_specs,
+        )
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

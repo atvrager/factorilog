@@ -539,12 +539,20 @@ def route_with_maze_router(
         entities_by_pos: dict[tuple[float, float], dict[str, Any]] = {}
         all_routed_specs: list[RouterNetSpec] = []
 
+        margin = h_floorplan.chassis.core_margin_x
+        total_intra = sum(len(ns) for ns in intra_block_specs.values())
+        print(
+            f"[def2bp] Stage 1: routing {total_intra} intra-block nets across {len(intra_block_specs)} blocks (margin={margin})...",
+            file=sys.stderr,
+            flush=True,
+        )
+
         # Stage 1: Route each occupied city block core independently
         for (bx, by), blk_nets in sorted(intra_block_specs.items()):
             if not blk_nets:
                 continue
             b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
-                (bx, by), bay_blocks
+                (bx, by), bay_blocks, margin=margin
             )
             blk_obstacles = {
                 pt
@@ -581,13 +589,18 @@ def route_with_maze_router(
                 pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
                 entities_by_pos[pkey] = ent
 
-        # Stage 2: Route inter-block highway trunks through 6-tile street channels, switchboxes, and matrix bays
+        # Stage 2: Route inter-block highway trunks through street channels, switchboxes, and matrix bays
         if highway_specs:
+            print(
+                f"[def2bp] Stage 2: routing {len(highway_specs)} highway nets across {grid_w}x{grid_h} street grid...",
+                file=sys.stderr,
+                flush=True,
+            )
             hwy_obstacles: set[tuple[int, int]] = set()
             for bx in range(grid_w):
                 for by in range(grid_h):
-                    for cx_tile in range(bx * 100 + 3, bx * 100 + 97):
-                        for cy_tile in range(by * 100 + 3, by * 100 + 97):
+                    for cx_tile in range(bx * 100 + margin, bx * 100 + 100 - margin):
+                        for cy_tile in range(by * 100 + margin, by * 100 + 100 - margin):
                             hwy_obstacles.add((cx_tile, cy_tile))
             for comp in def_data.get("components", []):
                 cx_t = round(comp["x"] * scale)
@@ -595,8 +608,8 @@ def route_with_maze_router(
                 bx_c = cx_t // 100
                 by_c = cy_t // 100
                 if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and 3 <= (cy_t % 100) <= 16:
-                    for nx_t in range(bx_c * 100 + 3, bx_c * 100 + 97):
-                        for ny_t in range(by_c * 100 + 3, by_c * 100 + 17):
+                    for nx_t in range(bx_c * 100 + margin, bx_c * 100 + 100 - margin):
+                        for ny_t in range(by_c * 100 + margin, by_c * 100 + 17):
                             hwy_obstacles.discard((nx_t, ny_t))
             hwy_obstacles.update(obstacles)
             for ns in highway_specs:
@@ -674,7 +687,7 @@ def route_with_maze_router(
             )
     failed = [res for res in routes.values() if not res.is_success]
     if failed:
-        for f in failed[:10]:
+        for f in failed[:25]:
             sys.stderr.write(
                 f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
             )
@@ -719,7 +732,7 @@ def build_entities(
     def_data["_netlist_data"] = netlist_data
 
     # 1. Untangle routing tracks (topological pin swaps and iterative geometric/physical loop)
-    untangle_def(def_data, netlist_data)
+    untangle_def(def_data, netlist_data, pins_only=use_maze_router)
 
     scale = 1.0 / float(def_data.get("units", 1000))
 
@@ -745,21 +758,26 @@ def build_entities(
         grid_w = max(1, round(die_w / 100.0))
         grid_h = max(1, round(die_h / 100.0))
 
-        bp_candidates = [
-            Path("cityblock.bp"),
-            Path(__file__).resolve().parent.parent / "cityblock.bp",
-            Path("/home/atv/src/factorilog/cityblock.bp"),
-        ]
         chassis: CityBlockChassis | None = None
-        for bp_cand in bp_candidates:
-            if bp_cand.is_file():
-                try:
-                    chassis = CityBlockChassis.from_blueprint_file(bp_cand)
-                    break
-                except Exception:
-                    pass
-        if chassis is None:
-            chassis = CityBlockChassis(pitch=100, core_width=94, core_height=94, channel_width=6)
+        if grid_w * grid_h >= 4:
+            chassis = CityBlockChassis(pitch=100, channel_width=8, programmatic=True)
+        else:
+            bp_candidates = [
+                Path("cityblock.bp"),
+                Path(__file__).resolve().parent.parent / "cityblock.bp",
+                Path("/home/atv/src/factorilog/cityblock.bp"),
+            ]
+            for bp_cand in bp_candidates:
+                if bp_cand.is_file():
+                    try:
+                        chassis = CityBlockChassis.from_blueprint_file(bp_cand)
+                        break
+                    except Exception:
+                        pass
+            if chassis is None:
+                chassis = CityBlockChassis(
+                    pitch=100, core_width=94, core_height=94, channel_width=6
+                )
 
         base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
         chassis_base_entities = base_bp.get("blueprint", {}).get("entities", [])
@@ -767,7 +785,10 @@ def build_entities(
 
         if use_maze_router:
             pin_coords = [
-                (math.floor(p.get("x", 0) * scale) + 0.5, math.floor(p.get("y", 0) * scale) + 0.5)
+                (
+                    math.floor(p.get("x", 0) * scale) + 0.5,
+                    math.floor(p.get("y", 0) * scale) + 0.5,
+                )
                 for p in def_data.get("pins", [])
             ]
             for be in chassis_base_entities:
@@ -776,11 +797,19 @@ def build_entities(
                 bpos = be.get("position", {})
                 bx = float(bpos.get("x", 0.0))
                 by = float(bpos.get("y", 0.0))
-                if bx <= 4.5 or bx >= die_w - 4.5 or by <= 4.5 or by >= die_h - 4.5:
+                bname = be.get("name", "")
+                if grid_w * grid_h >= 4:
+                    is_corner_pole = (
+                        bname == "big-electric-pole"
+                        and (bx % 100.0) in (5.0, 95.0)
+                        and (by % 100.0) in (5.0, 95.0)
+                    )
+                    if bname != "radar" and not is_corner_pole:
+                        continue
+                elif bx <= 4.5 or bx >= die_w - 4.5 or by <= 4.5 or by >= die_h - 4.5:
                     continue
                 if any(abs(bx - px) <= 3.5 and abs(by - py) <= 3.5 for px, py in pin_coords):
                     continue
-                bname = be.get("name", "")
                 if bname == "big-electric-pole":
                     for dx in (-0.5, 0.5):
                         for dy in (-0.5, 0.5):
@@ -984,29 +1013,18 @@ def build_entities(
             ex = float(pos.get("x", 0.0))
             ey = float(pos.get("y", 0.0))
             ename = e.get("name", "")
-            if "splitter" in ename:
-                d = e.get("direction", 0)
-                if d in (0, 8):
-                    occupied_tiles.add((round(ex - 0.5, 2), round(ey, 2)))
-                    occupied_tiles.add((round(ex + 0.5, 2), round(ey, 2)))
-                else:
-                    occupied_tiles.add((round(ex, 2), round(ey - 0.5, 2)))
-                    occupied_tiles.add((round(ex, 2), round(ey + 0.5, 2)))
-            elif (
-                "assembling-machine" in ename
-                or "electric-furnace" in ename
-                or "lab" in ename
-                or "chemical-plant" in ename
-            ):
-                for dx in (-1.0, 0.0, 1.0):
-                    for dy in (-1.0, 0.0, 1.0):
-                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
-            elif "oil-refinery" in ename:
-                for dx in (-2.0, -1.0, 0.0, 1.0, 2.0):
-                    for dy in (-2.0, -1.0, 0.0, 1.0, 2.0):
-                        occupied_tiles.add((round(ex + dx, 2), round(ey + dy, 2)))
-            else:
-                occupied_tiles.add((round(ex, 2), round(ey, 2)))
+            w, h = entity_size(ename, e.get("direction", DIRECTION_NORTH))
+            min_tx = math.floor(ex - w / 2.0 - 1e-6)
+            max_tx = math.floor(ex + w / 2.0 - 1e-6)
+            min_ty = math.floor(ey - h / 2.0 - 1e-6)
+            max_ty = math.floor(ey + h / 2.0 - 1e-6)
+            for tx in range(min_tx, max_tx + 2):
+                for ty in range(min_ty, max_ty + 2):
+                    if max(ex - w / 2.0, tx) < min(ex + w / 2.0, tx + 1.0) and max(
+                        ey - h / 2.0, ty
+                    ) < min(ey + h / 2.0, ty + 1.0):
+                        occupied_tiles.add((round(tx + 0.5, 2), round(ty + 0.5, 2)))
+            occupied_tiles.add((round(ex, 2), round(ey, 2)))
 
         sorted_base_entities = sorted(
             chassis_base_entities,
@@ -1129,8 +1147,8 @@ def build_entities(
                     seen_pairs.add(pair)
                     wires.append([pair[0], 5, pair[1], 5])
 
-        # Bridge any disconnected medium-electric-pole component to the chassis big-electric-pole network
-        if big_poles and med_poles:
+        # Bridge any disconnected pole component to the main electric pole network
+        if big_poles or med_poles:
             copper_adj: dict[int, set[int]] = {}
             for w_edge in wires:
                 if len(w_edge) >= 4 and int(w_edge[1]) == 5 and int(w_edge[3]) == 5:
@@ -1138,16 +1156,25 @@ def build_entities(
                     copper_adj.setdefault(u_id, set()).add(v_id)
                     copper_adj.setdefault(v_id, set()).add(u_id)
 
-            reached: set[int] = {int(bp.get("entity_number", 0)) for bp in big_poles}
-            queue = list(reached)
-            while queue:
-                curr_id = queue.pop()
-                for nxt_id in copper_adj.get(curr_id, ()):
-                    if nxt_id not in reached:
-                        reached.add(nxt_id)
-                        queue.append(nxt_id)
-
             all_pole_by_num = {int(p.get("entity_number", 0)): p for p in big_poles + med_poles}
+            visited_p: set[int] = set()
+            reached: set[int] = set()
+            for start_id in all_pole_by_num:
+                if start_id in visited_p:
+                    continue
+                comp_ids: set[int] = {start_id}
+                visited_p.add(start_id)
+                queue = [start_id]
+                while queue:
+                    curr_id = queue.pop()
+                    for nxt_id in copper_adj.get(curr_id, ()):
+                        if nxt_id in all_pole_by_num and nxt_id not in visited_p:
+                            visited_p.add(nxt_id)
+                            comp_ids.add(nxt_id)
+                            queue.append(nxt_id)
+                if len(comp_ids) > len(reached):
+                    reached = comp_ids
+
             for px, py in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
                 p_pt = (round(math.floor(px) + 0.5, 2), round(math.floor(py) + 0.5, 2))
                 occupied_tiles.add(p_pt)
@@ -1156,7 +1183,7 @@ def build_entities(
                     occupied_tiles.add((round(p_pt[0] + k, 2), p_pt[1]))
                     occupied_tiles.add((p_pt[0], round(p_pt[1] - k, 2)))
                     occupied_tiles.add((p_pt[0], round(p_pt[1] + k, 2)))
-            unreached_nums = {int(mp.get("entity_number", 0)) for mp in med_poles} - reached
+            unreached_nums = set(all_pole_by_num.keys()) - reached
             while unreached_nums:
                 best_pair_poles: tuple[dict[str, Any], dict[str, Any]] | None = None
                 best_dist = float("inf")
@@ -1178,32 +1205,42 @@ def build_entities(
                 u_p, v_p = best_pair_poles
                 ux, uy = float(u_p["position"]["x"]), float(u_p["position"]["y"])
                 vx, vy = float(v_p["position"]["x"]), float(v_p["position"]["y"])
+                cur_x, cur_y = vx, vy
                 prev_num = int(v_p["entity_number"])
-                steps = max(1, math.ceil(best_dist / 8.0))
-                for step_i in range(1, steps):
-                    frac = float(step_i) / float(steps)
-                    tx = math.floor(vx + frac * (ux - vx)) + 0.5
-                    ty = math.floor(vy + frac * (uy - vy)) + 0.5
-                    cand_pt = (round(tx, 2), round(ty, 2))
-                    if cand_pt in occupied_tiles:
-                        for r in range(1, 5):
-                            found_free = False
-                            for dx in range(-r, r + 1):
-                                for dy in range(-r, r + 1):
-                                    alt_pt = (round(tx + dx, 2), round(ty + dy, 2))
-                                    if alt_pt not in occupied_tiles:
-                                        cand_pt = alt_pt
-                                        found_free = True
-                                        break
-                                if found_free:
-                                    break
-                            if found_free:
-                                break
-                    occupied_tiles.add(cand_pt)
+                max_final_reach = (
+                    30.0
+                    if (
+                        v_p.get("name") == "big-electric-pole"
+                        and u_p.get("name") == "big-electric-pole"
+                    )
+                    else 9.0
+                )
+                while math.hypot(ux - cur_x, uy - cur_y) > (
+                    max_final_reach if prev_num == int(v_p["entity_number"]) else 9.0
+                ):
+                    best_cand: tuple[float, float] | None = None
+                    best_rem = float("inf")
+                    base_ix = math.floor(cur_x)
+                    base_iy = math.floor(cur_y)
+                    for dx in range(-9, 10):
+                        for dy in range(-9, 10):
+                            cand_pt = (round(base_ix + dx + 0.5, 2), round(base_iy + dy + 0.5))
+                            if cand_pt in occupied_tiles:
+                                continue
+                            step_d = math.hypot(cand_pt[0] - cur_x, cand_pt[1] - cur_y)
+                            if step_d < 1.0 or step_d > 9.0:
+                                continue
+                            rem_d = math.hypot(ux - cand_pt[0], uy - cand_pt[1])
+                            if rem_d < best_rem:
+                                best_rem = rem_d
+                                best_cand = cand_pt
+                    if best_cand is None:
+                        break
+                    occupied_tiles.add(best_cand)
                     new_num = len(entities) + 1
                     bridge_pole = {
                         "name": "medium-electric-pole",
-                        "position": {"x": cand_pt[0], "y": cand_pt[1]},
+                        "position": {"x": best_cand[0], "y": best_cand[1]},
                         "entity_number": new_num,
                     }
                     entities.append(bridge_pole)
@@ -1211,6 +1248,7 @@ def build_entities(
                     reached.add(new_num)
                     wires.append([min(prev_num, new_num), 5, max(prev_num, new_num), 5])
                     prev_num = new_num
+                    cur_x, cur_y = best_cand[0], best_cand[1]
 
                 u_num = int(u_p["entity_number"])
                 wires.append([min(prev_num, u_num), 5, max(prev_num, u_num), 5])

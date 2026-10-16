@@ -262,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         for bp_path, raw in zip(args.blueprints, raw_data, strict=True):
             print(f"\nENTITIES NEAR ({tx:.1f}, {ty:.1f}) in {bp_path} (radius={args.radius}):")
             ents = raw.get("blueprint", {}).get("entities", [])
+            wires = raw.get("blueprint", {}).get("wires", [])
+            ent_by_num = {int(e["entity_number"]): e for e in ents if "entity_number" in e}
             matches = [
                 e
                 for e in ents
@@ -271,8 +273,23 @@ def main(argv: list[str] | None = None) -> int:
             matches.sort(key=lambda e: (e["position"]["x"], e["position"]["y"]))
             for e in matches:
                 p = e["position"]
+                enum = e.get("entity_number")
+                w_list = []
+                if enum is not None:
+                    for w in wires:
+                        if len(w) >= 4 and (w[0] == enum or w[2] == enum):
+                            other_id = w[2] if w[0] == enum else w[0]
+                            conn_type = w[1] if w[0] == enum else w[3]
+                            other_e = ent_by_num.get(int(other_id))
+                            other_str = (
+                                f"{other_e.get('name')}@({other_e['position']['x']:.1f},{other_e['position']['y']:.1f})"
+                                if other_e and "position" in other_e
+                                else f"#{other_id}"
+                            )
+                            w_list.append(f"c{conn_type}->{other_str}(#{other_id})")
+                w_str = f" wires=[{', '.join(w_list)}]" if w_list else ""
                 print(
-                    f"  {e.get('name')} at ({p['x']:.1f}, {p['y']:.1f}) dir={e.get('direction', 0)} type={e.get('type')}"
+                    f"  #{enum} {e.get('name')} at ({p['x']:.1f}, {p['y']:.1f}) dir={e.get('direction', 0)} type={e.get('type')}{w_str}"
                 )
 
     return 0

@@ -1309,7 +1309,7 @@ class AnalyticalPlacer:
 
         grp_weights = [
             min(single_core_capacity * 0.35, sum(_cluster_weight(nodes[u]) for u in grp))
-            if (grp and grp[0] in atomic_domain_first_nodes)
+            if (grp and grp[0] in atomic_domain_first_nodes and grid_w < 5)
             else sum(_cluster_weight(nodes[u]) for u in grp)
             for grp in groups
         ]
@@ -2345,7 +2345,9 @@ class AnalyticalPlacer:
                 if idx < len(col) - 1:
                     nxt = col[idx + 1]
                     v_gap = max(
-                        6 if nd.node_type == "machine" or nxt.node_type == "machine" else 4,
+                        10
+                        if (nd.height >= 7 or nxt.height >= 7)
+                        else (6 if nd.node_type == "machine" or nxt.node_type == "machine" else 4),
                         nd.pad_n + nxt.pad_s,
                     )
                     step = nd.height + v_gap
@@ -2531,7 +2533,15 @@ class AnalyticalPlacer:
             heights = [nd.height for nd in col]
             gaps = [
                 max(
-                    6 if col[i].node_type == "machine" or col[i + 1].node_type == "machine" else 4,
+                    (
+                        10
+                        if (col[i].height >= 7 or col[i + 1].height >= 7) and len(col) <= 4
+                        else (
+                            6
+                            if col[i].node_type == "machine" or col[i + 1].node_type == "machine"
+                            else 4
+                        )
+                    ),
                     col[i].pad_n + col[i + 1].pad_s,
                 )
                 for i in range(len(col) - 1)

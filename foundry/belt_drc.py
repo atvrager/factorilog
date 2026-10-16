@@ -1607,8 +1607,31 @@ class BeltDrcChecker:
                             )
                         )
                     else:
-                        copper_adj[id1].add(id2)
-                        copper_adj[id2].add(id1)
+                        assert e1 is not None and e2 is not None
+                        p1 = e1.get("position", {})
+                        p2 = e2.get("position", {})
+                        x1 = float(p1.get("x", 0)) if isinstance(p1, dict) else float(p1[0])
+                        y1 = float(p1.get("y", 0)) if isinstance(p1, dict) else float(p1[1])
+                        x2 = float(p2.get("x", 0)) if isinstance(p2, dict) else float(p2[0])
+                        y2 = float(p2.get("y", 0)) if isinstance(p2, dict) else float(p2[1])
+                        w_dist = math.hypot(x1 - x2, y1 - y2)
+                        max_wire = min(get_pole_wire_reach(n1), get_pole_wire_reach(n2))
+                        if w_dist > max_wire + 1e-4:
+                            violations.append(
+                                DrcViolation(
+                                    code="DRC-17",
+                                    message=(
+                                        f"Copper wire [{id1}, {c1}, {id2}, {c2}] length {w_dist:.2f} "
+                                        f"exceeds maximum wire reach {max_wire:.1f} between "
+                                        f"{n1} #{id1} and {n2} #{id2}"
+                                    ),
+                                    x=x1,
+                                    y=y1,
+                                )
+                            )
+                        else:
+                            copper_adj[id1].add(id2)
+                            copper_adj[id2].add(id1)
 
         # Identify main connected component of electric poles when copper wires are present
         main_pole_ids: set[int] = set()
@@ -1724,13 +1747,17 @@ class BeltDrcChecker:
             cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
             tile_map.setdefault((math.floor(cx), math.floor(cy)), []).append(ent)
 
+        chassis_obj = getattr(macro_floorplan, "chassis", None)
+        margin = int(getattr(chassis_obj, "core_margin_x", 3))
+        chan_w = int(getattr(chassis_obj, "channel_width", 2 * margin))
+
         def _in_switchbox(tx: int, ty: int) -> bool:
-            if (tx + 3) % 100 >= 6:
+            if (tx + margin) % 100 >= chan_w:
                 return False
-            if (ty + 3) % 100 < 6:
+            if (ty + margin) % 100 < chan_w:
                 return True
-            if 3 <= (ty % 100) <= 16:
-                ix = (tx + 3) // 100
+            if margin <= (ty % 100) <= 16:
+                ix = (tx + margin) // 100
                 by_i = ty // 100
                 return (ix, by_i) in active_bays or (ix - 1, by_i) in active_bays
             return False
@@ -1741,14 +1768,14 @@ class BeltDrcChecker:
             x, y = coord
             bx, by = x // 100, y // 100
             rx, ry = x % 100, y % 100
-            if (bx, by) in active_bays and 11 <= rx <= 88 and 3 <= ry <= 16:
+            if (bx, by) in active_bays and 11 <= rx <= 88 and margin <= ry <= 16:
                 return ("H", bx, by)
-            in_v = (x + 3) % 100 < 6
-            in_h = (y + 3) % 100 < 6
+            in_v = (x + margin) % 100 < chan_w
+            in_h = (y + margin) % 100 < chan_w
             if in_v and not in_h and 0 <= by < grid_h:
-                return ("V", (x + 3) // 100, by)
+                return ("V", (x + margin) // 100, by)
             if in_h and not in_v and 0 <= bx < grid_w:
-                return ("H", bx, (y + 3) // 100)
+                return ("H", bx, (y + margin) // 100)
             return None
 
         def _core_block(cx: int, cy: int) -> tuple[int, int] | None:
@@ -1756,8 +1783,8 @@ class BeltDrcChecker:
             if not (0 <= bx < grid_w and 0 <= by < grid_h):
                 return None
             rx, ry = cx % 100, cy % 100
-            min_ry = 17 if (bx, by) in active_bays else 3
-            if 3 <= rx <= 96 and min_ry <= ry <= 96:
+            min_ry = 17 if (bx, by) in active_bays else margin
+            if margin <= rx <= (99 - margin) and min_ry <= ry <= (99 - margin):
                 return (bx, by)
             return None
 
@@ -1783,13 +1810,13 @@ class BeltDrcChecker:
                 )
             if port.edge in ("N", "S"):
                 lat = cx % 100
-                valid_lat = 5 <= lat <= 94 and cx == hx
+                valid_lat = (margin + 2) <= lat <= (99 - margin - 2) and cx == hx
                 if port.block in active_bays and port.edge == "N":
                     valid_lat = False
             else:
                 lat = cy % 100
-                min_lat = 19 if port.block in active_bays else 5
-                valid_lat = min_lat <= lat <= 94 and cy == hy
+                min_lat = 19 if port.block in active_bays else (margin + 2)
+                valid_lat = min_lat <= lat <= (99 - margin - 2) and cy == hy
             if not valid_lat:
                 violations.append(
                     DrcViolation(

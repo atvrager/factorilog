@@ -482,6 +482,7 @@ class MacroFloorplanner:
         max_block_width: float = 80.0,
         default_belt_tier: str = "fast-transport-belt",
     ) -> None:
+        self._explicit_chassis = chassis is not None
         self.chassis = chassis or CityBlockChassis(
             pitch=100, core_width=94, core_height=94, channel_width=6
         )
@@ -901,14 +902,16 @@ class MacroFloorplanner:
         grid_w: int,
         grid_h: int,
         bay_blocks: set[tuple[int, int]] | None = None,
+        margin: int = 3,
     ) -> tuple[int, int] | None:
         """Return (bx, by) if pos lies inside a city block core (excluding matrix bays), else None."""
         x, y = pos
         bx = x // 100
         by = y // 100
-        if 0 <= bx < grid_w and 0 <= by < grid_h and 3 <= (x % 100) <= 96:
-            y_lo = 17 if (bay_blocks and (bx, by) in bay_blocks) else 3
-            if y_lo <= (y % 100) <= 96:
+        hi = 99 - margin
+        if 0 <= bx < grid_w and 0 <= by < grid_h and margin <= (x % 100) <= hi:
+            y_lo = 17 if (bay_blocks and (bx, by) in bay_blocks) else margin
+            if y_lo <= (y % 100) <= hi:
                 return (bx, by)
         return None
 
@@ -916,11 +919,13 @@ class MacroFloorplanner:
     def _block_core_bbox(
         blk: tuple[int, int],
         bay_blocks: set[tuple[int, int]] | None = None,
+        margin: int = 3,
     ) -> tuple[int, int, int, int]:
         """Return the (min_x, min_y, max_x, max_y) tile bounds for a cell core."""
         bx, by = blk
-        y_lo = by * 100 + (17 if (bay_blocks and blk in bay_blocks) else 3)
-        return (bx * 100 + 3, y_lo, bx * 100 + 96, by * 100 + 96)
+        hi = 99 - margin
+        y_lo = by * 100 + (17 if (bay_blocks and blk in bay_blocks) else margin)
+        return (bx * 100 + margin, y_lo, bx * 100 + hi, by * 100 + hi)
 
     @staticmethod
     def _street_segment_of_edge(
@@ -943,26 +948,29 @@ class MacroFloorplanner:
         grid_w: int,
         grid_h: int,
         bay_blocks: set[tuple[int, int]] | None = None,
+        margin: int = 3,
     ) -> tuple[str, int, int] | None:
         """Return the canonical street segment for a street channel or Matrix Switchbox Bay coordinate."""
         x, y = pos
         bx = x // 100
         by = y // 100
+        hi = 99 - margin
+        chan_w = 2 * margin
         if (
             bay_blocks
             and (bx, by) in bay_blocks
             and 0 <= bx < grid_w
             and 0 <= by < grid_h
-            and 3 <= (x % 100) <= 96
-            and 3 <= (y % 100) <= 16
+            and margin <= (x % 100) <= hi
+            and margin <= (y % 100) <= 16
         ):
             return ("H", bx, by)
-        in_v = (x + 3) % 100 < 6
-        in_h = (y + 3) % 100 < 6
+        in_v = (x + margin) % 100 < chan_w
+        in_h = (y + margin) % 100 < chan_w
         if in_v and not in_h and 0 <= by < grid_h:
-            return ("V", (x + 3) // 100, by)
+            return ("V", (x + margin) // 100, by)
         if in_h and not in_v and 0 <= bx < grid_w:
-            return ("H", bx, (y + 3) // 100)
+            return ("H", bx, (y + margin) // 100)
         return None
 
     @staticmethod
@@ -973,16 +981,33 @@ class MacroFloorplanner:
         min_y: int,
         max_x: int,
         max_y: int,
+        margin: int = 3,
     ) -> tuple[int, int, int, int]:
         """Return the street channel bounding box enclosing src and snk."""
         sx, sy = src
         tx, ty = snk
         x_lo, x_hi = min(sx, tx), max(sx, tx)
         y_lo, y_hi = min(sy, ty), max(sy, ty)
-        bx_lo = ((x_lo // 100) + 1) * 100 - 3 if (x_lo % 100) >= 97 else (x_lo // 100) * 100 - 3
-        bx_hi = (x_hi // 100) * 100 + 2 if (x_hi % 100) <= 2 else ((x_hi // 100) + 1) * 100 + 2
-        by_lo = ((y_lo // 100) + 1) * 100 - 3 if (y_lo % 100) >= 97 else (y_lo // 100) * 100 - 3
-        by_hi = (y_hi // 100) * 100 + 16 if (y_hi % 100) <= 16 else ((y_hi // 100) + 1) * 100 + 2
+        m_chan = margin - 1
+        m_hi = 100 - margin
+        bx_lo = (
+            ((x_lo // 100) + 1) * 100 - margin
+            if (x_lo % 100) >= m_hi
+            else (x_lo // 100) * 100 - margin
+        )
+        bx_hi = (
+            (x_hi // 100) * 100 + m_chan
+            if (x_hi % 100) <= m_chan
+            else ((x_hi // 100) + 1) * 100 + m_chan
+        )
+        by_lo = (
+            ((y_lo // 100) + 1) * 100 - margin
+            if (y_lo % 100) >= m_hi
+            else (y_lo // 100) * 100 - margin
+        )
+        by_hi = (
+            (y_hi // 100) * 100 + 16 if (y_hi % 100) <= 16 else ((y_hi // 100) + 1) * 100 + m_chan
+        )
         return (
             max(min_x, bx_lo),
             max(min_y, by_lo),
@@ -996,6 +1021,7 @@ class MacroFloorplanner:
         edge: str,
         port_type: str,
         c: int,
+        margin: int = 3,
     ) -> tuple[
         tuple[int, int],
         tuple[int, int],
@@ -1006,32 +1032,35 @@ class MacroFloorplanner:
     ]:
         """Return (core_pos, channel_pos, in_pos, out_pos, port_dir, opp_edge_key)."""
         bx, by = blk
+        m_chan = margin - 1
+        e_core = 99 - margin
+        e_chan = 100 - margin
         if edge == "W":
-            core_pos = (bx * 100 + 3, c)
-            channel_pos = (bx * 100 + 2, c)
-            in_pos = (bx * 100 + 4, c)
-            out_pos = (bx * 100 + 1, c)
+            core_pos = (bx * 100 + margin, c)
+            channel_pos = (bx * 100 + m_chan, c)
+            in_pos = (bx * 100 + margin + 1, c)
+            out_pos = (bx * 100 + m_chan - 1, c)
             port_dir = DIRECTION_WEST if port_type == "export" else DIRECTION_EAST
             opp_key = (bx - 1, by, "E")
         elif edge == "E":
-            core_pos = (bx * 100 + 96, c)
-            channel_pos = (bx * 100 + 97, c)
-            in_pos = (bx * 100 + 95, c)
-            out_pos = (bx * 100 + 98, c)
+            core_pos = (bx * 100 + e_core, c)
+            channel_pos = (bx * 100 + e_chan, c)
+            in_pos = (bx * 100 + e_core - 1, c)
+            out_pos = (bx * 100 + e_chan + 1, c)
             port_dir = DIRECTION_EAST if port_type == "export" else DIRECTION_WEST
             opp_key = (bx + 1, by, "W")
         elif edge == "N":
-            core_pos = (c, by * 100 + 3)
-            channel_pos = (c, by * 100 + 2)
-            in_pos = (c, by * 100 + 4)
-            out_pos = (c, by * 100 + 1)
+            core_pos = (c, by * 100 + margin)
+            channel_pos = (c, by * 100 + m_chan)
+            in_pos = (c, by * 100 + margin + 1)
+            out_pos = (c, by * 100 + m_chan - 1)
             port_dir = DIRECTION_NORTH if port_type == "export" else DIRECTION_SOUTH
             opp_key = (bx, by - 1, "S")
         else:
-            core_pos = (c, by * 100 + 96)
-            channel_pos = (c, by * 100 + 97)
-            in_pos = (c, by * 100 + 95)
-            out_pos = (c, by * 100 + 98)
+            core_pos = (c, by * 100 + e_core)
+            channel_pos = (c, by * 100 + e_chan)
+            in_pos = (c, by * 100 + e_core - 1)
+            out_pos = (c, by * 100 + e_chan + 1)
             port_dir = DIRECTION_SOUTH if port_type == "export" else DIRECTION_NORTH
             opp_key = (bx, by + 1, "N")
         return core_pos, channel_pos, in_pos, out_pos, port_dir, opp_key
@@ -1056,44 +1085,52 @@ class MacroFloorplanner:
         grid_w: int = 1,
         grid_h: int = 1,
         v_seg_transit_load: dict[tuple[int, int], float] | None = None,
+        margin: int | None = None,
     ) -> tuple[BlockPort, tuple[int, int], tuple[int, int]]:
         """Allocate a conflict-free BlockPort on the boundary of blk."""
         bx, by = blk
         ix, iy = internal_pt
         tx, ty = target_pt
-        y_min_off = 19 if has_north_bay else 5
+        if margin is None:
+            margin = self.chassis.core_margin_x
+        m_chan = margin - 1
+        e_chan = 100 - margin
+        c_lo_base = margin + 2
+        c_hi_off = 99 - margin - 2
+        y_min_off = 19 if has_north_bay else c_lo_base
+        cap_tracks = max(4, self.chassis.channel_width - 2)
 
         def _edge_score(e: str) -> float:
             if e == "N":
-                px = max(bx * 100 + 5, min(bx * 100 + 94, ix))
-                py = by * 100 + 2
+                px = max(bx * 100 + c_lo_base, min(bx * 100 + c_hi_off, ix))
+                py = by * 100 + m_chan
                 opp_e_key = (bx, by - 1, "S")
             elif e == "S":
-                px = max(bx * 100 + 5, min(bx * 100 + 94, ix))
-                py = by * 100 + 97
+                px = max(bx * 100 + c_lo_base, min(bx * 100 + c_hi_off, ix))
+                py = by * 100 + e_chan
                 opp_e_key = (bx, by + 1, "N")
             elif e == "W":
-                px = bx * 100 + 2
-                py = max(by * 100 + y_min_off, min(by * 100 + 94, iy))
+                px = bx * 100 + m_chan
+                py = max(by * 100 + y_min_off, min(by * 100 + c_hi_off, iy))
                 opp_e_key = (bx - 1, by, "E")
             else:
-                px = bx * 100 + 97
-                py = max(by * 100 + y_min_off, min(by * 100 + 94, iy))
+                px = bx * 100 + e_chan
+                py = max(by * 100 + y_min_off, min(by * 100 + c_hi_off, iy))
                 opp_e_key = (bx + 1, by, "W")
 
             in_cost = 1.4 * float(abs(ix - px)) + 2.4 * float(abs(iy - py))
             if (port_type == "import" and e == "W") or (port_type == "export" and e == "E"):
                 in_cost -= 8.0
-            if e in ("W", "E") and abs(px - tx) > 6:
+            if e in ("W", "E") and abs(px - tx) > self.chassis.channel_width:
                 vert_d = min(
-                    abs(py - (by * 100 + 2)) + abs((by * 100 + 2) - ty),
-                    abs(py - (by * 100 + 97)) + abs((by * 100 + 97) - ty),
+                    abs(py - (by * 100 + m_chan)) + abs((by * 100 + m_chan) - ty),
+                    abs(py - (by * 100 + e_chan)) + abs((by * 100 + e_chan) - ty),
                 )
                 out_cost = float(abs(px - tx) + vert_d)
-            elif e in ("N", "S") and abs(py - ty) > 6:
+            elif e in ("N", "S") and abs(py - ty) > self.chassis.channel_width:
                 horiz_d = min(
-                    abs(px - (bx * 100 + 2)) + abs((bx * 100 + 2) - tx),
-                    abs(px - (bx * 100 + 97)) + abs((bx * 100 + 97) - tx),
+                    abs(px - (bx * 100 + m_chan)) + abs((bx * 100 + m_chan) - tx),
+                    abs(px - (bx * 100 + e_chan)) + abs((bx * 100 + e_chan) - tx),
                 )
                 out_cost = float(horiz_d + abs(py - ty))
             else:
@@ -1117,8 +1154,12 @@ class MacroFloorplanner:
                 + 20.0 * float(transit_cnt)
                 + (
                     45.0
-                    if seg_cnt == 4
-                    else (45.0 + 90.0 * float(seg_cnt - 4) if seg_cnt >= 5 else 0.0)
+                    if seg_cnt == cap_tracks
+                    else (
+                        45.0 + 90.0 * float(seg_cnt - cap_tracks)
+                        if seg_cnt >= cap_tracks + 1
+                        else 0.0
+                    )
                 )
             )
             if e == "S" and has_south_bay_neighbor:
@@ -1130,11 +1171,11 @@ class MacroFloorplanner:
                 if e == "W" and bx == 0:
                     rim_pen = (
                         -200.0
-                        if (tx <= 2 and max(0, by - 1) * 100 <= ty <= (by + 1) * 100 + 99)
+                        if (tx <= m_chan and max(0, by - 1) * 100 <= ty <= (by + 1) * 100 + 99)
                         else 180.0
                     )
                 elif e == "E" and bx == grid_w - 1:
-                    if tx >= grid_w * 100 - 3 and by * 100 <= ty <= by * 100 + 99:
+                    if tx >= grid_w * 100 - margin and by * 100 <= ty <= by * 100 + 99:
                         rim_pen = -200.0
                     elif (
                         port_type == "export"
@@ -1163,11 +1204,13 @@ class MacroFloorplanner:
                     else:
                         rim_pen = 180.0
                 elif e == "N" and by == 0:
-                    rim_pen = -200.0 if (ty <= 2 and bx * 100 <= tx <= bx * 100 + 99) else 120.0
+                    rim_pen = (
+                        -200.0 if (ty <= m_chan and bx * 100 <= tx <= bx * 100 + 99) else 120.0
+                    )
                 elif e == "S" and by == grid_h - 1:
                     rim_pen = (
                         -200.0
-                        if (ty >= grid_h * 100 - 3 and bx * 100 <= tx <= bx * 100 + 99)
+                        if (ty >= grid_h * 100 - margin and bx * 100 <= tx <= bx * 100 + 99)
                         else 120.0
                     )
             return in_cost + out_cost + load_pen + rim_pen
@@ -1189,23 +1232,31 @@ class MacroFloorplanner:
         for spacing in (3, 2, 1):
             for edge in edge_order:
                 base = by * 100 if edge in ("W", "E") else bx * 100
-                c_lo_off = y_min_off if edge in ("W", "E") else 5
-                if preferred_c is not None and base + c_lo_off <= preferred_c <= base + 94:
+                c_lo_off = y_min_off if edge in ("W", "E") else c_lo_base
+                if preferred_c is not None and base + c_lo_off <= preferred_c <= base + c_hi_off:
                     ideal_c = preferred_c
                 elif edge in ("W", "E"):
-                    if by * 100 + c_lo_off <= ty <= by * 100 + 94 and (
-                        (edge == "W" and tx <= bx * 100 + 2 and bx * 100 - tx <= 6)
-                        or (edge == "E" and tx >= bx * 100 + 97 and tx - (bx * 100 + 99) <= 6)
+                    if by * 100 + c_lo_off <= ty <= by * 100 + c_hi_off and (
+                        (
+                            edge == "W"
+                            and tx <= bx * 100 + m_chan
+                            and bx * 100 - tx <= self.chassis.channel_width
+                        )
+                        or (
+                            edge == "E"
+                            and tx >= bx * 100 + e_chan
+                            and tx - (bx * 100 + 99) <= self.chassis.channel_width
+                        )
                     ):
                         ideal_c = ty
                     else:
                         ideal_c = iy
                 else:
                     ideal_c = ix
-                ideal_c = max(base + c_lo_off, min(base + 94, ideal_c))
+                ideal_c = max(base + c_lo_off, min(base + c_hi_off, ideal_c))
 
                 candidates = sorted(
-                    range(base + c_lo_off, base + 95),
+                    range(base + c_lo_off, base + c_hi_off + 1),
                     key=lambda c_val: (abs(c_val - ideal_c), c_val),
                 )
                 edge_key = (bx, by, edge)
@@ -1226,7 +1277,7 @@ class MacroFloorplanner:
                     ):
                         continue
                     core_pos, channel_pos, in_pos, out_pos, port_dir, opp_key = (
-                        self._edge_port_geometry(blk, edge, port_type, c_val)
+                        self._edge_port_geometry(blk, edge, port_type, c_val, margin=margin)
                     )
                     used_opp = used_edge_coords.get(opp_key, [])
                     if any(abs(c_val - uc) < spacing and unet != net_name for uc, unet in used_opp):
@@ -1263,10 +1314,10 @@ class MacroFloorplanner:
         # Fallback if all candidates were constrained
         edge = edge_order[0]
         base = by * 100 if edge in ("W", "E") else bx * 100
-        c_lo_off = y_min_off if edge in ("W", "E") else 5
-        c_val = max(base + c_lo_off, min(base + 94, iy if edge in ("W", "E") else ix))
+        c_lo_off = y_min_off if edge in ("W", "E") else c_lo_base
+        c_val = max(base + c_lo_off, min(base + c_hi_off, iy if edge in ("W", "E") else ix))
         core_pos, channel_pos, _in_p, _out_p, port_dir, _opp = self._edge_port_geometry(
-            blk, edge, port_type, c_val
+            blk, edge, port_type, c_val, margin=margin
         )
         used_edge_coords.setdefault((bx, by, edge), []).append((c_val, net_name))
         port = BlockPort(
@@ -1305,8 +1356,8 @@ class MacroFloorplanner:
         """Decompose flat RouterNetSpecs into intra-block core specs and street highway specs.
 
         Returns:
-            intra_block_specs: Mapping of (bx, by) -> list of RouterNetSpec inside that 94x94 core.
-            highway_specs: List of RouterNetSpec for the 6-tile street channels and switchboxes.
+            intra_block_specs: Mapping of (bx, by) -> list of RouterNetSpec inside that block core.
+            highway_specs: List of RouterNetSpec for the street channels and switchboxes.
             port_no_hood_tiles: Set of (x, y) boundary tiles where underground hoods are forbidden.
             port_headings: Mapping of (x, y) -> heading for allocated belt port tiles.
             floorplan: Populated MacroFloorplan with channels, intersections, ports, and routes.
@@ -1320,6 +1371,13 @@ class MacroFloorplanner:
             max_x = grid_w * 100
         if max_y is None:
             max_y = grid_h * 100
+
+        if not self._explicit_chassis and grid_w * grid_h >= 4:
+            self.chassis = CityBlockChassis(
+                pitch=100, core_width=92, core_height=92, channel_width=8, programmatic=True
+            )
+        margin = self.chassis.core_margin_x
+        m_chan = margin - 1
 
         if bay_blocks is None:
             bay_blocks = set()
@@ -1351,19 +1409,19 @@ class MacroFloorplanner:
             all_terminals.add(spec.source)
             all_terminals.add(spec.sink)
             for pt in (spec.source, spec.sink):
-                if self._block_of_coord(pt, grid_w, grid_h, bay_blocks) is None:
+                if self._block_of_coord(pt, grid_w, grid_h, bay_blocks, margin=margin) is None:
                     px, py = pt
                     by_pin = max(0, min(grid_h - 1, py // 100))
                     bx_pin = max(0, min(grid_w - 1, px // 100))
-                    if px <= 2:
+                    if px <= m_chan:
                         pin_reserved_coords.setdefault((0, by_pin, "W"), []).append((py, pt))
-                    elif px >= grid_w * 100 - 3:
+                    elif px >= grid_w * 100 - margin:
                         pin_reserved_coords.setdefault((grid_w - 1, by_pin, "E"), []).append(
                             (py, pt)
                         )
-                    if py <= 2:
+                    if py <= m_chan:
                         pin_reserved_coords.setdefault((bx_pin, 0, "N"), []).append((px, pt))
-                    elif py >= grid_h * 100 - 3:
+                    elif py >= grid_h * 100 - margin:
                         pin_reserved_coords.setdefault((bx_pin, grid_h - 1, "S"), []).append(
                             (px, pt)
                         )
@@ -1468,23 +1526,23 @@ class MacroFloorplanner:
                 key=lambda vx: abs(sx - vx * 100) + abs(tx - vx * 100),
             )
             for r in range(grid_h):
-                if y_lo <= r * 100 + 16 and y_hi >= r * 100 + 97:
+                if y_lo <= r * 100 + 16 and y_hi >= r * 100 + (100 - margin):
                     v_seg_transit_load[(best_vx, r)] = (
                         v_seg_transit_load.get((best_vx, r), 0.0) + 1.0
                     )
 
         for net in solid_specs:
-            src_b = self._block_of_coord(net.source, grid_w, grid_h, bay_blocks)
-            dst_b = self._block_of_coord(net.sink, grid_w, grid_h, bay_blocks)
+            src_b = self._block_of_coord(net.source, grid_w, grid_h, bay_blocks, margin=margin)
+            dst_b = self._block_of_coord(net.sink, grid_w, grid_h, bay_blocks, margin=margin)
             if src_b is None or dst_b is None or src_b != dst_b:
                 _record_v_transit(net.source, net.sink)
 
         for net in solid_specs:
-            src_blk = self._block_of_coord(net.source, grid_w, grid_h, bay_blocks)
-            dst_blk = self._block_of_coord(net.sink, grid_w, grid_h, bay_blocks)
+            src_blk = self._block_of_coord(net.source, grid_w, grid_h, bay_blocks, margin=margin)
+            dst_blk = self._block_of_coord(net.sink, grid_w, grid_h, bay_blocks, margin=margin)
 
             if src_blk is not None and src_blk == dst_blk:
-                bbox = self._block_core_bbox(src_blk, bay_blocks)
+                bbox = self._block_core_bbox(src_blk, bay_blocks, margin=margin)
                 intra_block_specs[src_blk].append(
                     RouterNetSpec(
                         name=net.name,
@@ -1514,7 +1572,7 @@ class MacroFloorplanner:
                         end_heading=net.end_heading,
                         terminal_heading=net.terminal_heading,
                         corridor_bbox=self._highway_corridor_bbox(
-                            net.source, net.sink, min_x, min_y, max_x, max_y
+                            net.source, net.sink, min_x, min_y, max_x, max_y, margin=margin
                         ),
                     )
                 )
@@ -1529,10 +1587,10 @@ class MacroFloorplanner:
             hwy_term_h = net.terminal_heading
 
             src_seg: tuple[str, int, int] | None = self._street_segment_of_coord(
-                net.source, grid_w, grid_h, bay_blocks
+                net.source, grid_w, grid_h, bay_blocks, margin=margin
             )
             snk_seg_init: tuple[str, int, int] | None = self._street_segment_of_coord(
-                net.sink, grid_w, grid_h, bay_blocks
+                net.sink, grid_w, grid_h, bay_blocks, margin=margin
             )
 
             if src_blk is not None:
@@ -1558,6 +1616,7 @@ class MacroFloorplanner:
                     grid_w=grid_w,
                     grid_h=grid_h,
                     v_seg_transit_load=v_seg_transit_load,
+                    margin=margin,
                 )
                 floorplan.ports.append(p_out)
                 port_no_hood_tiles.add(out_core)
@@ -1577,7 +1636,7 @@ class MacroFloorplanner:
                         start_heading=net.start_heading,
                         end_heading=p_out.direction,
                         terminal_heading=p_out.direction,
-                        corridor_bbox=self._block_core_bbox(src_blk, bay_blocks),
+                        corridor_bbox=self._block_core_bbox(src_blk, bay_blocks, margin=margin),
                     )
                 )
                 hwy_src = out_chan
@@ -1607,6 +1666,7 @@ class MacroFloorplanner:
                     grid_w=grid_w,
                     grid_h=grid_h,
                     v_seg_transit_load=v_seg_transit_load,
+                    margin=margin,
                 )
                 floorplan.ports.append(p_in)
                 port_no_hood_tiles.add(in_core)
@@ -1626,7 +1686,7 @@ class MacroFloorplanner:
                         start_heading=p_in.direction,
                         end_heading=net.end_heading,
                         terminal_heading=net.terminal_heading,
-                        corridor_bbox=self._block_core_bbox(dst_blk, bay_blocks),
+                        corridor_bbox=self._block_core_bbox(dst_blk, bay_blocks, margin=margin),
                     )
                 )
                 hwy_snk = in_chan
@@ -1645,7 +1705,7 @@ class MacroFloorplanner:
                     end_heading=hwy_end_h,
                     terminal_heading=hwy_term_h,
                     corridor_bbox=self._highway_corridor_bbox(
-                        hwy_src, hwy_snk, min_x, min_y, max_x, max_y
+                        hwy_src, hwy_snk, min_x, min_y, max_x, max_y, margin=margin
                     ),
                 )
             )
@@ -1672,7 +1732,7 @@ class MacroFloorplanner:
                 tuple[int, int] | None, list[tuple[tuple[int, int], int | None, int | None]]
             ] = {}
             for t_pos, t_info in term_map.items():
-                blk_id = self._block_of_coord(t_pos, grid_w, grid_h, bay_blocks)
+                blk_id = self._block_of_coord(t_pos, grid_w, grid_h, bay_blocks, margin=margin)
                 by_blk.setdefault(blk_id, []).append(t_info)
 
             pin_terms = by_blk.get(None, [])
@@ -1681,7 +1741,7 @@ class MacroFloorplanner:
             if not pin_terms and len(blk_terms) <= 1:
                 only_blk = next(iter(blk_terms.keys()), None)
                 if only_blk is not None:
-                    bbox = self._block_core_bbox(only_blk, bay_blocks)
+                    bbox = self._block_core_bbox(only_blk, bay_blocks, margin=margin)
                     for fs in f_list:
                         intra_block_specs[only_blk].append(
                             RouterNetSpec(
@@ -1714,7 +1774,7 @@ class MacroFloorplanner:
                             source_inward_dir=fs.source_inward_dir,
                             sink_inward_dir=fs.sink_inward_dir,
                             corridor_bbox=self._highway_corridor_bbox(
-                                fs.source, fs.sink, min_x, min_y, max_x, max_y
+                                fs.source, fs.sink, min_x, min_y, max_x, max_y, margin=margin
                             ),
                         )
                         for fs in f_list
@@ -1727,7 +1787,11 @@ class MacroFloorplanner:
             used_fluid_segs: set[tuple[str, int, int]] = {
                 seg
                 for p in pin_terms
-                if (seg := self._street_segment_of_coord(p[0], grid_w, grid_h, bay_blocks))
+                if (
+                    seg := self._street_segment_of_coord(
+                        p[0], grid_w, grid_h, bay_blocks, margin=margin
+                    )
+                )
                 is not None
             }
 
@@ -1783,6 +1847,7 @@ class MacroFloorplanner:
                     tier="pipe",
                     grid_w=grid_w,
                     grid_h=grid_h,
+                    margin=margin,
                 )
                 used_fluid_segs.add(self._street_segment_of_edge(blk[0], blk[1], f_port.edge))
                 floorplan.ports.append(f_port)
@@ -1799,7 +1864,7 @@ class MacroFloorplanner:
                 in_tree = [local_nodes[0]]
                 remaining = set(local_nodes[1:])
                 edge_idx = 0
-                bbox = self._block_core_bbox(blk, bay_blocks)
+                bbox = self._block_core_bbox(blk, bay_blocks, margin=margin)
                 while remaining:
                     best_dist = float("inf")
                     best_pair = None
@@ -1866,7 +1931,7 @@ class MacroFloorplanner:
                             source_inward_dir=v[2],
                             sink_inward_dir=u[2],
                             corridor_bbox=self._highway_corridor_bbox(
-                                v[0], u[0], min_x, min_y, max_x, max_y
+                                v[0], u[0], min_x, min_y, max_x, max_y, margin=margin
                             ),
                         )
                     )

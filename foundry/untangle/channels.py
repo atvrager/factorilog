@@ -1300,6 +1300,7 @@ def route_unrouted_signal_nets(
             if min_x <= x <= max_x
         ]
         inside_tracks.sort(key=lambda x: abs(x - (x1 + x2) / 2))
+        inside_tracks = inside_tracks[:30]
 
         # Tracks outside endpoints as fallbacks
         outside_tracks = []

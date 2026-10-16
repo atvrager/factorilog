@@ -32,26 +32,43 @@ def get_component_box(
     cx = c.get("x", 0)
     cy = c.get("y", 0)
     orient = c.get("orient", "N")
+    cached = c.get("_box_cache")
+    if (
+        cached is not None
+        and cached[0] == cx
+        and cached[1] == cy
+        and cached[2] == orient
+        and cached[3] == units
+    ):
+        return cx, cy, cached[4], cached[5]
     macro = c.get("macro", "")
     cname = c.get("name", "")
     if netlist_data:
         cell_map = netlist_data.get("cells", {})
-        inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
+        inst_map = netlist_data.get("_inst_map")
+        if inst_map is None:
+            inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
+            netlist_data["_inst_map"] = inst_map
         cell = None
         if cname in inst_map:
             cell = cell_map.get(inst_map[cname].get("cell", ""))
         if not cell and macro:
-            macro_map = {
-                cd.get("cell", k).replace(".", "__").replace("-", "_"): cd
-                for k, cd in cell_map.items()
-                if isinstance(cd, dict)
-            }
+            macro_map = netlist_data.get("_macro_map")
+            if macro_map is None:
+                macro_map = {
+                    cd.get("cell", k).replace(".", "__").replace("-", "_"): cd
+                    for k, cd in cell_map.items()
+                    if isinstance(cd, dict)
+                }
+                netlist_data["_macro_map"] = macro_map
             cell = macro_map.get(macro)
         if cell:
             w = int(cell.get("width", 3)) * units
             h = int(cell.get("height", 3)) * units
             if orient in ("W", "E"):
+                c["_box_cache"] = (cx, cy, orient, units, h, w)
                 return cx, cy, h, w
+            c["_box_cache"] = (cx, cy, orient, units, w, h)
             return cx, cy, w, h
     if macro in ("belt_split2", "belt_balancer2"):
         cw, ch = (2 * units, units) if orient in ("W", "E") else (units, 2 * units)
@@ -63,6 +80,7 @@ def get_component_box(
         cw, ch = 5 * units, 3 * units
     else:
         cw, ch = 3 * units, 3 * units
+    c["_box_cache"] = (cx, cy, orient, units, cw, ch)
     return cx, cy, cw, ch
 
 
