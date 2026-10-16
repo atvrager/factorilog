@@ -66,17 +66,27 @@ const browser = await puppeteer.launch({
 
 try {
     const page = await browser.newPage();
-    page.on('console', msg => {
-        if (msg.type() === 'error' || msg.type() === 'warn') {
-            console.error('PAGE LOG:', msg.type(), msg.text());
-        }
+    await page.evaluateOnNewDocument(() => {
+        const origError = console.error;
+        console.error = (...args) => {
+            window.__lastError = args.map(a => {
+                if (a instanceof Error) return a.stack || a.message;
+                try { return JSON.stringify(a); } catch { return String(a); }
+            }).join(' ');
+            origError.apply(console, args);
+        };
     });
     page.on('pageerror', err => console.error('PAGE ERROR:', err.toString()));
     await page.goto(`http://127.0.0.1:${port}/?source=local.host/bp.txt`, { waitUntil: 'load', timeout: 180000 });
-    await page.waitForFunction(() => {
+    const status = await page.waitForFunction(() => {
+        if (window.__lastError) return { error: window.__lastError };
         const el = document.getElementById('loadingScreen');
-        return el && !el.classList.contains('active') && window.editor;
-    }, { timeout: 180000 });
+        if (el && !el.classList.contains('active') && window.editor) return { ok: true };
+        return false;
+    }, { timeout: 180000 }).then(h => h.jsonValue());
+    if (status && status.error) {
+        throw new Error(`FBE page error: ${status.error}`);
+    }
 
     await new Promise(r => setTimeout(r, 1000));
 

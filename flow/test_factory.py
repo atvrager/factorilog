@@ -569,8 +569,10 @@ script.on_event(defines.events.on_tick, function(event)
         for _, s in ipairs(silos) do
             local pf = s.products_finished or 0
             local parts = s.rocket_parts or 0
+            log(string.format("SILO_INFO: at (%.1f,%.1f) finished=%d rocket_parts=%d crafting=%s",
+                s.position.x, s.position.y, pf, parts, tostring(s.is_crafting())))
             if s.is_crafting() or pf > 0 or parts > 0 then active_silos = active_silos + 1 end
-            if pf > 0 then
+            if pf > 0 or parts > 0 then
                 productive_silos = productive_silos + 1
             else
                 table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", s.name, s.position.x, s.position.y))

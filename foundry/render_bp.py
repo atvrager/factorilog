@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -100,7 +101,40 @@ def _patch_website(fbe_dir: Path) -> None:
             "            resolution: Math.min(1, 16000 / Math.max(frame.width, frame.height, 1)),"
         )
         if old_tex in bpc_text:
-            bpc_path.write_text(bpc_text.replace(old_tex, new_tex), encoding="utf-8")
+            bpc_text = bpc_text.replace(old_tex, new_tex)
+        old_add = "        this.entitySprites.addChild(...entitySprites)"
+        new_add = (
+            "        if (entitySprites.length > 0) this.entitySprites.addChild(...entitySprites)"
+        )
+        if old_add in bpc_text:
+            bpc_text = bpc_text.replace(old_add, new_add)
+        bpc_path.write_text(bpc_text, encoding="utf-8")
+
+    sdb_path = fbe_dir / "packages" / "editor" / "src" / "core" / "spriteDataBuilder.ts"
+    if sdb_path.is_file():
+        sdb_text = sdb_path.read_text(encoding="utf-8")
+        for old_clp in (
+            "function draw_cargo_landing_pad(\n"
+            "    e: CargoLandingPadPrototype\n"
+            "): (data: IDrawData) => readonly SpriteData[] {\n"
+            "    throw new Error('Not implemented!')\n"
+            "}",
+            "function draw_cargo_landing_pad(\n"
+            "    e: CargoLandingPadPrototype\n"
+            "): (data: IDrawData) => readonly SpriteData[] {\n"
+            "    return () => (e as any).graphics_set?.picture?.layers ?? []\n"
+            "}",
+        ):
+            new_clp = (
+                "function draw_cargo_landing_pad(\n"
+                "    _e: CargoLandingPadPrototype\n"
+                "): (data: IDrawData) => readonly SpriteData[] {\n"
+                "    return () => []\n"
+                "}"
+            )
+            if old_clp in sdb_text:
+                sdb_text = sdb_text.replace(old_clp, new_clp)
+                sdb_path.write_text(sdb_text, encoding="utf-8")
 
     assets_dir = fbe_dir / "packages" / "website" / "dist" / "assets"
     if assets_dir.is_dir():
@@ -108,10 +142,25 @@ def _patch_website(fbe_dir: Path) -> None:
         new_min = (
             "frame:t,resolution:Math.min(1,16000/Math.max(t.width,t.height,1)),textureSourceOptions"
         )
+        new_clp_min = "function RE(i){return()=>[]}"
         for js_file in assets_dir.glob("index-*.js"):
             js_text = js_file.read_text(encoding="utf-8")
+            orig_text = js_text
             if old_min in js_text:
-                js_file.write_text(js_text.replace(old_min, new_min), encoding="utf-8")
+                js_text = js_text.replace(old_min, new_min)
+            for old_clp_min in (
+                'function RE(i){throw new Error("Not implemented!")}',
+                "function RE(i){return()=>i?.graphics_set?.picture?.layers??[]}",
+            ):
+                if old_clp_min in js_text:
+                    js_text = js_text.replace(old_clp_min, new_clp_min)
+            js_text = re.sub(
+                r"(?<!&&)this\.entitySprites\.addChild\(\.\.\.(\w+)\)",
+                r"(\1.length&&this.entitySprites.addChild(...\1))",
+                js_text,
+            )
+            if js_text != orig_text:
+                js_file.write_text(js_text, encoding="utf-8")
 
 
 def _build_fbe(fbe_dir: Path) -> None:

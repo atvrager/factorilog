@@ -516,6 +516,32 @@ factorilog_science_factory(
     ],
 )
 
+factorilog_science_factory(
+    name = "space_science",
+    block_fill = "0.005",
+    cell_pad_sites = 16,
+    channel_h = 48,
+    core_margin = 12,
+    demand = "space-science-pack 60.0",
+    density = "0.01",
+    do_untangle = True,
+    layer_adjustment = "",
+    routability_driven = True,
+    split_pad_sites = 12,
+    strict_drc = True,
+    synthesize_splitters = True,
+    use_row_placement = True,
+    test_expected_item = "space-science-pack",
+    test_min_produced = 1000,
+    test_min_active_ratio = "0.50",
+    test_ticks = 2400000,
+    tags = [
+        "manual",
+        "science",
+        "space_science",
+    ],
+)
+
 filegroup(
     name = "science",
     srcs = [
@@ -524,6 +550,7 @@ filegroup(
         ":logistic_science",
         ":military_science",
         ":production_science",
+        ":space_science",
         ":utility_science",
     ],
     tags = [

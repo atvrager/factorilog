@@ -279,8 +279,9 @@ def _a_star_search(
                 failed_frontier=(sink_pos,),
             )
 
+    span = abs(sx - tx) + abs(sy - ty)
     box_area = max(100, (bx1 - bx0 + 1) * (by1 - by0 + 1))
-    cap_states = 48 * 1024 if is_hwy else 24 * 1024
+    cap_states = 48 * 1024 if (is_hwy or span > 120) else 24 * 1024
     max_states = min(cap_states, max(4000, box_area * 2))
     while open_set:
         if len(closed_set) >= max_states:

@@ -131,9 +131,6 @@ end
 
 script.on_init(function()
     game.forces.player.research_all_technologies()
-    if game.forces.player.recipes["steel-plate"] then
-        game.forces.player.recipes["steel-plate"].enabled = false
-    end
 
     local PINS = helpers.json_to_table(PINS_JSON) or {{inputs = {{}}, outputs = {{}}}}
     local surface = game.surfaces[1]
