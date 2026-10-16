@@ -128,10 +128,10 @@ def _a_star_search(
         target_goals.extend(sorted_goals[:20])
 
     is_hwy = "_hwy" in net_name
-    src_bay = (sx // 100, sy // 100) if (3 <= (sx % 100) <= 96 and 3 <= (sy % 100) <= 16) else None
-    snk_bay = (tx // 100, ty // 100) if (3 <= (tx % 100) <= 96 and 3 <= (ty % 100) <= 16) else None
-    snk_h_band = (ty + 3) // 100
-    snk_v_band = (tx + 3) // 100
+    src_bay = (sx // 100, sy // 100) if (4 <= (sx % 100) <= 95 and 4 <= (sy % 100) <= 16) else None
+    snk_bay = (tx // 100, ty // 100) if (4 <= (tx % 100) <= 95 and 4 <= (ty % 100) <= 16) else None
+    snk_h_band = (ty + 4) // 100
+    snk_v_band = (tx + 4) // 100
     bay_rows = {b[1] for b in (src_bay, snk_bay) if b is not None}
 
     def calc_h(x: int, y: int) -> float:
@@ -140,15 +140,15 @@ def _a_star_search(
         dx_h = abs(x - tx)
         dy_h = abs(y - ty)
         if is_hwy:
-            if 3 <= (x % 100) <= 96 and (y + 3) // 100 != snk_h_band:
+            if 4 <= (x % 100) <= 95 and (y + 4) // 100 != snk_h_band:
                 bx_h = x // 100
-                vx_w = bx_h * 100 + 2
-                vx_e = min(grid.max_x, bx_h * 100 + 97)
+                vx_w = bx_h * 100 + 3
+                vx_e = min(grid.max_x, bx_h * 100 + 96)
                 dx_h = min(abs(x - vx_w) + abs(vx_w - tx), abs(x - vx_e) + abs(vx_e - tx))
-            if 17 <= (y % 100) <= 96 and (x + 3) // 100 != snk_v_band:
+            if 17 <= (y % 100) <= 95 and (x + 4) // 100 != snk_v_band:
                 by_h = y // 100
-                hy_n = by_h * 100 + (16 if by_h in bay_rows else 2)
-                hy_s = min(grid.max_y, by_h * 100 + 97)
+                hy_n = by_h * 100 + (16 if by_h in bay_rows else 3)
+                hy_s = min(grid.max_y, by_h * 100 + 96)
                 dy_h = max(
                     dy_h,
                     min(abs(y - hy_n) + abs(hy_n - ty), abs(y - hy_s) + abs(hy_s - ty)),
@@ -258,10 +258,8 @@ def _a_star_search(
                 base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_res
             ):
                 bad_front = True
-            if (
-                front_pos in grid.active_hoods
-                and base_net_name(grid.active_hoods[front_pos]) != b_name
-                and not grid.is_net_fluid(grid.active_hoods[front_pos])
+            if front_pos in grid.active_hoods and not grid.is_net_fluid(
+                grid.active_hoods[front_pos]
             ):
                 bad_front = True
             if front_pos in grid.component_headings and net.terminal_heading is None:
@@ -314,7 +312,14 @@ def _a_star_search(
                         goal_state = current
                         break
                 elif not is_fluid:
-                    if ch in valid_end_headings:
+                    gdx, gdy = DIR_STEPS[ch]
+                    f_pos = (tx + gdx, ty + gdy)
+                    f_xy = ((f_pos[0] + 32768) << 16) | (f_pos[1] + 32768)
+                    if (
+                        ch in valid_end_headings
+                        and f_pos not in curr_hoods
+                        and not _in_ancestor_xy(current, f_xy)
+                    ):
                         goal_state = current
                         break
                 elif can_surf_here:
@@ -618,6 +623,11 @@ def _a_star_search(
                 tentative_g = curr_g + edge_cost
                 if tentative_g >= g_score.get(nxt_s, float("inf")):
                     continue
+
+                if not is_fluid:
+                    r_xy = ((ex - dx + 32768) << 16) | (ey - dy + 32768)
+                    if _in_ancestor_xy(current, r_xy):
+                        continue
 
                 if not grid.can_place_hood(pt, net_name, heading=ch, is_output=True):
                     continue

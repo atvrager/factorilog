@@ -634,7 +634,7 @@ def route_with_maze_router(
                 no_hood_tiles=port_no_hood_tiles,
             )
             h_routes, h_entities, _ = hwy_router.route(
-                highway_specs, max_iterations=40, verify=False
+                highway_specs, max_iterations=60, verify=False
             )
             routes.update(h_routes)
             all_routed_specs.extend(highway_specs)

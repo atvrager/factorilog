@@ -689,6 +689,7 @@ def factorilog_science_factory(
         test_min_produced = 20,
         test_ticks = 7200,
         test_min_active_ratio = "0.70",
+        test_timeout = None,
         tags = None):
     """Builds full physical design flow for a science pack factory."""
     merged_tags = list(tags) if tags else []
@@ -822,6 +823,15 @@ def factorilog_science_factory(
         if t not in test_tags:
             test_tags.append(t)
 
+    resolved_timeout = test_timeout
+    if not resolved_timeout:
+        if test_ticks >= 4800000:
+            resolved_timeout = "eternal"
+        elif test_ticks >= 1000000:
+            resolved_timeout = "long"
+        else:
+            resolved_timeout = "moderate"
+
     factorilog_factory_test(
         name = test_name,
         save_zip = ":" + name + ".zip",
@@ -832,5 +842,6 @@ def factorilog_science_factory(
         def_file = ":" + name + ".def",
         drc_rpt = ":" + name + "_route_drc.rpt",
         sta_rpt = ":" + name + "_sta.rpt",
+        timeout = resolved_timeout,
         tags = test_tags,
     )

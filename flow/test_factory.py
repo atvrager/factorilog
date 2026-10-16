@@ -161,6 +161,27 @@ def run_factory_simulation(
 
     control_lua = f"""
 script.on_event(defines.events.on_tick, function(event)
+    if event.tick > 0 and event.tick % 60000 == 0 then
+        local surface = game.surfaces[1]
+        local stats = game.forces.player.get_item_production_statistics(surface)
+        local silos = surface.find_entities_filtered{{type = "rocket-silo"}}
+        local s_parts = (#silos > 0 and silos[1].rocket_parts) or 0
+        local exp_parts = {{}}
+        for item in string.gmatch("{expected_item}", "[^,%s]+") do
+            table.insert(exp_parts, string.format("%s=%d", item, stats.get_input_count(item)))
+        end
+        local pmsg = string.format("PROGRESS: tick=%d %s rocket-part=%d satellite=%d pu=%d lds=%d rf=%d silo_parts=%d",
+            event.tick,
+            table.concat(exp_parts, " "),
+            stats.get_input_count("rocket-part"),
+            stats.get_input_count("satellite"),
+            stats.get_input_count("processing-unit"),
+            stats.get_input_count("low-density-structure"),
+            stats.get_input_count("rocket-fuel"),
+            s_parts)
+        log(pmsg)
+        print(pmsg)
+    end
     if event.tick == {ticks} then
         local surface = game.surfaces[1]
         local stats = game.forces.player.get_item_production_statistics(surface)
@@ -739,15 +760,29 @@ end)
         "--benchmark-sanitize",
     ]
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
+    stdout_lines: list[str] = []
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    ) as proc:
+        if proc.stdout is not None:
+            for raw_line in proc.stdout:
+                stdout_lines.append(raw_line)
+                if "PROGRESS:" in raw_line:
+                    print(f"factorilog: {raw_line.strip()}", flush=True)
+        returncode = proc.wait()
+
+    if returncode != 0:
         log_file = data_dir / "factorio-current.log"
         log_text = (
             log_file.read_text(encoding="utf-8") if log_file.is_file() else "No log file found."
         )
         raise RuntimeError(
-            f"Factorio headless benchmark failed with code {res.returncode}:\n"
-            f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}\nLOG:\n{log_text}"
+            f"Factorio headless benchmark failed with code {returncode}:\n"
+            f"OUTPUT:\n{''.join(stdout_lines)}\nLOG:\n{log_text}"
         )
 
     log_file = data_dir / "factorio-current.log"
