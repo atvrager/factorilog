@@ -81,16 +81,43 @@ try {
     const status = await page.waitForFunction(() => {
         if (window.__lastError) return { error: window.__lastError };
         const el = document.getElementById('loadingScreen');
-        if (el && !el.classList.contains('active') && window.editor) return { ok: true };
-        return false;
+        if (!el || el.classList.contains('active') || !window.editor) return false;
+        if (!window.editor.haveBlueprint()) return { ok: true };
+        const bpc = window.__BPC;
+        if (!bpc) return false;
+        const stack = [bpc.entitySprites, bpc.tileSprites, bpc.overlayContainer];
+        while (stack.length > 0) {
+            const node = stack.pop();
+            if (!node) continue;
+            if (node.texture && node.texture.dynamic) return false;
+            if (node.children) {
+                for (let i = 0; i < node.children.length; i++) {
+                    stack.push(node.children[i]);
+                }
+            }
+        }
+        return { ok: true };
     }, { timeout: 180000 }).then(h => h.jsonValue());
     if (status && status.error) {
         throw new Error(`FBE page error: ${status.error}`);
     }
 
-    await new Promise(r => setTimeout(r, 1000));
-
     const dataUrl = await page.evaluate(async () => {
+        const bpc = window.__BPC;
+        if (bpc) {
+            const stack = [bpc];
+            while (stack.length > 0) {
+                const node = stack.pop();
+                if (!node) continue;
+                if (typeof node.onViewUpdate === 'function') node.onViewUpdate();
+                if (node.renderGroup) node.renderGroup.structureDidChange = true;
+                if (node.children) {
+                    for (let i = 0; i < node.children.length; i++) {
+                        stack.push(node.children[i]);
+                    }
+                }
+            }
+        }
         const blob = await window.editor.getPicture();
         if (!blob) return null;
         return new Promise((resolve) => {

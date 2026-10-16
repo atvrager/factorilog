@@ -291,11 +291,9 @@ class RoutingGrid:
                     return False
                 if self.component_headings.get(rear_pos) == heading:
                     return False
-                if rear_pos in self.reserved_terminal_bases and self.terminal_headings.get(
-                    rear_pos
-                ) in (
-                    None,
-                    heading,
+                if (
+                    rear_pos in self.reserved_terminal_bases
+                    and b_name not in self.reserved_terminal_bases[rear_pos]
                 ):
                     return False
         return True

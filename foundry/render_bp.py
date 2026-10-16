@@ -108,6 +108,14 @@ def _patch_website(fbe_dir: Path) -> None:
         )
         if old_add in bpc_text:
             bpc_text = bpc_text.replace(old_add, new_add)
+        old_init = "        this.sortEntities()\n        this.centerViewport()"
+        new_init = (
+            "        this.sortEntities()\n"
+            "        this.centerViewport()\n"
+            "        ;(window as any).__BPC = this"
+        )
+        if "(window as any).__BPC = this" not in bpc_text and old_init in bpc_text:
+            bpc_text = bpc_text.replace(old_init, new_init)
         bpc_path.write_text(bpc_text, encoding="utf-8")
 
     sdb_path = fbe_dir / "packages" / "editor" / "src" / "core" / "spriteDataBuilder.ts"
@@ -143,6 +151,8 @@ def _patch_website(fbe_dir: Path) -> None:
             "frame:t,resolution:Math.min(1,16000/Math.max(t.width,t.height,1)),textureSourceOptions"
         )
         new_clp_min = "function RE(i){return()=>[]}"
+        old_init_min = "this.sortEntities(),this.centerViewport()"
+        new_init_min = "this.sortEntities(),this.centerViewport(),(window.__BPC=this)"
         for js_file in assets_dir.glob("index-*.js"):
             js_text = js_file.read_text(encoding="utf-8")
             orig_text = js_text
@@ -159,6 +169,8 @@ def _patch_website(fbe_dir: Path) -> None:
                 r"(\1.length&&this.entitySprites.addChild(...\1))",
                 js_text,
             )
+            if "window.__BPC=this" not in js_text and old_init_min in js_text:
+                js_text = js_text.replace(old_init_min, new_init_min)
             if js_text != orig_text:
                 js_file.write_text(js_text, encoding="utf-8")
 
