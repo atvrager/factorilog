@@ -452,37 +452,19 @@ def _balance_inputs(
     n = len(bus_wires)
     if n <= 1:
         return bus_wires
-    if n == 2:
-        bal_count[0] += 1
-        name = f"u_bal_{material}_{bal_count[0]}"
-        y1 = f"{material}__bal_{bal_count[0]}_1"
-        y2 = f"{material}__bal_{bal_count[0]}_2"
-        bal_entries.append((name, bus_wires[0], bus_wires[1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
-        return [y1, y2]
-
-    current = bus_wires
-    half = n // 2
     s1: list[str] = []
     for i in range(0, n, 2):
-        bal_count[0] += 1
-        name = f"u_bal_{material}_{bal_count[0]}"
-        y1 = f"{material}__bal_{bal_count[0]}_1"
-        y2 = f"{material}__bal_{bal_count[0]}_2"
-        bal_entries.append((name, current[i], current[i + 1], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
-        s1.extend([y1, y2])
-    s2: list[str] = [""] * n
-    for i in range(half):
-        bal_count[0] += 1
-        name = f"u_bal_{material}_{bal_count[0]}"
-        y1 = f"{material}__bal_{bal_count[0]}_1"
-        y2 = f"{material}__bal_{bal_count[0]}_2"
-        bal_entries.append((name, s1[i], s1[i + half], y1, y2))
-        nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
-        s2[i] = y1
-        s2[i + half] = y2
-    return s2
+        if i + 1 < n:
+            bal_count[0] += 1
+            name = f"u_bal_{material}_{bal_count[0]}"
+            y1 = f"{material}__bal_{bal_count[0]}_1"
+            y2 = f"{material}__bal_{bal_count[0]}_2"
+            bal_entries.append((name, bus_wires[i], bus_wires[i + 1], y1, y2))
+            nl.instances.append(Instance(name, BALANCER_CELL, raw_material, 0.0, 0.0, rank=0))
+            s1.extend([y1, y2])
+        else:
+            s1.append(bus_wires[i])
+    return s1
 
 
 def split_net(

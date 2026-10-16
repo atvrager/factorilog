@@ -17,7 +17,6 @@ joins lanes with a splitter.
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -146,25 +145,24 @@ def build_all(
     }
     (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
     ranks_text = netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans)
-    auto_side = 1
-    try:
-        from macro_floorplan import MacroFloorplanner
-
-        clusters = MacroFloorplanner().cluster_netlist(sidecar)
-        auto_side = max(1, math.ceil(math.sqrt(len(clusters))))
-        ranks_text += (
-            f"\n# Auto-calculated square-est chassis grid dimensions\n"
-            f"set AUTO_CHASSIS_GRID_W {auto_side}\n"
-            f"set AUTO_CHASSIS_GRID_H {auto_side}\n"
-            f"set AUTO_NUM_CLUSTERS {len(clusters)}\n"
-        )
-    except Exception:
-        pass
     try:
         from analytical_placer import AnalyticalPlacer
 
-        extra_grids = [(auto_side, auto_side)] if auto_side > 3 else None
-        ranks_text += AnalyticalPlacer().emit_analytical_tcl(
+        placer = AnalyticalPlacer()
+        auto_w, auto_h = placer.compute_auto_chassis_grid(
+            nl,
+            merge_plans=plans,
+            split_plans=split_plans,
+            balancer_plans=balancer_plans,
+        )
+        ranks_text += (
+            f"\n# Auto-calculated square-est chassis grid dimensions\n"
+            f"set AUTO_CHASSIS_GRID_W {auto_w}\n"
+            f"set AUTO_CHASSIS_GRID_H {auto_h}\n"
+            f"set AUTO_NUM_CLUSTERS {auto_w * auto_h}\n"
+        )
+        extra_grids = [(auto_w, auto_h)] if auto_w > 3 or auto_h > 3 else None
+        ranks_text += placer.emit_analytical_tcl(
             nl,
             merge_plans=plans,
             split_plans=split_plans,

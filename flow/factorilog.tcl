@@ -285,6 +285,31 @@ if {[info exists USE_ANALYTICAL_PLACEMENT] && $USE_ANALYTICAL_PLACEMENT == "1" &
     set_io_pin_constraint -direction output -region right:*
     place_pins -hor_layers M1 -ver_layers M2
 
+    set active_pin_coords ""
+    if {$USE_CHASSIS == "1" && $CHASSIS_GRID_W >= 5} {
+        set pin_dict_var "analytical_pins_${CHASSIS_GRID_W}x${CHASSIS_GRID_H}"
+        if {[info exists $pin_dict_var]} {
+            set active_pin_coords [set $pin_dict_var]
+        }
+    }
+    if {$active_pin_coords != ""} {
+        set tech [[ord::get_db] getTech]
+        set m1_layer [$tech findLayer "M1"]
+        dict for {bterm_name pxy} $active_pin_coords {
+            set bterm [$block findBTerm $bterm_name]
+            if {$bterm != "NULL" && $bterm != ""} {
+                set px_dbu [lindex $pxy 0]
+                set py_dbu [lindex $pxy 1]
+                foreach old_bpin [$bterm getBPins] {
+                    odb::dbBPin_destroy $old_bpin
+                }
+                set bpin [odb::dbBPin_create $bterm]
+                $bpin setPlacementStatus "PLACED"
+                odb::dbBox_create $bpin $m1_layer [expr {$px_dbu - 250}] [expr {$py_dbu - 250}] [expr {$px_dbu + 250}] [expr {$py_dbu + 250}]
+            }
+        }
+    }
+
     detailed_placement
     if {[catch {check_placement} problem]} {
         error "factorilog: placement check failed: $problem"

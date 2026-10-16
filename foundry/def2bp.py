@@ -1148,6 +1148,14 @@ def build_entities(
                         queue.append(nxt_id)
 
             all_pole_by_num = {int(p.get("entity_number", 0)): p for p in big_poles + med_poles}
+            for px, py in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
+                p_pt = (round(math.floor(px) + 0.5, 2), round(math.floor(py) + 0.5, 2))
+                occupied_tiles.add(p_pt)
+                for k in (1, 2, 3):
+                    occupied_tiles.add((round(p_pt[0] - k, 2), p_pt[1]))
+                    occupied_tiles.add((round(p_pt[0] + k, 2), p_pt[1]))
+                    occupied_tiles.add((p_pt[0], round(p_pt[1] - k, 2)))
+                    occupied_tiles.add((p_pt[0], round(p_pt[1] + k, 2)))
             unreached_nums = {int(mp.get("entity_number", 0)) for mp in med_poles} - reached
             while unreached_nums:
                 best_pair_poles: tuple[dict[str, Any], dict[str, Any]] | None = None

@@ -77,9 +77,14 @@ def generate_pdn(
         return pole_entities, mst_connections
 
     surface_occupied = set(occupied_positions)
-    surface_occupied.update(pin_tiles)
-    surface_occupied.update(valid_input_pins)
-    surface_occupied.update(valid_output_pins)
+    for px, py in set(pin_tiles) | set(valid_input_pins) | set(valid_output_pins):
+        p_pt = (round(math.floor(px) + 0.5, 2), round(math.floor(py) + 0.5, 2))
+        surface_occupied.add(p_pt)
+        for k in (1, 2, 3):
+            surface_occupied.add((round(p_pt[0] - k, 2), p_pt[1]))
+            surface_occupied.add((round(p_pt[0] + k, 2), p_pt[1]))
+            surface_occupied.add((p_pt[0], round(p_pt[1] - k, 2)))
+            surface_occupied.add((p_pt[0], round(p_pt[1] + k, 2)))
     for ent in entities:
         ep = ent["position"]
         ename = ent.get("name", "")

@@ -89,6 +89,7 @@ class AnalyticalPlacementResult:
     hpwl: float
     rewired_ports: dict[str, dict[str, str]] = field(default_factory=dict)
     matrix_nodes: set[str] = field(default_factory=set)
+    pin_coords: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def _classify_node_type(name: str, macro: str, cell_meta: dict[str, Any] | None = None) -> str:
@@ -350,7 +351,7 @@ class AnalyticalPlacer:
                 cell_meta=cell,
             )
 
-        wire_driver: dict[str, tuple[str, float]] = {}
+        wire_drivers: dict[str, list[tuple[str, float]]] = collections.defaultdict(list)
         wire_sinks: dict[str, list[tuple[str, float]]] = collections.defaultdict(list)
         fluid_set = {_sanitize(f) for f in getattr(nl, "fluids", set())} | set(
             getattr(nl, "fluids", set())
@@ -360,7 +361,7 @@ class AnalyticalPlacer:
         outputs_sanitized = [_sanitize(m) for m in getattr(nl, "outputs", [])]
 
         for inp in inputs_sanitized:
-            wire_driver[inp] = (f"PIN_IN:{inp}", 0.0)
+            wire_drivers[inp].append((f"PIN_IN:{inp}", 0.0))
         for outp in outputs_sanitized:
             wire_sinks[outp].append((f"PIN_OUT:{outp}", 0.0))
 
@@ -372,7 +373,7 @@ class AnalyticalPlacer:
                         nodes[m_name].outputs.append(y_w)
                     wire_sinks[a_w].append((m_name, 0.0))
                     wire_sinks[b_w].append((m_name, 1.0))
-                    wire_driver[y_w] = (m_name, 1.0)
+                    wire_drivers[y_w].append((m_name, 1.0))
 
         if split_plans:
             for plan in split_plans.values():
@@ -381,8 +382,8 @@ class AnalyticalPlacer:
                         nodes[s_name].inputs.append(in_w)
                         nodes[s_name].outputs.extend([y1_w, y2_w])
                     wire_sinks[in_w].append((s_name, 0.5))
-                    wire_driver[y1_w] = (s_name, 0.0)
-                    wire_driver[y2_w] = (s_name, 1.0)
+                    wire_drivers[y1_w].append((s_name, 0.0))
+                    wire_drivers[y2_w].append((s_name, 1.0))
 
         if balancer_plans:
             for b_plan in balancer_plans.values():
@@ -392,8 +393,8 @@ class AnalyticalPlacer:
                         nodes[bal_name].outputs.extend([y1_w, y2_w])
                     wire_sinks[a1_w].append((bal_name, 0.0))
                     wire_sinks[a2_w].append((bal_name, 1.0))
-                    wire_driver[y1_w] = (bal_name, 0.0)
-                    wire_driver[y2_w] = (bal_name, 1.0)
+                    wire_drivers[y1_w].append((bal_name, 0.0))
+                    wire_drivers[y2_w].append((bal_name, 1.0))
 
         for inst in nl.instances:
             node = nodes[inst.name]
@@ -413,7 +414,7 @@ class AnalyticalPlacer:
                 node.inputs.append(mat_w)
                 node.outputs.append(c_out)
                 wire_sinks[mat_w].append((inst.name, 0.5))
-                wire_driver[c_out] = (inst.name, 0.5)
+                wire_drivers[c_out].append((inst.name, 0.5))
                 continue
 
             in_ports = list(cell.get("inputs", []))
@@ -438,25 +439,28 @@ class AnalyticalPlacer:
                     else _sanitize(p)
                 )
                 node.outputs.append(w_name)
-                wire_driver[w_name] = (inst.name, float(off_out + idx))
+                wire_drivers[w_name].append((inst.name, float(off_out + idx)))
 
         edges: list[PlacerEdge] = []
-        for wire, (drv, drv_dy) in wire_driver.items():
+        for wire, drvs in wire_drivers.items():
             base_mat = wire.split("__")[0]
             is_fl = base_mat in fluid_set
-            for snk, snk_dy in wire_sinks.get(wire, []):
-                if drv != snk:
-                    edges.append(
-                        PlacerEdge(
-                            source=drv,
-                            sink=snk,
-                            wire=wire,
-                            weight=1.5 if is_fl else 1.0,
-                            source_dy=drv_dy,
-                            sink_dy=snk_dy,
-                            is_fluid=is_fl,
+            snks = wire_sinks.get(wire, [])
+            scale_w = (1.5 if is_fl else 1.0) / max(1.0, math.sqrt(float(len(drvs))))
+            for drv, drv_dy in drvs:
+                for snk, snk_dy in snks:
+                    if drv != snk:
+                        edges.append(
+                            PlacerEdge(
+                                source=drv,
+                                sink=snk,
+                                wire=wire,
+                                weight=scale_w,
+                                source_dy=drv_dy,
+                                sink_dy=snk_dy,
+                                is_fluid=is_fl,
+                            )
                         )
-                    )
 
         return nodes, edges, inputs_sanitized, outputs_sanitized
 
@@ -745,6 +749,269 @@ class AnalyticalPlacer:
             node.flow_depth = c_idx
             node.col_index = c_idx
 
+    def compute_auto_chassis_grid(
+        self,
+        nl: Any,
+        merge_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
+        split_plans: dict[str, list[tuple[str, str, str, str]]] | None = None,
+        balancer_plans: dict[str, list[tuple[str, str, str, str, str]]] | None = None,
+        core_w: int = 94,
+        core_h: int = 94,
+    ) -> tuple[int, int]:
+        """Compute minimal square city-block grid (W, H) from core area and terminal demand."""
+        nodes, _edges, _ins, _outs = self.build_graph_from_netlist(
+            nl, merge_plans, split_plans, balancer_plans
+        )
+        single_core_capacity = float(max(20, core_w - 10) * max(20, core_h - 14))
+        total_demand = 0.0
+        for nd in nodes.values():
+            area = float((nd.width + nd.pad_w + nd.pad_e) * (nd.height + nd.pad_n + nd.pad_s))
+            if nd.node_type in ("machine", "pump"):
+                total_demand += area + 45.0 * float(len(nd.inputs)) + 40.0 * float(len(nd.outputs))
+            else:
+                total_demand += area * 0.35
+        target_cap_per_block = single_core_capacity * 0.63
+        req_blocks = max(1, math.ceil(total_demand / max(1.0, target_cap_per_block)))
+        side = max(1, math.ceil(math.sqrt(req_blocks)))
+        return side, side
+
+    def _find_tarjan_sccs(
+        self,
+        machine_names: list[str],
+        mach_adj: dict[str, dict[str, float]],
+    ) -> list[list[str]]:
+        """Find strongly connected components in the machine graph using Tarjan's algorithm."""
+        index = 0
+        indices: dict[str, int] = {}
+        lowlink: dict[str, int] = {}
+        stack: list[str] = []
+        on_stack: set[str] = set()
+        sccs: list[list[str]] = []
+
+        def _strongconnect(u: str) -> None:
+            nonlocal index
+            indices[u] = index
+            lowlink[u] = index
+            index += 1
+            stack.append(u)
+            on_stack.add(u)
+
+            for v, w in sorted(mach_adj.get(u, {}).items()):
+                if w <= 0:
+                    continue
+                if v not in indices:
+                    _strongconnect(v)
+                    lowlink[u] = min(lowlink[u], lowlink[v])
+                elif v in on_stack:
+                    lowlink[u] = min(lowlink[u], indices[v])
+
+            if lowlink[u] == indices[u]:
+                scc: list[str] = []
+                while True:
+                    w_node = stack.pop()
+                    on_stack.remove(w_node)
+                    scc.append(w_node)
+                    if w_node == u:
+                        break
+                sccs.append(scc)
+
+        for u in machine_names:
+            if u not in indices:
+                _strongconnect(u)
+        sccs.reverse()
+        return sccs
+
+    def _optimize_2d_block_assignment(
+        self,
+        dp_buckets: list[list[str]],
+        active_blocks: list[tuple[int, int]],
+        nodes: dict[str, PlacerNode],
+        mach_adj: dict[str, dict[str, float]],
+        west_in_weight: dict[str, float],
+        east_out_weight: dict[str, float],
+        reachable_outs: dict[str, set[str]],
+        grid_w: int,
+    ) -> list[tuple[int, int]]:
+        """Assign balanced machine buckets to 2D grid blocks via Harmonic-X + KL/FM swap search."""
+        num_b = len(active_blocks)
+        k_bins = len(dp_buckets)
+        buckets: list[list[str]] = list(dp_buckets) + [[] for _ in range(max(0, num_b - k_bins))]
+
+        b_of_mach: dict[str, int] = {}
+        for i, b_list in enumerate(buckets):
+            for u in b_list:
+                b_of_mach[u] = i
+
+        b_adj: list[list[float]] = [[0.0] * num_b for _ in range(num_b)]
+        for i, b_list in enumerate(buckets):
+            if not b_list:
+                continue
+            inv_len = 2.4 / float(len(b_list))
+            for u in b_list:
+                u_edges = mach_adj.get(u, {})
+                u_tot = sum(u_edges.values())
+                if u_tot <= 0.0:
+                    continue
+                scale_u = inv_len / u_tot
+                for v, w in u_edges.items():
+                    j = b_of_mach.get(v, -1)
+                    if j >= 0 and j != i:
+                        b_adj[i][j] += w * scale_u
+
+        b_west = [
+            max((west_in_weight.get(u, 0.0) for u in b_list), default=0.0) for b_list in buckets
+        ]
+        b_east = [
+            max((east_out_weight.get(u, 0.0) for u in b_list), default=0.0) for b_list in buckets
+        ]
+        max_rank = max((nodes[u].flow_depth for b_list in buckets for u in b_list), default=1)
+        b_avg_rank = [
+            (sum(nodes[u].flow_depth for u in b_list) / float(len(b_list)))
+            if b_list
+            else float(max_rank) * 0.5
+            for b_list in buckets
+        ]
+        b_recipes = [{nodes[u].recipe for u in b_list} for b_list in buckets]
+        b_outs = [
+            set().union(*(reachable_outs.get(u, set()) for u in b_list)) if b_list else set()
+            for b_list in buckets
+        ]
+
+        b_contig: list[list[float]] = [[0.0] * num_b for _ in range(num_b)]
+        for i in range(k_bins - 1):
+            if b_recipes[i] & b_recipes[i + 1]:
+                b_contig[i][i + 1] = b_contig[i + 1][i] = 1.4
+            elif len(b_outs[i]) == 1 and b_outs[i] == b_outs[i + 1]:
+                b_contig[i][i + 1] = b_contig[i + 1][i] = 1.0
+
+        # Step 1: 1D Harmonic X-coordinate relaxation
+        max_x = float(max(1, grid_w - 1))
+        x_val = [
+            0.0
+            if (b_west[i] > 0 and b_east[i] == 0 and b_avg_rank[i] <= 3.0)
+            else max_x
+            if b_east[i] > 0
+            else (b_avg_rank[i] / float(max(1, max_rank))) * max_x
+            if buckets[i]
+            else max_x * 0.55
+            for i in range(num_b)
+        ]
+        for _it in range(40):
+            for i in range(k_bins):
+                num_x = (
+                    b_west[i] * 2.2 * 0.0
+                    + b_east[i] * 4.5 * max_x
+                    + 0.8 * ((b_avg_rank[i] / float(max(1, max_rank))) * max_x)
+                )
+                den_x = b_west[i] * 2.2 + b_east[i] * 4.5 + 0.8
+                for j in range(k_bins):
+                    if b_adj[i][j] > 0:
+                        num_x += b_adj[i][j] * max(0.0, x_val[j] - 0.6)
+                        den_x += b_adj[i][j]
+                    if b_adj[j][i] > 0:
+                        num_x += b_adj[j][i] * min(max_x, x_val[j] + 0.6)
+                        den_x += b_adj[j][i]
+                if den_x > 0:
+                    x_val[i] = max(0.0, min(max_x, num_x / den_x))
+
+        # Step 2: Initial column-major bottom-to-top assignment (no snake inversion)
+        sorted_b = sorted(
+            range(num_b),
+            key=lambda i: (
+                1 if b_east[i] > 0 else 0,
+                round(x_val[i], 3),
+                -round(b_west[i], 2),
+                round(b_avg_rank[i], 2),
+                0 if buckets[i] else 1,
+                i,
+            ),
+        )
+        grid_blocks_col_order = sorted(active_blocks, key=lambda b: (b[0], b[1]))
+        perm: list[tuple[int, int]] = [(0, 0)] * num_b
+        for pos_idx, b_idx in enumerate(sorted_b):
+            perm[b_idx] = grid_blocks_col_order[pos_idx]
+
+        # Step 3: 2D KL/FM Pairwise Swap Local Search
+        def _anchor_cost(i: int, blk: tuple[int, int]) -> float:
+            bx, by = blk
+            if not buckets[i]:
+                edge_pen = 10.0 if bx in (0, grid_w - 1) else 0.0
+                return edge_pen + 0.6 * float(by) + 0.4 * abs(float(bx) - max_x * 0.5)
+            return (
+                b_west[i] * 1.8 * float(bx)
+                + b_east[i] * 4.5 * float((grid_w - 1) - bx)
+                + 0.45 * abs(float(bx) - x_val[i])
+            )
+
+        def _pair_interaction(
+            i: int, blk_i: tuple[int, int], j: int, blk_j: tuple[int, int]
+        ) -> float:
+            bx_i, by_i = blk_i
+            bx_j, by_j = blk_j
+            cost = 0.0
+            w_ij = b_adj[i][j]
+            if w_ij > 0:
+                dx = abs(bx_j - bx_i)
+                back_pen = 2.8 * float(bx_i - bx_j) if bx_i > bx_j else 0.0
+                same_col_pen = (
+                    0.4 if (bx_i == bx_j and b_avg_rank[i] + 0.5 < b_avg_rank[j]) else 0.0
+                )
+                dy = 1.45 * abs(by_j - by_i)
+                cost += w_ij * (float(dx) + back_pen + same_col_pen + dy)
+            w_ji = b_adj[j][i]
+            if w_ji > 0:
+                dx = abs(bx_i - bx_j)
+                back_pen = 2.8 * float(bx_j - bx_i) if bx_j > bx_i else 0.0
+                same_col_pen = (
+                    0.4 if (bx_i == bx_j and b_avg_rank[j] + 0.5 < b_avg_rank[i]) else 0.0
+                )
+                dy = 1.45 * abs(by_i - by_j)
+                cost += w_ji * (float(dx) + back_pen + same_col_pen + dy)
+            w_c = b_contig[i][j]
+            if w_c > 0:
+                cost += w_c * float(abs(bx_i - bx_j) + abs(by_i - by_j))
+            return cost
+
+        def _node_contrib(i: int, blk_i: tuple[int, int], cur_perm: list[tuple[int, int]]) -> float:
+            c = _anchor_cost(i, blk_i)
+            for k in range(num_b):
+                if k != i:
+                    c += _pair_interaction(i, blk_i, k, cur_perm[k])
+            return c
+
+        for _pass in range(num_b * 3):
+            best_delta = -1e-4
+            best_pair: tuple[int, int] | None = None
+            for i in range(num_b):
+                blk_i = perm[i]
+                base_i = _node_contrib(i, blk_i, perm)
+                for j in range(i + 1, num_b):
+                    if not buckets[i] and not buckets[j]:
+                        continue
+                    blk_j = perm[j]
+                    old_c = (
+                        base_i
+                        + _node_contrib(j, blk_j, perm)
+                        - _pair_interaction(i, blk_i, j, blk_j)
+                    )
+                    perm[i], perm[j] = blk_j, blk_i
+                    new_c = (
+                        _node_contrib(i, blk_j, perm)
+                        + _node_contrib(j, blk_i, perm)
+                        - _pair_interaction(i, blk_j, j, blk_i)
+                    )
+                    perm[i], perm[j] = blk_i, blk_j
+                    delta = new_c - old_c
+                    if delta < best_delta:
+                        best_delta = delta
+                        best_pair = (i, j)
+            if best_pair is None:
+                break
+            si, sj = best_pair
+            perm[si], perm[sj] = perm[sj], perm[si]
+
+        return perm[:k_bins]
+
     def _partition_into_blocks(
         self,
         nodes: dict[str, PlacerNode],
@@ -827,17 +1094,72 @@ class AnalyticalPlacer:
                 cur_area += u_area
             return dict(block_bins)
 
-        # Phase 1: Partition production machines and pumps by DAG domain
+        # Phase 1: Partition production machines and pumps by cycle-aware DAG domain
         fluid_machines: set[str] = set()
         fwd_adj: dict[str, list[str]] = collections.defaultdict(list)
+        rev_adj: dict[str, list[str]] = collections.defaultdict(list)
         if edges:
             for e in edges:
                 fwd_adj[e.source].append(e.sink)
+                rev_adj[e.sink].append(e.source)
                 if e.is_fluid:
                     if e.source in nodes and nodes[e.source].node_type in ("machine", "pump"):
                         fluid_machines.add(e.source)
                     if e.sink in nodes and nodes[e.sink].node_type in ("machine", "pump"):
                         fluid_machines.add(e.sink)
+
+        machine_set = set(machine_names)
+        mach_adj: dict[str, dict[str, float]] = collections.defaultdict(
+            lambda: collections.defaultdict(float)
+        )
+        west_in_weight: dict[str, float] = collections.defaultdict(float)
+        east_out_weight: dict[str, float] = collections.defaultdict(float)
+
+        for u in machine_names:
+            down_machs: list[str] = []
+            seen_m: set[str] = {u}
+            stack_m = list(fwd_adj.get(u, []))
+            while stack_m:
+                cur = stack_m.pop()
+                if cur in seen_m:
+                    continue
+                seen_m.add(cur)
+                if cur.startswith("PIN_OUT:"):
+                    east_out_weight[u] += 2.5
+                elif cur in machine_set:
+                    down_machs.append(cur)
+                elif cur in nodes and nodes[cur].node_type in ("split", "merge", "balancer"):
+                    stack_m.extend(fwd_adj.get(cur, []))
+            if down_machs:
+                wt = 1.0 / max(1.0, math.sqrt(float(len(down_machs))))
+                for v in down_machs:
+                    mach_adj[u][v] += wt
+
+            seen_up: set[str] = {u}
+            stack_up = list(rev_adj.get(u, []))
+            while stack_up:
+                cur = stack_up.pop()
+                if cur in seen_up:
+                    continue
+                seen_up.add(cur)
+                if cur.startswith("PIN_IN:"):
+                    west_in_weight[u] += 6.0 if u in fluid_machines else 2.0
+                elif (
+                    cur not in machine_set
+                    and cur in nodes
+                    and nodes[cur].node_type
+                    in (
+                        "split",
+                        "merge",
+                        "balancer",
+                    )
+                ):
+                    stack_up.extend(rev_adj.get(cur, []))
+
+        # Condense strongly connected components (Tarjan's SCC) for feedback loops
+        sccs = self._find_tarjan_sccs(machine_names, mach_adj)
+        has_cycles = any(len(scc) > 1 for scc in sccs)
+        cyclic_nodes: set[str] = {u for scc in sccs if len(scc) > 1 for u in scc}
 
         # Find reachable PIN_OUT targets for each node to identify dedicated science domains
         reachable_outs: dict[str, set[str]] = {}
@@ -856,11 +1178,15 @@ class AnalyticalPlacer:
                     stack_u.extend(fwd_adj.get(cur, []))
             reachable_outs[u] = outs
 
-        solid_machine_names = [u for u in machine_names if u not in fluid_machines]
-        fluid_machine_names = [u for u in machine_names if u in fluid_machines]
+        acyclic_machines = [u for u in machine_names if u not in cyclic_nodes]
+        solid_machine_names = [u for u in acyclic_machines if u not in fluid_machines]
+        fluid_machine_names = [u for u in acyclic_machines if u in fluid_machines]
 
         furnace_names = [
-            u for u in solid_machine_names if "furnace" in nodes[u].macro or nodes[u].rank <= 1
+            u
+            for u in solid_machine_names
+            if ("furnace" in nodes[u].macro and not nodes[u].macro.startswith("assembling_machine"))
+            or nodes[u].rank <= 1
         ]
         furnace_set = set(furnace_names)
         non_furnace_solid = [u for u in solid_machine_names if u not in furnace_set]
@@ -890,11 +1216,30 @@ class AnalyticalPlacer:
         max_grp_len = 8
 
         def _chunk_by_recipe(mlist: list[str], chunk_sz: int = max_grp_len) -> list[list[str]]:
+            if grid_w >= 5 or has_cycles:
+                by_rec_only: dict[str, list[str]] = collections.defaultdict(list)
+                for name in mlist:
+                    nd = nodes[name]
+                    by_rec_only[_sanitize(nd.recipe) or name].append(name)
+                res_grps: list[list[str]] = []
+                for rec_k in sorted(
+                    by_rec_only.keys(),
+                    key=lambda rk: (min(nodes[u].rank for u in by_rec_only[rk]), rk),
+                ):
+                    rg = by_rec_only[rec_k]
+                    if len(rg) <= chunk_sz:
+                        res_grps.append(rg)
+                    else:
+                        n_chunks = max(1, math.ceil(len(rg) / float(chunk_sz)))
+                        step = math.ceil(len(rg) / float(n_chunks))
+                        res_grps.extend(rg[i : i + step] for i in range(0, len(rg), step))
+                return res_grps
+
             by_rec: dict[tuple[int, str], list[str]] = collections.defaultdict(list)
             for name in mlist:
                 nd = nodes[name]
                 by_rec[(nd.rank, _sanitize(nd.recipe) or name)].append(name)
-            res_grps: list[list[str]] = []
+            res_grps = []
             for k in sorted(by_rec.keys(), key=lambda key: (key[0], key[1])):
                 rg = by_rec[k]
                 if len(rg) <= chunk_sz:
@@ -905,6 +1250,20 @@ class AnalyticalPlacer:
 
         groups: list[list[str]] = []
         atomic_domain_first_nodes: set[str] = set()
+
+        # 0. Cyclic feedback SCC groups (if any exist in recipe graph)
+        for scc in sccs:
+            if len(scc) > 1:
+                sorted_scc = _sort_mach_list(scc)
+                scc_area = sum(_node_area(nodes[u]) for u in sorted_scc)
+                if scc_area <= single_core_capacity * 0.55:
+                    groups.append(sorted_scc)
+                    atomic_domain_first_nodes.add(sorted_scc[0])
+                else:
+                    groups.extend(
+                        sorted_scc[i : i + max_grp_len]
+                        for i in range(0, len(sorted_scc), max_grp_len)
+                    )
 
         # 1. Smelting domain groups
         groups.extend(_chunk_by_recipe(furnace_names, max_grp_len))
@@ -1009,10 +1368,34 @@ class AnalyticalPlacer:
                 curr_i = prev_i
             seg_bounds.reverse()
 
-            for b_idx, (g_start, g_end) in enumerate(seg_bounds):
-                blk = active_blocks[b_idx]
-                for grp in groups[g_start:g_end]:
-                    for u in grp:
+            dp_buckets = [
+                [u for grp in groups[g_start:g_end] for u in grp] for g_start, g_end in seg_bounds
+            ]
+
+            if grid_w >= 5 or has_cycles:
+                bucket_to_blk = self._optimize_2d_block_assignment(
+                    dp_buckets=dp_buckets,
+                    active_blocks=active_blocks,
+                    nodes=nodes,
+                    mach_adj=mach_adj,
+                    west_in_weight=west_in_weight,
+                    east_out_weight=east_out_weight,
+                    reachable_outs=reachable_outs,
+                    grid_w=grid_w,
+                )
+                for b_idx, bucket in enumerate(dp_buckets):
+                    blk = bucket_to_blk[b_idx]
+                    for u in bucket:
+                        nodes[u].assigned_block = blk
+                        block_bins[blk].append(u)
+                        block_area[blk] += _node_area(nodes[u])
+                        assigned.add(u)
+                # Use South-to-North, West-to-East row-major ordering for tree leaf partitioning
+                blk_to_seq_idx = {b: b[1] * grid_w + b[0] for b in active_blocks}
+            else:
+                for b_idx, bucket in enumerate(dp_buckets):
+                    blk = active_blocks[b_idx]
+                    for u in bucket:
                         nodes[u].assigned_block = blk
                         block_bins[blk].append(u)
                         block_area[blk] += _node_area(nodes[u])
@@ -1144,8 +1527,12 @@ class AnalyticalPlacer:
                 best_blk = min(
                     cand_blks,
                     key=lambda b: (
-                        1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0,
-                        (bay_counts[b] // 6) if is_mat else 0,
+                        (bay_counts[b] // 6)
+                        if (is_mat and grid_w >= 5)
+                        else (1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0),
+                        (1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0)
+                        if grid_w >= 5
+                        else ((bay_counts[b] // 6) if is_mat else 0),
                         0 if (not is_mat and counts[b] > len(drv_blks) // 2) else 1,
                         round(
                             sum(
@@ -1191,6 +1578,7 @@ class AnalyticalPlacer:
             )
             s_name = rem_splits.pop(ready_idx)
             is_mat = nodes[s_name].is_matrix_node
+            is_bal = nodes[s_name].node_type == "balancer"
             snk_blks = [
                 nodes[v].assigned_block
                 for v in out_sinks.get(s_name, [])
@@ -1216,15 +1604,25 @@ class AnalyticalPlacer:
                     else list(dict.fromkeys(snk_blks + up_blks)) or list(active_blocks)
                 )
                 ref_pts = snk_pts or up_pts or [(active_blocks[0][0], float(active_blocks[0][1]))]
-                in_port_cnt = (
-                    2.0 if nodes[s_name].node_type == "balancer" else (0.45 if is_mat else 1.0)
-                )
+                in_port_cnt = 2.0 if is_bal else (0.45 if is_mat else 1.0)
                 up_wt = in_port_cnt / max(1, len(up_pts))
                 best_blk = min(
                     cand_blks,
                     key=lambda b: (
-                        1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0,
-                        (bay_counts[b] // 6) if is_mat else 0,
+                        (bay_counts[b] // 6)
+                        if (is_mat and grid_w >= 5)
+                        else (1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0),
+                        1
+                        if (
+                            grid_w >= 5
+                            and is_bal
+                            and any(nodes[x].node_type == "balancer" for x in block_bins[b])
+                        )
+                        else 0,
+                        b[0] if (grid_w >= 5 and is_bal and s_name in pin_in_nodes) else 0,
+                        (1 if (is_mat and not is_bal and grid_h >= 2 and b[1] == 0) else 0)
+                        if grid_w >= 5
+                        else ((bay_counts[b] // 6) if is_mat else 0),
                         0 if (not is_mat and counts[b] > len(snk_blks) // 2) else 1,
                         round(
                             sum(
@@ -1251,6 +1649,67 @@ class AnalyticalPlacer:
             _assign_to_best_block(s_name, best_blk)
             if is_mat:
                 bay_counts[best_blk] += 1
+
+        # Phase 3b: Eliminate multi-block U-turns for matrix splitters by placing them in the intermediate bay between vertically separated sinks
+        if grid_w >= 5 and len(active_blocks) > 1:
+            mat_splits = [
+                name
+                for name, nd in nodes.items()
+                if nd.is_matrix_node and nd.node_type == "split" and name in assigned
+            ]
+            mat_splits.sort(key=lambda name: (nodes[name].flow_depth, _natural_key(name)))
+            for s_name in mat_splits:
+                cur_blk = nodes[s_name].assigned_block
+                drv_pts = [
+                    _blk_pt(u)
+                    for u in in_drivers.get(s_name, [])
+                    if u in assigned and nodes[u].assigned_block in block_area
+                ]
+                snk_pts = [
+                    _blk_pt(v)
+                    for v in out_sinks.get(s_name, [])
+                    if v in assigned and nodes[v].assigned_block in block_area
+                ]
+                if not drv_pts or len(snk_pts) < 2:
+                    continue
+                min_sy = min(pt[1] for pt in snk_pts)
+                max_sy = max(pt[1] for pt in snk_pts)
+                if max_sy - min_sy < 2.0:
+                    continue
+                all_nbr_pts = drv_pts + snk_pts
+
+                def _mat_wl(
+                    b: tuple[int, int], _pts: list[tuple[int, float]] = all_nbr_pts
+                ) -> float:
+                    by_f = float(b[1]) - 0.5
+                    return sum(abs(b[0] - pt[0]) + abs(by_f - pt[1]) for pt in _pts)
+
+                cur_wl = _mat_wl(cur_blk)
+                between_cands = [
+                    b
+                    for b in active_blocks
+                    if min_sy < (float(b[1]) - 0.5) < max_sy
+                    and (bay_counts[b] < 6 if b != cur_blk else True)
+                ]
+                if not between_cands:
+                    continue
+                best_cand = min(
+                    between_cands,
+                    key=lambda b: (
+                        round(_mat_wl(b), 3),
+                        bay_counts[b] if b != cur_blk else max(0, bay_counts[b] - 1),
+                        blk_to_seq_idx[b],
+                    ),
+                )
+                if best_cand != cur_blk and _mat_wl(best_cand) <= cur_wl - 1.0:
+                    u_area = _node_area(nodes[s_name])
+                    block_bins[cur_blk].remove(s_name)
+                    block_area[cur_blk] -= u_area
+                    bay_counts[cur_blk] -= 1
+                    nodes[s_name].assigned_block = best_cand
+                    block_bins[best_cand].append(s_name)
+                    block_area[best_cand] += u_area
+                    bay_counts[best_cand] += 1
 
         # Phase 4: Assign remaining telemetry combinators and displays to connected driver or co-sink block
         rem_names = [name for name in nodes if name not in assigned]
@@ -2320,24 +2779,39 @@ class AnalyticalPlacer:
 
                 if mat_nodes:
                     mat_nodes.sort(key=lambda nd: (nd.flow_depth, _natural_key(nd.name)))
-                    bay_slots = (
-                        (18, 45, 72)
-                        if len(mat_nodes) <= 3
-                        else (16, 36, 56, 76)
-                        if len(mat_nodes) == 4
-                        else (14, 28, 42, 56, 70, 84)
-                    )
-                    for m_idx, nd in enumerate(mat_nodes):
-                        cur_mx = bx * chassis_pitch + bay_slots[m_idx % len(bay_slots)]
-                        bay_y = by * chassis_pitch + (6 if (m_idx % 2 == 0) else 11)
-                        nd.x = cur_mx
-                        nd.y = bay_y
-                        nd.cont_x = float(cur_mx)
-                        nd.cont_y = float(bay_y)
+                    if len(mat_nodes) <= 6:
+                        bay_slots = (
+                            (18, 45, 72)
+                            if len(mat_nodes) <= 3
+                            else (16, 36, 56, 76)
+                            if len(mat_nodes) == 4
+                            else (14, 28, 42, 56, 70, 84)
+                        )
+                        for m_idx, nd in enumerate(mat_nodes):
+                            cur_mx = bx * chassis_pitch + bay_slots[m_idx % len(bay_slots)]
+                            bay_y = by * chassis_pitch + (6 if (m_idx % 2 == 0) else 11)
+                            nd.x = cur_mx
+                            nd.y = bay_y
+                            nd.cont_x = float(cur_mx)
+                            nd.cont_y = float(bay_y)
+                    else:
+                        bay_slots = (12, 24, 36, 48, 60, 72, 84)
+                        for m_idx, nd in enumerate(mat_nodes):
+                            row_grp = m_idx // 7
+                            slot_idx = m_idx % 7
+                            cur_mx = bx * chassis_pitch + bay_slots[slot_idx] + (row_grp % 2) * 5
+                            bay_y = by * chassis_pitch + 5 + row_grp * 8 + (slot_idx % 2) * 3
+                            nd.x = cur_mx
+                            nd.y = bay_y
+                            nd.cont_x = float(cur_mx)
+                            nd.cont_y = float(bay_y)
 
                 if core_nodes:
+                    extra_bay_y = max(0, (len(mat_nodes) - 1) // 7) * 8 if len(mat_nodes) > 6 else 0
                     c_min_x = bx * chassis_pitch + margin_x
-                    c_min_y = by * chassis_pitch + margin_y + (14 if gw * gh > 1 else 0)
+                    c_min_y = (
+                        by * chassis_pitch + margin_y + (14 if gw * gh > 1 else 0) + extra_bay_y
+                    )
                     c_max_x = bx * chassis_pitch + margin_x + chassis_core_w
                     c_max_y = by * chassis_pitch + margin_y + chassis_core_h
                     local_cols = sorted({nd.flow_depth for nd in core_nodes})
@@ -2436,6 +2910,15 @@ class AnalyticalPlacer:
         blk_map = {name: nd.assigned_block for name, nd in nodes.items()}
         mat_set = {name for name, nd in nodes.items() if nd.is_matrix_node}
         rewired = dict(getattr(self, "_last_rewired_ports", {}))
+        pin_coords = self._compute_boundary_pin_coords(
+            nodes,
+            edges,
+            die_w=die_w,
+            die_h=die_h,
+            use_chassis=use_chassis,
+            grid_h=gh,
+            chassis_pitch=chassis_pitch,
+        )
         hpwl = self._compute_graph_hpwl(nodes, edges, die_w)
 
         return AnalyticalPlacementResult(
@@ -2450,7 +2933,131 @@ class AnalyticalPlacer:
             hpwl=hpwl,
             rewired_ports=rewired,
             matrix_nodes=mat_set,
+            pin_coords=pin_coords,
         )
+
+    def _compute_boundary_pin_coords(
+        self,
+        nodes: dict[str, PlacerNode],
+        edges: list[PlacerEdge],
+        die_w: int,
+        die_h: int,
+        use_chassis: bool = False,
+        grid_h: int = 1,
+        chassis_pitch: int = 100,
+        dbu: int = 1000,
+    ) -> dict[str, tuple[int, int]]:
+        """Compute PAV-spread boundary pin DBU coordinates aligned with connected cells."""
+        in_targets: dict[str, list[tuple[float, float, float, str]]] = collections.defaultdict(list)
+        out_targets: dict[str, list[tuple[float, float, float, str]]] = collections.defaultdict(
+            list
+        )
+        in_sink_nodes: dict[str, list[PlacerNode]] = collections.defaultdict(list)
+        for e in edges:
+            if e.source.startswith("PIN_IN:") and e.sink in nodes:
+                pname = e.source[len("PIN_IN:") :]
+                v = nodes[e.sink]
+                in_sink_nodes[pname].append(v)
+                in_targets[pname].append(
+                    (float(v.y) + float(e.sink_dy), float(v.y), float(v.x), v.name)
+                )
+            elif e.sink.startswith("PIN_OUT:") and e.source in nodes:
+                pname = e.sink[len("PIN_OUT:") :]
+                u = nodes[e.source]
+                out_targets[pname].append(
+                    (float(u.y) + float(e.source_dy), float(u.y), float(u.x), u.name)
+                )
+
+        pin_coords: dict[str, tuple[int, int]] = {}
+        for target_map, x_dbu in ((in_targets, 250), (out_targets, int(die_w * dbu - 250))):
+            if not target_map:
+                continue
+            items = [
+                (
+                    sum(t[0] for t in ts) / float(len(ts)),
+                    sum(t[1] for t in ts) / float(len(ts)),
+                    sum(t[2] for t in ts) / float(len(ts)),
+                    ts[0][3],
+                    pname,
+                )
+                for pname, ts in target_map.items()
+                if ts
+            ]
+            items.sort(
+                key=lambda item: (
+                    round(item[1] + 0.005 * item[2], 3),
+                    item[3],
+                    round(item[0], 2),
+                    _natural_key(item[4]),
+                )
+            )
+            n_pins = len(items)
+            min_gap = max(4, min(10, (die_h - 24) // max(2, n_pins * 2)))
+            gaps = [
+                3 if items[i][3] == items[i + 1][3] else min_gap for i in range(max(0, n_pins - 1))
+            ]
+            y_vals = _solve_1d_pav(
+                [item[0] for item in items],
+                heights=[1] * n_pins,
+                gaps=gaps,
+                y_lo=6,
+                y_hi=max(14, die_h - 6),
+            )
+            if use_chassis and grid_h > 1:
+                for idx in range(n_pins):
+                    yv = y_vals[idx]
+                    k = round(float(yv) / float(chassis_pitch))
+                    if 1 <= k < grid_h and abs(yv - k * chassis_pitch) <= 5:
+                        if items[idx][1] >= float(k * chassis_pitch):
+                            y_vals[idx] = k * chassis_pitch + 6
+                            for j in range(idx + 1, n_pins):
+                                req = y_vals[j - 1] + gaps[j - 1] + 1
+                                if y_vals[j] < req:
+                                    y_vals[j] = req
+                        else:
+                            y_vals[idx] = k * chassis_pitch - 6
+                            for j in range(idx - 1, -1, -1):
+                                req = y_vals[j + 1] - gaps[j] - 1
+                                if y_vals[j] > req:
+                                    y_vals[j] = req
+                if target_map is in_targets:
+                    for idx, item in enumerate(items):
+                        pname = item[4]
+                        phys_sinks = [
+                            v
+                            for v in in_sink_nodes.get(pname, [])
+                            if v.node_type not in ("combinator", "display")
+                        ]
+                        if phys_sinks and all(
+                            not v.is_matrix_node and v.assigned_block[0] == 0 for v in phys_sinks
+                        ):
+                            by_s = min(v.assigned_block[1] for v in phys_sinks)
+                            if by_s * chassis_pitch <= y_vals[idx] < (by_s + 1) * chassis_pitch:
+                                prefer_south = by_s + 1 < grid_h and (
+                                    by_s == 0
+                                    or y_vals[idx] >= by_s * chassis_pitch + chassis_pitch // 2
+                                )
+                                if prefer_south:
+                                    seg_lo = (by_s + 1) * chassis_pitch + 6
+                                    seg_hi = (by_s + 2) * chassis_pitch - 6
+                                    cand_range = range(seg_lo, seg_hi + 1)
+                                elif by_s > 0:
+                                    seg_lo = (by_s - 1) * chassis_pitch + 6
+                                    seg_hi = by_s * chassis_pitch - 6
+                                    cand_range = range(seg_hi, seg_lo - 1, -1)
+                                else:
+                                    cand_range = range(0)
+                                for cand_y in cand_range:
+                                    if all(
+                                        abs(cand_y - y_vals[j]) >= 4
+                                        for j in range(n_pins)
+                                        if j != idx
+                                    ):
+                                        y_vals[idx] = cand_y
+                                        break
+            for item, yv in zip(items, y_vals, strict=False):
+                pin_coords[item[4]] = (x_dbu, int(yv) * dbu + 500)
+        return pin_coords
 
     def _compute_graph_hpwl(
         self,
@@ -2514,6 +3121,11 @@ class AnalyticalPlacer:
         for name in sorted(single_res.coords.keys(), key=_natural_key):
             ix, iy = single_res.coords[name]
             lines.append(f"dict set analytical_coords {name} [list {ix} {iy}]")
+        if single_res.pin_coords:
+            lines.append("set analytical_pins [dict create]")
+            for pname in sorted(single_res.pin_coords.keys(), key=_natural_key):
+                px, py = single_res.pin_coords[pname]
+                lines.append(f"dict set analytical_pins {pname} [list {px} {py}]")
 
         grids = [(1, 1), (2, 2), (3, 3)]
         if len(getattr(nl, "instances", [])) > 150:
@@ -2545,6 +3157,12 @@ class AnalyticalPlacer:
                     pmap = ch_res.rewired_ports[iname]
                     flat_kv = " ".join(f"{k} {v}" for k, v in pmap.items())
                     lines.append(f"dict set {rw_name} {iname} [list {flat_kv}]")
+            if ch_res.pin_coords:
+                pin_dict_name = f"analytical_pins_{gw}x{gh}"
+                lines.append(f"set {pin_dict_name} [dict create]")
+                for pname in sorted(ch_res.pin_coords.keys(), key=_natural_key):
+                    px, py = ch_res.pin_coords[pname]
+                    lines.append(f"dict set {pin_dict_name} {pname} [list {px} {py}]")
 
         return "\n".join(lines) + "\n"
 

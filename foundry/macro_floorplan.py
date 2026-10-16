@@ -1128,7 +1128,11 @@ class MacroFloorplanner:
             rim_pen = 0.0
             if grid_w * grid_h > 1:
                 if e == "W" and bx == 0:
-                    rim_pen = -200.0 if (tx <= 2 and by * 100 <= ty <= by * 100 + 99) else 180.0
+                    rim_pen = (
+                        -200.0
+                        if (tx <= 2 and max(0, by - 1) * 100 <= ty <= (by + 1) * 100 + 99)
+                        else 180.0
+                    )
                 elif e == "E" and bx == grid_w - 1:
                     if tx >= grid_w * 100 - 3 and by * 100 <= ty <= by * 100 + 99:
                         rim_pen = -200.0
@@ -1207,9 +1211,14 @@ class MacroFloorplanner:
                 edge_key = (bx, by, edge)
                 used_here = used_edge_coords.get(edge_key, [])
                 pin_here = pin_reserved_coords.get(edge_key, [])
+                eff_spacing = (
+                    4
+                    if (spacing == 3 and tier != "pipe" and bx == grid_w - 1 and grid_w >= 5)
+                    else spacing
+                )
 
                 for c_val in candidates:
-                    if any(abs(c_val - uc) < spacing for uc, _ in used_here):
+                    if any(abs(c_val - uc) < eff_spacing for uc, _ in used_here):
                         continue
                     if any(
                         abs(c_val - pc) < 2 and p_pos not in (internal_pt, target_pt)
@@ -1715,7 +1724,12 @@ class MacroFloorplanner:
             hwy_nodes: list[tuple[tuple[int, int], int | None, int | None]] = list(pin_terms)
             sorted_blks = sorted(blk_terms.keys())
             first_blk: tuple[int, int] | None = sorted_blks[0] if sorted_blks else None
-            used_fluid_segs: set[tuple[str, int, int]] = set()
+            used_fluid_segs: set[tuple[str, int, int]] = {
+                seg
+                for p in pin_terms
+                if (seg := self._street_segment_of_coord(p[0], grid_w, grid_h, bay_blocks))
+                is not None
+            }
 
             for blk in sorted_blks:
                 t_list = blk_terms[blk]
@@ -1731,12 +1745,22 @@ class MacroFloorplanner:
                 else:
                     target_pt = (blk[0] * 100 + 50, blk[1] * 100 + 50)
 
-                rep_t = min(
-                    t_list,
-                    key=lambda t_item: (
-                        abs(t_item[0][0] - target_pt[0]) + abs(t_item[0][1] - target_pt[1])
-                    ),
-                )
+                if pin_terms and len(blk_terms) == 1:
+                    cx_t = round(sum(t_item[0][0] for t_item in t_list) / len(t_list))
+                    cy_t = round(sum(t_item[0][1] for t_item in t_list) / len(t_list))
+                    rep_t = min(
+                        t_list,
+                        key=lambda t_item: abs(t_item[0][0] - cx_t) + abs(t_item[0][1] - cy_t),
+                    )
+                    pref_c: int | None = cy_t
+                else:
+                    rep_t = min(
+                        t_list,
+                        key=lambda t_item: (
+                            abs(t_item[0][0] - target_pt[0]) + abs(t_item[0][1] - target_pt[1])
+                        ),
+                    )
+                    pref_c = None
                 f_forbid = {
                     e
                     for e in ("N", "S", "E", "W")
@@ -1753,6 +1777,7 @@ class MacroFloorplanner:
                     pin_reserved_coords=pin_reserved_coords,
                     all_terminals=all_terminals,
                     forbidden_edges=f_forbid,
+                    preferred_c=pref_c,
                     has_north_bay=(blk in bay_blocks),
                     has_south_bay_neighbor=((blk[0], blk[1] + 1) in bay_blocks),
                     tier="pipe",

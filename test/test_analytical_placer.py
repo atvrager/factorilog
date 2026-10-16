@@ -319,6 +319,101 @@ class TestAnalyticalPlacer(unittest.TestCase):
             self.assertEqual(check_collisions(entities), [])
             self.assertEqual(check_underground_pairing(entities), [])
 
+    def test_compute_auto_chassis_grid_dimensions(self) -> None:
+        """Verify auto-sizing computes minimal square city-block grids for 1 to 5 sciences."""
+        expected = [
+            ({"automation-science-pack": 60.0}, (1, 1)),
+            ({"automation-science-pack": 60.0, "logistic-science-pack": 60.0}, (2, 2)),
+            (
+                {
+                    "automation-science-pack": 60.0,
+                    "logistic-science-pack": 60.0,
+                    "military-science-pack": 60.0,
+                },
+                (3, 3),
+            ),
+            (
+                {
+                    "automation-science-pack": 60.0,
+                    "logistic-science-pack": 60.0,
+                    "military-science-pack": 60.0,
+                    "chemical-science-pack": 60.0,
+                },
+                (4, 4),
+            ),
+            (
+                {
+                    "automation-science-pack": 60.0,
+                    "logistic-science-pack": 60.0,
+                    "military-science-pack": 60.0,
+                    "chemical-science-pack": 60.0,
+                    "production-science-pack": 60.0,
+                },
+                (6, 6),
+            ),
+        ]
+        for demand, exp_grid in expected:
+            nl = netlist.build(self.data, demand, self.allowed)
+            mp = netlist.merge_plans_of(nl)
+            sp = netlist.split_plans_of(nl, synthesize_trees=True)
+            bp = netlist.balancer_plans_of(nl)
+            self.assertEqual(
+                self.placer.compute_auto_chassis_grid(nl, mp, sp, bp),
+                exp_grid,
+            )
+
+    def test_tarjan_scc_cycle_condensation(self) -> None:
+        """Verify Tarjan's SCC condenses cyclic feedback loops into a single atomic block."""
+        mach_names = ["u_feed", "u_loop_a", "u_loop_b", "u_loop_c", "u_product"]
+        mach_adj = {
+            "u_feed": {"u_loop_a": 1.0},
+            "u_loop_a": {"u_loop_b": 1.0},
+            "u_loop_b": {"u_loop_c": 1.0, "u_product": 0.5},
+            "u_loop_c": {"u_loop_a": 1.0},
+            "u_product": {},
+        }
+        sccs = self.placer._find_tarjan_sccs(mach_names, mach_adj)
+        loop_sccs = [set(scc) for scc in sccs if len(scc) > 1]
+        self.assertEqual(loop_sccs, [{"u_loop_a", "u_loop_b", "u_loop_c"}])
+
+    def test_boundary_pin_spreading_and_2d_block_assignment(self) -> None:
+        """Verify 6x6 2D block assignment and PAV pin spreading on 5-science factory."""
+        demand = {
+            "automation-science-pack": 60.0,
+            "logistic-science-pack": 60.0,
+            "military-science-pack": 60.0,
+            "chemical-science-pack": 60.0,
+            "production-science-pack": 60.0,
+        }
+        nl = netlist.build(self.data, demand, self.allowed)
+        mp = netlist.merge_plans_of(nl)
+        sp = netlist.split_plans_of(nl, synthesize_trees=True)
+        bp = netlist.balancer_plans_of(nl)
+        res = self.placer.place_netlist(
+            nl, mp, sp, bp, use_chassis=True, grid_w=6, grid_h=6
+        )
+        # All 6 input balancers must be placed on the West boundary column (bx == 0), 1 per block
+        bal_blocks = {
+            (x // 100, y // 100)
+            for name, (x, y) in res.coords.items()
+            if name.startswith("u_bal_")
+        }
+        self.assertEqual(bal_blocks, {(0, by) for by in range(6)})
+        # All 6 oil refineries must be placed together in the same West boundary block (bx == 0)
+        ref_blocks = {
+            (x // 100, y // 100)
+            for name, (x, y) in res.coords.items()
+            if name.startswith("u_advanced_oil_processing_")
+        }
+        self.assertEqual(len(ref_blocks), 1)
+        self.assertEqual(next(iter(ref_blocks))[0], 0)
+        # Paired balancer pins must have a tight 4000-DBU center-to-center spacing
+        self.assertEqual(
+            res.pin_coords["copper_ore__bus1"][1] - res.pin_coords["copper_ore__bus0"][1],
+            4000,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -119,7 +119,7 @@ def parse_def(text: str) -> dict[str, Any]:
     ]
 
     pin_pat = re.compile(
-        r"-\s+(\S+)\s+\+\s+NET\s+(\S+)\s+\+\s+DIRECTION\s+(\S+).*?PLACED\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)",
+        r"-\s+(\S+)\s+\+\s+NET\s+(\S+)\s+\+\s+DIRECTION\s+(\S+).*?(?:PLACED|FIXED)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)",
         re.DOTALL,
     )
     pins: list[dict[str, Any]] = [
