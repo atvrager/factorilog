@@ -91,6 +91,28 @@ def _patch_website(fbe_dir: Path) -> None:
         )
     idx_path.write_text(text, encoding="utf-8")
 
+    bpc_path = fbe_dir / "packages" / "editor" / "src" / "containers" / "BlueprintContainer.ts"
+    if bpc_path.is_file():
+        bpc_text = bpc_path.read_text(encoding="utf-8")
+        old_tex = "            frame,\n            resolution: 1,"
+        new_tex = (
+            "            frame,\n"
+            "            resolution: Math.min(1, 16000 / Math.max(frame.width, frame.height, 1)),"
+        )
+        if old_tex in bpc_text:
+            bpc_path.write_text(bpc_text.replace(old_tex, new_tex), encoding="utf-8")
+
+    assets_dir = fbe_dir / "packages" / "website" / "dist" / "assets"
+    if assets_dir.is_dir():
+        old_min = "frame:t,resolution:1,textureSourceOptions"
+        new_min = (
+            "frame:t,resolution:Math.min(1,16000/Math.max(t.width,t.height,1)),textureSourceOptions"
+        )
+        for js_file in assets_dir.glob("index-*.js"):
+            js_text = js_file.read_text(encoding="utf-8")
+            if old_min in js_text:
+                js_file.write_text(js_text.replace(old_min, new_min), encoding="utf-8")
+
 
 def _build_fbe(fbe_dir: Path) -> None:
     """Install dependencies and build the website bundle."""
@@ -111,6 +133,7 @@ def ensure_fbe() -> Path:
     if "FACTORILOG_FBE_DIR" in os.environ:
         custom_dir = Path(os.environ["FACTORILOG_FBE_DIR"])
         if (custom_dir / "packages" / "website" / "dist" / "index.html").is_file():
+            _patch_website(custom_dir)
             return custom_dir
 
     cache_root = (
@@ -126,6 +149,8 @@ def ensure_fbe() -> Path:
         _extract_tarball(archive_path, commit_dir)
         _patch_website(commit_dir)
         _build_fbe(commit_dir)
+    else:
+        _patch_website(commit_dir)
 
     return commit_dir
 
