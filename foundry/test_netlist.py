@@ -85,6 +85,22 @@ class NetlistTest(unittest.TestCase):
         modules = [line for line in self.text.splitlines() if line.startswith("module ")]
         self.assertEqual(modules, [f"module {self.nl.label} ("])
 
+    def test_satellite_six_input_gaa_pins(self) -> None:
+        """Verify 6-input satellite recipe gets non-overlapping GAA pin coordinates."""
+        import lef
+
+        nl_sat = netlist.build(self.data, {"satellite": 1.0}, {"satellite"})
+        cell = nl_sat.cells["assembling-machine-3.satellite"]
+        self.assertEqual(len(cell["inputs"]), 6)
+        inserter_coords = set()
+        approach_coords = set()
+        for port in cell["inputs"]:
+            geom = lef.get_macro_port_geometry(cell, port, is_output=False)
+            inserter_coords.add(geom["inserter_pos"])
+            approach_coords.add(geom["approach_pos"])
+        self.assertEqual(len(inserter_coords), 6)
+        self.assertEqual(len(approach_coords), 6)
+
 
 def _report(manager: Any, diags: list) -> str:
     if not diags:

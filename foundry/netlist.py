@@ -315,6 +315,7 @@ def build(
             and not cell.get("compound")
             and not cell.get("circuit_cell")
             and not cell.get("has_fluids")
+            and not cell.get("landing_pad")
         ):
             faces = assign_gaa_pin_faces(inps, depths=depths)
             cell["port_faces"] = faces
@@ -323,10 +324,20 @@ def build(
                 m_h = int(cell.get("machine_height", cell.get("height", 3)))
                 cell["width"] = m_w + 2
                 cell["height"] = m_h + 2
+                cell["in_slots"] = {}
                 w_inps = [p for p in inps if faces.get(p) == "W"]
                 offset_in = 1 + (m_h - len(w_inps)) // 2 if len(w_inps) <= m_h else 1
                 for idx, p in enumerate(w_inps):
-                    cell.setdefault("in_slots", {})[p] = offset_in + idx
+                    cell["in_slots"][p] = offset_in + idx
+                for face_dir in ("N", "S"):
+                    f_inps = [p for p in inps if faces.get(p) == face_dir]
+                    if len(f_inps) > 1:
+                        offset_x = 1 + (m_w - len(f_inps)) // 2 if len(f_inps) <= m_w else 1
+                        for idx, p in enumerate(f_inps):
+                            if len(f_inps) == 2 and m_w >= 3:
+                                cell["in_slots"][p] = 1 + 2 * idx
+                            else:
+                                cell["in_slots"][p] = offset_x + idx
                 outs = cell.get("outputs", [])
                 offset_out = 1 + (m_h - len(outs)) // 2 if len(outs) <= m_h else 1
                 for idx, p in enumerate(outs):

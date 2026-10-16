@@ -60,12 +60,13 @@ def build_all(
     enable_compound_cells: bool = True,
     synthesize_splitters: bool = True,
     controller_verilog: Path | str | None = None,
+    only_recipes: list[str] | None = None,
 ) -> int:
     """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
     out = Path(out_dir)
     data = solve.Data(str(dump_path))
     tech = pdk.Pdk(data)
-    allowed = data.allowed_recipes(["nauvis"])
+    allowed = set(only_recipes) if only_recipes else data.allowed_recipes(["nauvis"])
     nl = netlist.build(data, demand, allowed, enable_compound_cells=enable_compound_cells)
     plans = netlist.merge_plans_of(nl)
     split_plans = netlist.split_plans_of(nl, synthesize_trees=synthesize_splitters)
@@ -226,12 +227,23 @@ def main() -> int:
         default=None,
         help="Path to Verilog controller to synthesize and fuse into factory netlist",
     )
+    parser.add_argument(
+        "--only-recipes",
+        default=None,
+        help="Comma-separated list of allowed recipes (treats their inputs as raw)",
+    )
     args = parser.parse_args()
 
     if args.spc is not None:
         demand = dict.fromkeys(SPM_PACKS, args.spc)
     else:
         demand = parse_demand(args.demand)
+
+    only_recipes = (
+        [r.strip() for r in args.only_recipes.split(",") if r.strip()]
+        if args.only_recipes
+        else None
+    )
 
     return build_all(
         args.dump,
@@ -243,6 +255,7 @@ def main() -> int:
         enable_compound_cells=args.enable_compound_cells,
         synthesize_splitters=args.synthesize_splitters,
         controller_verilog=args.controller_verilog,
+        only_recipes=only_recipes,
     )
 
 

@@ -92,6 +92,8 @@ def _factorilog_synth_impl(ctx):
         extra_flags.append("--synthesize-splitters")
     else:
         extra_flags.append("--no-synthesize-splitters")
+    if ctx.attr.only_recipes:
+        extra_flags.append("--only-recipes '%s'" % ctx.attr.only_recipes)
 
     flags_str = " ".join(extra_flags)
     target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
@@ -165,6 +167,7 @@ factorilog_synth = rule(
         "enable_circuit_readouts": attr.bool(default = False, doc = "Enable arithmetic combinator readouts"),
         "enable_compound_cells": attr.bool(default = False, doc = "Enable compound macro-cell clustering"),
         "synthesize_splitters": attr.bool(default = True, doc = "Synthesize binary trees of splitters for multi-consumer nets"),
+        "only_recipes": attr.string(default = "", doc = "Optional comma-separated list of allowed recipes"),
         "controller_verilog": attr.label(allow_single_file = [".v"], doc = "Optional Verilog controller file"),
         "cells_v": attr.output(mandatory = True),
         "netlist_v": attr.output(mandatory = True),
@@ -676,6 +679,7 @@ def factorilog_science_factory(
         enable_circuit_readouts = False,
         enable_compound_cells = False,
         synthesize_splitters = True,
+        only_recipes = "",
         telemetry_taps = "none",
         controller_verilog = None,
         strict_drc = True,
@@ -711,6 +715,7 @@ def factorilog_science_factory(
         enable_circuit_readouts = enable_circuit_readouts,
         enable_compound_cells = enable_compound_cells,
         synthesize_splitters = synthesize_splitters,
+        only_recipes = only_recipes,
         telemetry_taps = telemetry_taps,
         controller_verilog = controller_verilog,
         tags = merged_tags,

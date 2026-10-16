@@ -264,8 +264,12 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             m_w = int(cell.get("machine_width", 3))
             m_h = int(cell.get("machine_height", 3))
             machine = cell.get("machine", "assembling-machine-3")
-            recipe = inst.get("recipe", cell.get("recipe", ""))
-            extra = {"recipe": recipe} if recipe else None
+            recipe = cell.get("fixed_recipe") or inst.get("recipe", cell.get("recipe", ""))
+            extra: dict[str, Any] = {}
+            if recipe:
+                extra["recipe"] = recipe
+            if cell.get("landing_pad"):
+                extra["launch_to_orbit_automatically"] = True
             inputs = cell.get("inputs", [])
             outputs = cell.get("outputs", [])
             in_offset = 1.0 if (cw > m_w) else 0.0
@@ -277,7 +281,7 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                 gx + in_offset + m_w / 2.0,
                 gy + y_offset + m_h / 2.0,
                 direction=direction,
-                extra=extra,
+                extra=extra or None,
             )
             inst_to_entity[cname] = ent
 
@@ -290,14 +294,50 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                 add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
                 occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
-            for port in sorted(outputs):
-                if port in fluids:
-                    continue
-                geom = get_macro_port_geometry(cell, port, is_output=True)
-                ix, iy = geom["inserter_pos"]
-                idir = geom["inserter_dir"]
-                add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
-                occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
+            pad_name = cell.get("landing_pad")
+            if pad_name:
+                pad_w = int(cell.get("landing_pad_width", 8))
+                pad_h = int(cell.get("landing_pad_height", 8))
+                pad_grid = int(cell.get("landing_pad_grid_size", 2))
+                pad_left = round(gx + in_offset + m_w)
+                if ((pad_left + pad_w // 2) % pad_grid) != 0:
+                    pad_left += 1
+                pad_bottom = round(gy)
+                if ((pad_bottom + pad_h // 2) % pad_grid) != 0:
+                    pad_bottom += 1
+                pad_cx = float(pad_left) + pad_w / 2.0
+                pad_cy = float(pad_bottom) + pad_h / 2.0
+                add_entity(str(pad_name), pad_cx, pad_cy)
+                for tx in range(pad_w):
+                    for ty in range(pad_h):
+                        occupied_positions.add(
+                            (round(pad_left + tx + 0.5, 2), round(pad_bottom + ty + 0.5, 2))
+                        )
+                pad_right = pad_left + pad_w
+                for port in sorted(outputs):
+                    if port in fluids:
+                        continue
+                    geom = get_macro_port_geometry(cell, port, is_output=True)
+                    ix, iy = geom["inserter_pos"]
+                    idir = geom["inserter_dir"]
+                    ins_x = float(pad_right) + 0.5
+                    ins_y = gy + iy
+                    add_entity("fast-inserter", ins_x, ins_y, direction=idir)
+                    occupied_positions.add((round(ins_x, 2), round(ins_y, 2)))
+                    out_x = gx + ix
+                    if round(ins_x, 2) < round(out_x, 2):
+                        bdir = int(geom.get("approach_dir", DIRECTION_EAST))
+                        add_entity("transport-belt", out_x, ins_y, direction=bdir)
+                        occupied_positions.add((round(out_x, 2), round(ins_y, 2)))
+            else:
+                for port in sorted(outputs):
+                    if port in fluids:
+                        continue
+                    geom = get_macro_port_geometry(cell, port, is_output=True)
+                    ix, iy = geom["inserter_pos"]
+                    idir = geom["inserter_dir"]
+                    add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
+                    occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
             for tx in range(m_w):
                 for ty in range(m_h):

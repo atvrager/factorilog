@@ -140,7 +140,7 @@ def get_macro_port_geometry(
             "approach_dir": DIRECTION_EAST,
         }
     if face == "N":
-        cx = w / 2.0
+        cx = in_slots[port] + 0.5 if port in in_slots else w / 2.0
         return {
             "face": "N",
             "layer": v_layer,
@@ -151,7 +151,7 @@ def get_macro_port_geometry(
             "approach_dir": DIRECTION_NORTH,
         }
     if face == "S":
-        cx = w / 2.0
+        cx = in_slots[port] + 0.5 if port in in_slots else w / 2.0
         return {
             "face": "S",
             "layer": v_layer,

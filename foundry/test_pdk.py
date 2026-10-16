@@ -59,6 +59,59 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertIn("copper-cable", cell["inputs"])
         self.assertGreater(cell["watts"], 0.0)
 
+    def test_rocket_cargo_cell(self) -> None:
+        import placement
+
+        cell = self.pdk.cell("rocket-silo", "space-science-pack")
+        assert cell is not None
+        self.assertEqual(cell["width"], 20)
+        self.assertEqual(cell["height"], 9)
+        self.assertEqual(cell["machine_width"], 9)
+        self.assertEqual(cell["machine_height"], 9)
+        self.assertEqual(cell["fixed_recipe"], "rocket-part")
+        self.assertEqual(cell["landing_pad"], "cargo-landing-pad")
+        self.assertEqual(cell["landing_pad_width"], 8)
+        self.assertEqual(cell["landing_pad_height"], 8)
+        self.assertEqual(cell["landing_pad_grid_size"], 2)
+        self.assertEqual(
+            set(cell["inputs"]),
+            {"processing-unit", "low-density-structure", "rocket-fuel", "satellite"},
+        )
+        self.assertEqual(cell["outputs"], ["space-science-pack"])
+        res = placement.place_components(
+            {
+                "units": 1000,
+                "components": [
+                    {
+                        "name": "u_silo",
+                        "macro": "rocket_silo_space_science_pack",
+                        "x": 3000,
+                        "y": 3000,
+                        "orient": "N",
+                    }
+                ],
+            },
+            {
+                "cells": {"rocket-silo.space-science-pack": cell},
+                "instances": [
+                    {
+                        "name": "u_silo",
+                        "cell": "rocket-silo.space-science-pack",
+                        "recipe": "space-science-pack",
+                    }
+                ],
+            },
+        )
+        by_name = {e["name"]: e for e in res.entities}
+        self.assertIn("rocket-silo", by_name)
+        self.assertIn("cargo-landing-pad", by_name)
+        silo_ent = by_name["rocket-silo"]
+        pad_ent = by_name["cargo-landing-pad"]
+        self.assertEqual(silo_ent.get("recipe"), "rocket-part")
+        self.assertTrue(silo_ent.get("launch_to_orbit_automatically"))
+        self.assertEqual(int(pad_ent["position"]["x"]) % 2, 0)
+        self.assertEqual(int(pad_ent["position"]["y"]) % 2, 0)
+
     def test_belt_tiers(self) -> None:
         tiers = self.pdk.belt_tiers()
         self.assertEqual(len(tiers), 3)

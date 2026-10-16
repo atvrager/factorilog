@@ -24,6 +24,7 @@ DEMAND = {
     "chemical-science-pack": 10.0,
     "production-science-pack": 10.0,
     "utility-science-pack": 10.0,
+    "space-science-pack": 10.0,
     "rocket-part": 50.0,
 }
 
@@ -47,6 +48,7 @@ TABLES = [
     "storage-tank",
     "pipe",
     "pipe-to-ground",
+    "cargo-landing-pad",
 ]
 TRANSPORT_TABLES = frozenset(TABLES[9:])
 

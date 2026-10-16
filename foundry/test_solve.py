@@ -65,6 +65,23 @@ class SolveTest(unittest.TestCase):
         # Every recipe rate recomputes to a clean balance.
         self.assertEqual(self.balance_gaps(demand, rates, raw), [])
 
+    def test_space_science_recipe(self) -> None:
+        self.assertIn("space-science-pack", self.data.recipes)
+        recipe = self.data.recipes["space-science-pack"]
+        self.assertEqual(recipe.get("fixed_recipe"), "rocket-part")
+        self.assertAlmostEqual(solve.Data.craft_seconds(recipe), 300.0)
+        machine, speed = self.data.machine_for(recipe)
+        self.assertEqual(machine, "rocket-silo")
+        self.assertEqual(speed, 1.0)
+        rates, raw, _surplus = solve.solve_rates(
+            self.data, {"space-science-pack": 60.0}, {"space-science-pack"}
+        )
+        self.assertAlmostEqual(rates["space-science-pack"], 0.06, places=4)
+        self.assertAlmostEqual(raw["processing-unit"], 60.0, places=3)
+        self.assertAlmostEqual(raw["low-density-structure"], 60.0, places=3)
+        self.assertAlmostEqual(raw["rocket-fuel"], 60.0, places=3)
+        self.assertAlmostEqual(raw["satellite"], 0.06, places=4)
+
     def balance_gaps(
         self,
         demand: dict[str, float],

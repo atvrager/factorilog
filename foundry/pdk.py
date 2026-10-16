@@ -480,6 +480,38 @@ class Pdk:
 
             port_faces = dict.fromkeys(inputs, "W")
             port_faces.update(dict.fromkeys(outputs, "E"))
+        elif proto.get("fixed_recipe") and proto.get("fixed_recipe") == recipe_proto.get(
+            "fixed_recipe"
+        ):
+            pad_proto = next(iter(self.data.prototypes.get("cargo-landing-pad", {}).values()), None)
+            placed_w = machine_width
+            placed_h = machine_height
+            if pad_proto is not None:
+                pad_box = pad_proto["collision_box"]
+                pad_w = math.ceil(pad_box[1][0] - pad_box[0][0])
+                pad_h = math.ceil(pad_box[1][1] - pad_box[0][1])
+                pad_grid = int(pad_proto.get("build_grid_size", 2))
+                width = (
+                    (1 if inputs else 0)
+                    + machine_width
+                    + (pad_grid - 1)
+                    + pad_w
+                    + (1 if outputs else 0)
+                )
+                height = max(machine_height, pad_h + (pad_grid - 1))
+            else:
+                width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
+                height = machine_height
+            if len(inputs) > 0 and height >= 2 * len(inputs):
+                for idx, p in enumerate(inputs):
+                    in_slots[p] = 1 + 2 * idx
+            else:
+                offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
+                for idx, p in enumerate(inputs):
+                    in_slots[p] = offset_in + idx
+            offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
+            for idx, p in enumerate(outputs):
+                out_slots[p] = offset_out + idx
         else:
             placed_w = machine_width
             placed_h = machine_height
@@ -506,11 +538,22 @@ class Pdk:
             "in_slots": in_slots,
             "out_slots": out_slots,
             "has_fluids": has_fluids,
-            "watts": watts_of(proto.get("energy_usage", 0)),
+            "watts": watts_of(proto.get("active_energy_usage") or proto.get("energy_usage", 0)),
             "crafts_per_minute": 60.0 * speed / seconds,
             "inputs": inputs,
             "outputs": outputs,
         }
+        if proto.get("fixed_recipe") and proto.get("fixed_recipe") == recipe_proto.get(
+            "fixed_recipe"
+        ):
+            res_cell["fixed_recipe"] = proto["fixed_recipe"]
+            pad_proto = next(iter(self.data.prototypes.get("cargo-landing-pad", {}).values()), None)
+            if pad_proto is not None:
+                pad_box = pad_proto["collision_box"]
+                res_cell["landing_pad"] = pad_proto["name"]
+                res_cell["landing_pad_width"] = math.ceil(pad_box[1][0] - pad_box[0][0])
+                res_cell["landing_pad_height"] = math.ceil(pad_box[1][1] - pad_box[0][1])
+                res_cell["landing_pad_grid_size"] = int(pad_proto.get("build_grid_size", 2))
         if port_faces is not None:
             res_cell["port_faces"] = port_faces
         return res_cell

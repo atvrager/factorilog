@@ -496,6 +496,26 @@ factorilog_science_factory(
     ],
 )
 
+factorilog_science_factory(
+    name = "rocket_cargo",
+    block_fill = "0.05",
+    cell_pad_sites = 4,
+    core_margin = 8,
+    demand = "space-science-pack 60.0",
+    density = "0.15",
+    only_recipes = "space-science-pack",
+    routability_driven = True,
+    use_row_placement = True,
+    test_expected_item = "space-science-pack",
+    test_min_produced = 1000,
+    test_min_active_ratio = "0.90",
+    test_ticks = 25200,
+    tags = [
+        "science",
+        "rocket_cargo",
+    ],
+)
+
 filegroup(
     name = "science",
     srcs = [

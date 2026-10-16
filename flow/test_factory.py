@@ -147,6 +147,18 @@ def run_factory_simulation(
     }
     (mod_dir / "info.json").write_text(json.dumps(info_json), encoding="utf-8")
 
+    mod_list = {
+        "mods": [
+            {"name": "base", "enabled": True},
+            {"name": "factory_test_harness", "enabled": True},
+            {"name": "elevated-rails", "enabled": False},
+            {"name": "quality", "enabled": False},
+            {"name": "recycler", "enabled": False},
+            {"name": "space-age", "enabled": False},
+        ]
+    }
+    (mods_dir / "mod-list.json").write_text(json.dumps(mod_list, indent=2), encoding="utf-8")
+
     control_lua = f"""
 script.on_event(defines.events.on_tick, function(event)
     if event.tick == {ticks} then
@@ -551,12 +563,26 @@ script.on_event(defines.events.on_tick, function(event)
             end
         end
 
-        local total_machines = #asms + #furnaces
-        local active_machines = active_asms + active_furnaces
-        local productive_machines = productive_asms + productive_furnaces
+        local silos = surface.find_entities_filtered{{type = "rocket-silo"}}
+        local active_silos = 0
+        local productive_silos = 0
+        for _, s in ipairs(silos) do
+            local pf = s.products_finished or 0
+            local parts = s.rocket_parts or 0
+            if s.is_crafting() or pf > 0 or parts > 0 then active_silos = active_silos + 1 end
+            if pf > 0 then
+                productive_silos = productive_silos + 1
+            else
+                table.insert(zero_prod, string.format("%s at (%.1f,%.1f)", s.name, s.position.x, s.position.y))
+            end
+        end
+
+        local total_machines = #asms + #furnaces + #silos
+        local active_machines = active_asms + active_furnaces + active_silos
+        local productive_machines = productive_asms + productive_furnaces + productive_silos
         local active_ratio = total_machines > 0 and (active_machines / total_machines) or 0.0
 
-        local check_types = {{"assembling-machine", "furnace", "inserter", "lamp", "radar", "pump"}}
+        local check_types = {{"assembling-machine", "furnace", "rocket-silo", "inserter", "lamp", "radar", "pump"}}
         local unpowered = 0
         for _, t in ipairs(check_types) do
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
@@ -734,6 +760,9 @@ end)
             production_stats[m_pstat.group(1)] = int(m_pstat.group(2))
         if (
             "ASM_INFO:" in line
+            or "SILO_INFO:" in line
+            or "SILO_INSERTER" in line
+            or "LANDING_PAD_INFO:" in line
             or "ZERO_PROD_ASM:" in line
             or "ZERO_PROD_FURNACE:" in line
             or "FURNACE_INV:" in line

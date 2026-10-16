@@ -143,6 +143,48 @@ class Data:
         self.drills = raw.get("mining-drill", {})
 
         self.ground = set()
+        # Synthesize rocket launch recipes dynamically from rocket-silo and item prototypes.
+        for silo_proto in raw.get("rocket-silo", {}).values():
+            fixed_name = silo_proto.get("fixed_recipe")
+            parts_req = silo_proto.get("rocket_parts_required")
+            if not fixed_name or not parts_req or fixed_name not in self.recipes:
+                continue
+            part_recipe = self.recipes[fixed_name]
+            part_results = self.results_of(part_recipe)
+            parts_per_craft = (
+                sum(amount_of(r) for r in part_results if name_of(r) == fixed_name) or 1.0
+            )
+            crafts_per_launch = float(parts_req) / parts_per_craft
+            part_categories = part_recipe.get("categories") or silo_proto.get(
+                "crafting_categories", ["rocket-building"]
+            )
+            part_seconds = self.craft_seconds(part_recipe)
+            for item_name, item_proto in raw.get("item", {}).items():
+                launch_products = item_proto.get("rocket_launch_products")
+                if not launch_products:
+                    continue
+                launch_ings = [
+                    {
+                        "type": ing.get("type", "item"),
+                        "name": name_of(ing),
+                        "amount": round(amount_of(ing) * crafts_per_launch),
+                    }
+                    for ing in self.ingredients_of(part_recipe)
+                ]
+                launch_ings.append({"type": "item", "name": item_name, "amount": 1})
+                for prod in launch_products:
+                    prod_name = name_of(prod)
+                    if prod_name not in self.recipes:
+                        self.recipes[prod_name] = {
+                            "type": "recipe",
+                            "name": prod_name,
+                            "categories": list(part_categories),
+                            "energy_required": part_seconds * crafts_per_launch,
+                            "ingredients": launch_ings,
+                            "results": list(launch_products),
+                            "fixed_recipe": fixed_name,
+                        }
+
         self.producers = collections.defaultdict(list)
         for name, recipe in self.recipes.items():
             for res in self.results_of(recipe):
@@ -155,6 +197,11 @@ class Data:
             for effect in tech.get("effects", []):
                 if effect.get("type") == "unlock-recipe":
                     self.unlocked_by.setdefault(effect["recipe"], name)
+        for name, recipe in self.recipes.items():
+            if "fixed_recipe" in recipe and name not in self.unlocked_by:
+                fixed = recipe["fixed_recipe"]
+                if fixed in self.unlocked_by:
+                    self.unlocked_by[name] = self.unlocked_by[fixed]
 
     @staticmethod
     def ingredients_of(recipe):

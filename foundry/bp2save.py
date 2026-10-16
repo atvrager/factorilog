@@ -467,7 +467,7 @@ script.on_init(function()
                     force = game.forces.player
                 }}
                 if chest then
-                    chest.set_infinity_container_filter(1, {{name = pin.name, count = 100, index = 1}})
+                    chest.set_infinity_container_filter(1, {{name = pin.name, count = 100, mode = "at-least", index = 1}})
                 else
                     log(string.format("ERROR: Failed to place infinity-chest for input pin %s at (%.1f,%.1f)", pin.name, px, py))
                 end

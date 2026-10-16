@@ -21,6 +21,7 @@ try:
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
     from foundry.def_untangle import untangle_def
     from foundry.entity_helpers import (
+        DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
@@ -43,6 +44,7 @@ except ImportError:
     from def_parser import extract_pins, merge_collinear_wires, parse_def
     from def_untangle import untangle_def
     from entity_helpers import (
+        DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
@@ -454,7 +456,11 @@ def route_with_maze_router(
             pos = ent.get("position", {})
             cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
             cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
-            component_headings[(math.floor(cx), math.floor(cy))] = ent.get("direction", 0)
+            ed = ent.get("direction", 0)
+            tx, ty = math.floor(cx), math.floor(cy)
+            component_headings[(tx, ty)] = ed
+            dx, dy = DIR_STEPS.get(ed, (0, 0))
+            pin_no_hood_tiles.add((tx + dx, ty + dy))
 
     if engine is False:
         engine = None
