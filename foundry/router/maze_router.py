@@ -49,7 +49,7 @@ class DualLaneMazeRouter:
     def route(
         self,
         nets: list[RouterNetSpec],
-        max_iterations: int = 60,
+        max_iterations: int = 80,
         verify: bool = True,
         ticks: int = 60,
     ) -> tuple[dict[str, RouteResult], list[dict[str, Any]], VerificationResult | None]:

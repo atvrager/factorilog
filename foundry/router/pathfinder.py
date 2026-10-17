@@ -258,8 +258,10 @@ def _a_star_search(
                 base_net_name(n) != b_name and not grid.is_net_fluid(n) for n in front_res
             ):
                 bad_front = True
-            if front_pos in grid.active_hoods and not grid.is_net_fluid(
-                grid.active_hoods[front_pos]
+            if (
+                front_pos in grid.active_hoods
+                and (grid.min_x > 0 or base_net_name(grid.active_hoods[front_pos]) != b_name)
+                and not grid.is_net_fluid(grid.active_hoods[front_pos])
             ):
                 bad_front = True
             if front_pos in grid.component_headings and net.terminal_heading is None:
@@ -315,7 +317,9 @@ def _a_star_search(
                     gdx, gdy = DIR_STEPS[ch]
                     f_pos = (tx + gdx, ty + gdy)
                     f_xy = ((f_pos[0] + 32768) << 16) | (f_pos[1] + 32768)
-                    if ch in valid_end_headings and not _in_ancestor_xy(current, f_xy):
+                    if ch in valid_end_headings and (
+                        grid.min_x <= 0 or not _in_ancestor_xy(current, f_xy)
+                    ):
                         goal_state = current
                         break
                 elif can_surf_here:
@@ -620,7 +624,7 @@ def _a_star_search(
                 if tentative_g >= g_score.get(nxt_s, float("inf")):
                     continue
 
-                if not is_fluid and step > 1:
+                if not is_fluid and grid.min_x > 0 and step > 1:
                     r_xy = ((ex - dx + 32768) << 16) | (ey - dy + 32768)
                     if _in_ancestor_xy(current, r_xy):
                         continue

@@ -563,7 +563,11 @@ class RoutingGrid:
                 rear_nb = (pos[0] - dx, pos[1] - dy)
                 if rear_nb in self.surface_net_headings:
                     for nb_net, nb_h in self.surface_net_headings[rear_nb].items():
-                        if nb_h == heading and not self.is_net_fluid(nb_net):
+                        if (
+                            nb_h == heading
+                            and (self.min_x > 0 or base_net_name(nb_net) != b_name)
+                            and not self.is_net_fluid(nb_net)
+                        ):
                             return False
 
         my_comm = self.get_net_commodity(net_name) if is_fluid else ""
