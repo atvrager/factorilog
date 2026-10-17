@@ -305,6 +305,18 @@ def generate_pdn(
             connected = {next(iter(chosen))}
             unconnected = set(chosen) - connected
 
+            def _absorb_adjacent_chosen(seeds: list[tuple[float, float]]) -> None:
+                q_c = collections.deque(seeds)
+                while q_c:
+                    u_c = q_c.popleft()
+                    for v_c in cand_adj.get(u_c, ()):
+                        if v_c in unconnected:
+                            unconnected.remove(v_c)
+                            connected.add(v_c)
+                            q_c.append(v_c)
+
+            _absorb_adjacent_chosen(list(connected))
+
             while unconnected:
                 dist: dict[tuple[float, float], int] = dict.fromkeys(connected, 0)
                 parent: dict[tuple[float, float], tuple[float, float]] = {}
@@ -325,11 +337,14 @@ def generate_pdn(
                 if not target:
                     break
                 curr = target
+                newly_connected: list[tuple[float, float]] = []
                 while curr not in connected:
                     all_poles.add(curr)
                     connected.add(curr)
+                    newly_connected.append(curr)
                     curr = parent[curr]
                 unconnected.remove(target)
+                _absorb_adjacent_chosen(newly_connected)
 
         pole_list = sorted(all_poles)
         pole_bucket: dict[tuple[int, int], list[int]] = collections.defaultdict(list)

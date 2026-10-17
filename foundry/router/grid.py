@@ -20,9 +20,15 @@ from foundry.router.types import (
     RouterNetSpec,
 )
 
+_BASE_NET_CACHE: dict[str, str] = {}
+
 
 def base_net_name(net_name: str) -> str:
     """Return the base logical net name by stripping driver/sink and hierarchy suffixes."""
+    cached = _BASE_NET_CACHE.get(net_name)
+    if cached is not None:
+        return cached
+    orig = net_name
     if net_name.endswith("_hwy"):
         net_name = net_name[:-4]
     for sep in ("_export_", "_import_", "_hwy_", "_blk_"):
@@ -30,9 +36,14 @@ def base_net_name(net_name: str) -> str:
             net_name = net_name.split(sep)[0]
     idx = net_name.find("_d")
     if idx != -1 and "_s" in net_name[idx:]:
-        return net_name[:idx]
+        res = net_name[:idx]
+        _BASE_NET_CACHE[orig] = res
+        return res
     if "_mst_" in net_name:
-        return net_name.split("_mst_")[0]
+        res = net_name.split("_mst_")[0]
+        _BASE_NET_CACHE[orig] = res
+        return res
+    _BASE_NET_CACHE[orig] = net_name
     return net_name
 
 
@@ -91,6 +102,7 @@ class RoutingGrid:
         self.surface_net_headings: dict[tuple[int, int], dict[str, int]] = {}
         self.net_is_fluid: dict[str, bool] = {}
         self.net_commodity: dict[str, str] = {}
+        self._norm_commodity: dict[str, str] = {}
 
         # Congestion tracking
         self.usage_count: dict[tuple[int, int, int], int] = {}
@@ -123,6 +135,7 @@ class RoutingGrid:
 
         # Optional active bounding box for search pruning: (min_x, min_y, max_x, max_y)
         self.active_bbox: tuple[int, int, int, int] | None = None
+        self.needs_wide_bbox: set[str] = set()
 
         # Stored net routes: net_name -> RouteResult
         self.net_routes: dict[str, RouteResult] = {}
@@ -130,17 +143,23 @@ class RoutingGrid:
 
     def is_net_fluid(self, net_name: str) -> bool:
         """Return True if the net is registered as a fluid commodity net."""
-        return self.net_is_fluid.get(net_name, False) or self.net_is_fluid.get(
-            base_net_name(net_name), False
-        )
+        res = self.net_is_fluid.get(net_name)
+        if res is not None:
+            return res
+        res = self.net_is_fluid.get(base_net_name(net_name), False)
+        self.net_is_fluid[net_name] = res
+        return res
 
     def get_net_commodity(self, net_name: str) -> str:
         """Return the normalized commodity name for a net."""
+        norm = self._norm_commodity.get(net_name)
+        if norm is not None:
+            return norm
         b_name = base_net_name(net_name)
         comm = self.net_commodity.get(net_name) or self.net_commodity.get(b_name)
-        if comm:
-            return comm.replace("_", "-")
-        return b_name.split("__")[0].replace("_", "-")
+        norm = comm.replace("_", "-") if comm else b_name.split("__")[0].replace("_", "-")
+        self._norm_commodity[net_name] = norm
+        return norm
 
     def get_surface_fluid_info(
         self, pos: tuple[int, int]
@@ -333,9 +352,15 @@ class RoutingGrid:
                 break
             if pt in self.surface_occupancy:
                 current_nets = self.surface_occupancy[pt]
-                if current_nets and any(base_net_name(n) != b_name for n in current_nets):
-                    blocked_ahead = True
-                    break
+                if current_nets:
+                    has_other = False
+                    for n in current_nets:
+                        if base_net_name(n) != b_name:
+                            has_other = True
+                            break
+                    if has_other:
+                        blocked_ahead = True
+                        break
             if self.has_congestion and self.historical_cost.get((tx, ty, 0), 0.0) > 0.0:
                 blocked_ahead = True
                 break
@@ -497,19 +522,26 @@ class RoutingGrid:
         live_overuse = 0
         if z == LAYER_SURFACE and net_name:
             occ = self.surface_occupancy.get((x, y))
-            b_name = base_net_name(net_name)
-            if occ and any(base_net_name(n) != b_name for n in occ):
-                lanes = self.surface_lanes.get((x, y), {})
-                if not (lane != LANE_BOTH and LANE_BOTH not in lanes and lane not in lanes):
-                    cost += 8.0
-                    live_overuse = len(occ)
-                    if heading is not None:
-                        net_h = self.surface_net_headings.get((x, y))
-                        if net_h and any(
-                            base_net_name(n) != b_name and (nh % 8) == (heading % 8)
-                            for n, nh in net_h.items()
-                        ):
-                            cost += 16.0
+            if occ:
+                b_name = base_net_name(net_name)
+                has_other = False
+                for n in occ:
+                    if base_net_name(n) != b_name:
+                        has_other = True
+                        break
+                if has_other:
+                    lanes = self.surface_lanes.get((x, y), {})
+                    if not (lane != LANE_BOTH and LANE_BOTH not in lanes and lane not in lanes):
+                        cost += 8.0
+                        live_overuse = len(occ)
+                        if heading is not None:
+                            net_h = self.surface_net_headings.get((x, y))
+                            if net_h:
+                                h_mod = heading % 8
+                                for n, nh in net_h.items():
+                                    if base_net_name(n) != b_name and (nh % 8) == h_mod:
+                                        cost += 16.0
+                                        break
         if not self.has_congestion:
             return cost
         key = (x, y, z)
@@ -528,14 +560,14 @@ class RoutingGrid:
         heading: int | None = None,
         is_hood: bool = False,
     ) -> bool:
-        b_name = base_net_name(net_name)
         if self.is_obstacle(pos[0], pos[1]):
             return False
 
-        if pos in self.reserved_terminal_bases and b_name not in self.reserved_terminal_bases[pos]:
+        if pos in self.active_hoods:
             return False
 
-        if pos in self.active_hoods:
+        b_name = base_net_name(net_name)
+        if pos in self.reserved_terminal_bases and b_name not in self.reserved_terminal_bases[pos]:
             return False
 
         is_fluid = self.is_net_fluid(net_name)
@@ -597,8 +629,10 @@ class RoutingGrid:
                             if self.is_net_fluid(tn) and self.get_net_commodity(tn) != my_comm:
                                 return False
         else:
-            if current_nets and any(self.is_net_fluid(cn) for cn in current_nets):
-                return False
+            if current_nets:
+                for cn in current_nets:
+                    if self.is_net_fluid(cn):
+                        return False
 
         return True
 

@@ -170,6 +170,53 @@ class TestPumpInsertion(unittest.TestCase):
         violations = checker.check_entities(placement.entities)
         self.assertEqual([v for v in violations if v.code == "DRC-16"], [])
 
+    def test_mixed_sources_and_sinks_pump_direction(self) -> None:
+        """Pump points from net-surplus half to net-deficit half even when a minority source is closer to the cut."""
+        entities = [
+            {"name": "pipe", "position": {"x": 10.5, "y": float(y) + 0.5}}
+            for y in range(400)
+        ]
+        placement = PlacementResult(
+            entities=entities,
+            occupied_positions={(10.5, round(float(y) + 0.5, 2)) for y in range(400)},
+            grid_entities={(10.5, round(float(y) + 0.5, 2)): e for y, e in enumerate(entities)},
+            inst_to_entity={},
+            fluids={"light-oil"},
+            has_fluid_metadata=True,
+        )
+        routes = RouteResult(
+            net_surface_tiles={"light-oil": {(10.5, float(y) + 0.5): DIRECTION_SOUTH for y in range(400)}},
+            tile_to_nets={(10.5, float(y) + 0.5): {"light-oil"} for y in range(400)},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles=set(),
+            valid_input_pins=set(),
+            valid_output_pins=set(),
+        )
+        # North half (y < 200): 3 sources at y=0..2, 1 sink at y=10
+        # South half (y >= 200): 1 source at y=220 (very close to middle cut!), 4 sinks at y=380..395
+        def_data = {
+            "units": 1000,
+            "pins": [
+                {"name": "light-oil", "direction": "INPUT", "x": 10500, "y": 500},
+                {"name": "light-oil", "direction": "INPUT", "x": 10500, "y": 1500},
+                {"name": "light-oil", "direction": "INPUT", "x": 10500, "y": 2500},
+                {"name": "light-oil", "direction": "OUTPUT", "x": 10500, "y": 10500},
+                {"name": "light-oil", "direction": "INPUT", "x": 10500, "y": 220500},
+                {"name": "light-oil", "direction": "OUTPUT", "x": 10500, "y": 380500},
+                {"name": "light-oil", "direction": "OUTPUT", "x": 10500, "y": 385500},
+                {"name": "light-oil", "direction": "OUTPUT", "x": 10500, "y": 390500},
+                {"name": "light-oil", "direction": "OUTPUT", "x": 10500, "y": 395500},
+            ],
+        }
+        netlist_data = {"fluids": ["light-oil"]}
+
+        count = insert_pipeline_pumps(placement, routes, def_data, netlist_data, max_segment_extent=250)
+        self.assertEqual(count, 1)
+        pumps = [e for e in placement.entities if e.get("name") == "pump"]
+        self.assertEqual(len(pumps), 1)
+        self.assertEqual(pumps[0]["direction"], DIRECTION_SOUTH)
+
 
 if __name__ == "__main__":
     unittest.main()
+

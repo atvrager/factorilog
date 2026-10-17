@@ -274,31 +274,51 @@ def check_power(
     """Return list of powered entities lacking electric pole supply coverage."""
     poles = [e for e in entities if is_electric_pole(e.get("name", ""))]
     powered = [e for e in entities if is_electric_consumer(e.get("name", ""))]
+    if not poles:
+        return powered
+    pole_buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    max_pole_radius = 0.0
+    for p in poles:
+        px = float(p["position"]["x"])
+        py = float(p["position"]["y"])
+        p_radius = (
+            supply_radius
+            if supply_radius is not None
+            else get_pole_supply_radius(p.get("name", ""))
+        )
+        if p_radius > max_pole_radius:
+            max_pole_radius = p_radius
+        pole_buckets.setdefault((int(px // 16), int(py // 16)), []).append((px, py, p_radius))
+
     unpowered = []
     for e in powered:
-        ex = e["position"]["x"]
-        ey = e["position"]["y"]
+        ex = float(e["position"]["x"])
+        ey = float(e["position"]["y"])
         cx, cy = entity_collision_half_size(e.get("name", ""), e.get("direction", DIRECTION_NORTH))
+        search_r = max_pole_radius + max(cx, cy)
+        min_bx = int((ex - search_r) // 16)
+        max_bx = int((ex + search_r) // 16)
+        min_by = int((ey - search_r) // 16)
+        max_by = int((ey + search_r) // 16)
         covered = False
-        for p in poles:
-            px = p["position"]["x"]
-            py = p["position"]["y"]
-            p_radius = (
-                supply_radius
-                if supply_radius is not None
-                else get_pole_supply_radius(p.get("name", ""))
-            )
-            max_dist = p_radius + max(cx, cy)
-            if abs(ex - px) > max_dist or abs(ey - py) > max_dist:
-                continue
-            if (
-                max(
-                    max(0.0, abs(ex - px) - cx),
-                    max(0.0, abs(ey - py) - cy),
-                )
-                <= p_radius
-            ):
-                covered = True
+        for bx in range(min_bx, max_bx + 1):
+            for by in range(min_by, max_by + 1):
+                for px, py, p_radius in pole_buckets.get((bx, by), ()):
+                    max_dist = p_radius + max(cx, cy)
+                    if abs(ex - px) > max_dist or abs(ey - py) > max_dist:
+                        continue
+                    if (
+                        max(
+                            max(0.0, abs(ex - px) - cx),
+                            max(0.0, abs(ey - py) - cy),
+                        )
+                        <= p_radius
+                    ):
+                        covered = True
+                        break
+                if covered:
+                    break
+            if covered:
                 break
         if not covered:
             unpowered.append(e)
@@ -354,6 +374,14 @@ def check_underground_pairing(
     ugs = [e for e in entities if "underground-belt" in e.get("name", "")]
     inputs = [e for e in ugs if e.get("type") == "input"]
     outputs = [e for e in ugs if e.get("type") == "output"]
+    outputs_by_line: dict[tuple[Any, int, float], list[dict[str, Any]]] = {}
+    for o in outputs:
+        od = o.get("direction", 0)
+        line_coord = (
+            o["position"]["y"] if od in (DIRECTION_EAST, DIRECTION_WEST) else o["position"]["x"]
+        )
+        outputs_by_line.setdefault((o.get("name"), od, line_coord), []).append(o)
+
     matched_outputs = set()
     unpaired: list[dict[str, Any]] = []
     for inp in inputs:
@@ -365,15 +393,11 @@ def check_underground_pairing(
             else get_underground_span(inp.get("name", ""), default=5)
         )
         found = None
-        for o in outputs:
+        line_coord = iy if d in (DIRECTION_EAST, DIRECTION_WEST) else ix
+        for o in outputs_by_line.get((inp.get("name"), d, line_coord), ()):
             if id(o) in matched_outputs:
                 continue
-            if o.get("name") != inp.get("name"):
-                continue
             ox, oy = o["position"]["x"], o["position"]["y"]
-            od = o.get("direction", 0)
-            if od != d:
-                continue
             if (
                 (d == DIRECTION_EAST and iy == oy and 1 <= ox - ix <= tier_span)
                 or (d == DIRECTION_WEST and iy == oy and 1 <= ix - ox <= tier_span)
@@ -389,7 +413,15 @@ def check_underground_pairing(
     unpaired.extend([o for o in outputs if id(o) not in matched_outputs])
 
     pipes = [e for e in entities if e.get("name") == "pipe-to-ground"]
+    pipes_by_pos_dir: dict[tuple[float, float, int], list[dict[str, Any]]] = {}
+    for other in pipes:
+        ox = round(other["position"]["x"], 2)
+        oy = round(other["position"]["y"], 2)
+        od = other.get("direction", 0)
+        pipes_by_pos_dir.setdefault((ox, oy, od), []).append(other)
+
     matched_pipes: set[int] = set()
+    max_pipe_span = get_underground_span("pipe-to-ground", 10)
     for p in pipes:
         if id(p) in matched_pipes:
             continue
@@ -398,19 +430,14 @@ def check_underground_pairing(
         pd = p.get("direction", 0)
         ug_d = OPPOSITE_DIR.get(pd, pd)
         dx, dy = DIR_STEPS.get(ug_d, (0, 0))
-        max_pipe_span = get_underground_span("pipe-to-ground", 10)
         found: dict[str, Any] | None = None
         for s in range(1, max_pipe_span + 1):
             tx, ty = round(px + dx * s, 2), round(py + dy * s, 2)
-            for other in pipes:
+            for other in pipes_by_pos_dir.get((tx, ty, ug_d), ()):
                 if id(other) in matched_pipes or id(other) == id(p):
                     continue
-                ox = round(other["position"]["x"], 2)
-                oy = round(other["position"]["y"], 2)
-                od = other.get("direction", 0)
-                if ox == tx and oy == ty and od == ug_d:
-                    found = other
-                    break
+                found = other
+                break
             if found is not None:
                 break
         if found is not None:

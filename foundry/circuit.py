@@ -283,8 +283,10 @@ def wire_telemetry(
             cand = grid_entities.get(pos_tile)
             if cand and "transport-belt" in cand.get("name", ""):
                 d_ref = math.hypot(pos_tile[0] - ref_pos[0], pos_tile[1] - ref_pos[1])
-                pole = find_nearest_pole(pos_tile, pole_entities, max_reach=9.0)
-                if (d_ref <= 9.0 or pole is not None) and d_ref < best_dist:
+                if d_ref < best_dist and (
+                    d_ref <= 9.0
+                    or find_nearest_pole(pos_tile, pole_entities, max_reach=9.0) is not None
+                ):
                     best_dist = d_ref
                     best_ent = cand
 
@@ -295,8 +297,10 @@ def wire_telemetry(
                     if inst_obj.get("recipe") == mat:
                         cand_pos = (cand["position"]["x"], cand["position"]["y"])
                         d_ref = math.hypot(cand_pos[0] - ref_pos[0], cand_pos[1] - ref_pos[1])
-                        pole = find_nearest_pole(cand_pos, pole_entities, max_reach=9.0)
-                        if (d_ref <= 9.0 or pole is not None) and d_ref < best_dist:
+                        if d_ref < best_dist and (
+                            d_ref <= 9.0
+                            or find_nearest_pole(cand_pos, pole_entities, max_reach=9.0) is not None
+                        ):
                             best_dist = d_ref
                             best_ent = cand
 

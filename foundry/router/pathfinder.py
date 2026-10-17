@@ -26,15 +26,21 @@ from foundry.router.types import (
     RouterNetSpec,
 )
 
+_MST_INDEX_CACHE: dict[str, int | None] = {}
+
 
 def mst_index(net_name: str) -> int | None:
     """Return the integer MST branch index if net_name is an MST branch, else None."""
+    if net_name in _MST_INDEX_CACHE:
+        return _MST_INDEX_CACHE[net_name]
+    res: int | None = None
     if "_mst_" in net_name:
         try:
-            return int(net_name.rsplit("_mst_", 1)[1])
+            res = int(net_name.rsplit("_mst_", 1)[1])
         except ValueError:
-            return None
-    return None
+            res = None
+    _MST_INDEX_CACHE[net_name] = res
+    return res
 
 
 def pack_state(x: int, y: int, z: int, h_idx: int) -> int:
@@ -126,6 +132,7 @@ def _a_star_search(
     if is_fluid and existing_fluid_goals:
         sorted_goals = sorted(existing_fluid_goals, key=lambda g: abs(g[0] - sx) + abs(g[1] - sy))
         target_goals.extend(sorted_goals[:20])
+    fluid_goals_rest = tuple(target_goals[1:]) if (is_fluid and existing_fluid_goals) else ()
 
     is_hwy = "_hwy" in net_name
     src_bay = (sx // 100, sy // 100) if (4 <= (sx % 100) <= 95 and 4 <= (sy % 100) <= 16) else None
@@ -135,8 +142,13 @@ def _a_star_search(
     bay_rows = {b[1] for b in (src_bay, snk_bay) if b is not None}
 
     def calc_h(x: int, y: int) -> float:
-        if is_fluid and existing_fluid_goals:
-            return 1.4 * float(min(abs(x - gx) + abs(y - gy) for gx, gy in target_goals))
+        if fluid_goals_rest:
+            best_d = abs(x - tx) + abs(y - ty)
+            for gx, gy in fluid_goals_rest:
+                d = abs(x - gx) + abs(y - gy)
+                if d < best_d:
+                    best_d = d
+            return 1.4 * float(best_d)
         dx_h = abs(x - tx)
         dy_h = abs(y - ty)
         if is_hwy:
@@ -159,6 +171,7 @@ def _a_star_search(
     open_set: list[tuple[float, float, int]] = []
     g_score: dict[int, float] = {}
     came_from: dict[int, tuple[int, str, str, float]] = {}
+    parent_state: dict[int, int] = {}
     path_hoods: dict[int, frozenset[tuple[int, int]]] = {}
     closed_set: set[int] = set()
     closed_xy: set[int] = set()
@@ -166,14 +179,12 @@ def _a_star_search(
     def _in_ancestor_xy(state_id: int, xy_key: int) -> bool:
         if xy_key not in closed_xy:
             return False
-        cur = state_id
-        while True:
+        cur: int | None = state_id
+        while cur is not None:
             if (cur >> 8) == xy_key:
                 return True
-            prev = came_from.get(cur)
-            if prev is None:
-                return False
-            cur = prev[0]
+            cur = parent_state.get(cur)
+        return False
 
     start_at_mouth = False
     source_hood_mouth: tuple[int, int] | None = None
@@ -391,6 +402,7 @@ def _a_star_search(
                                     tier_name_surface,
                                     edge_cost,
                                 )
+                                parent_state[nxt_s] = current
                                 path_hoods[nxt_s] = next_visited
                                 h_val = calc_h(nx, ny)
                                 heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
@@ -427,6 +439,7 @@ def _a_star_search(
                                         tier_name_surface,
                                         edge_cost,
                                     )
+                                    parent_state[nxt_s] = current
                                     path_hoods[nxt_s] = next_visited
                                     h_val = calc_h(nx, ny)
                                     heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
@@ -502,6 +515,7 @@ def _a_star_search(
                                 else grid.belt_tiers[target_z]["name"]
                             )
                             came_from[nxt_s] = (current, "dive", tier_name, edge_cost)
+                            parent_state[nxt_s] = current
                             path_hoods[nxt_s] = new_dive_hoods
                             h_val = calc_h(cx, cy)
                             heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
@@ -531,6 +545,7 @@ def _a_star_search(
                                 g_score[nxt_s] = tentative_g
                                 tier_name = grid.pipe_tiers[target_z]["name"]
                                 came_from[nxt_s] = (current, "dive", tier_name, edge_cost)
+                                parent_state[nxt_s] = current
                                 path_hoods[nxt_s] = new_dive_hoods
                                 h_val = calc_h(nx, ny)
                                 heapq.heappush(open_set, (tentative_g + h_val, h_val, nxt_s))
@@ -635,6 +650,7 @@ def _a_star_search(
                 if grid.can_occupy_surface(pt, net_name, lane, heading=ch, is_hood=True):
                     g_score[nxt_s] = tentative_g
                     came_from[nxt_s] = (current, "leap", tier_name, edge_cost)
+                    parent_state[nxt_s] = current
                     path_hoods[nxt_s] = curr_hoods | {
                         (cx + dx * s, cy + dy * s) for s in range(1, step + 1)
                     }
@@ -837,7 +853,10 @@ def route_all_nets(
         return grid.net_routes
 
     net_map = {n.name: n for n in nets}
+    is_flat = all(n.corridor_bbox is None for n in nets)
     ever_failed: dict[str, int] = {}
+    best_score = (len(failed_init) + conflicts, conflicts, len(failed_init))
+    stagnant_iters = 0
 
     def _is_net_over_capacity(res: RouteResult) -> bool:
         if not res.is_success:
@@ -1005,7 +1024,7 @@ def route_all_nets(
             prev_failed
             | pin_blockers
             | {n for n in sorted_congested if mst_index(n) is not None}
-            | ((over_cap_nets | neighbor_blockers) if neighbor_blockers else set())
+            | ((over_cap_nets | neighbor_blockers) if (neighbor_blockers or is_flat) else set())
         )
         for net_name in sorted_congested:
             if net_name in pre_rip:
@@ -1027,7 +1046,11 @@ def route_all_nets(
                 if (
                     net_name in prev_failed
                     or net_name in ever_failed
-                    or (iter_idx >= 1 and "_hwy" not in net_name)
+                    or (
+                        iter_idx >= 1
+                        and "_hwy" not in net_name
+                        and (net.corridor_bbox is not None or iter_idx >= 3)
+                    )
                 )
                 else 10
             )
@@ -1043,14 +1066,15 @@ def route_all_nets(
             gamma=2.5 if iter_idx >= 6 else 1.5,
         )
         if len(nets) >= 30 and (
-            iter_idx == 0 or (iter_idx + 1) % 5 == 0 or (conflicts == 0 and not has_failed)
+            iter_idx == 0 or (iter_idx + 1) % 2 == 0 or (conflicts == 0 and not has_failed)
         ):
             import sys
 
+            fail_sample = f" sample={failed_cur[:3]}" if failed_cur else ""
             print(
                 f"factorilog [maze_router]: iter {iter_idx + 1}/{max_iterations}: "
                 f"rerouted={len(sorted_congested)} over_cap={len(over_cap_nets)} "
-                f"failed={len(failed_cur)} conflicts={conflicts}",
+                f"failed={len(failed_cur)} conflicts={conflicts}{fail_sample}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1058,5 +1082,29 @@ def route_all_nets(
             break
         if conflicts == 0 and has_failed and all(ever_failed.get(n, 0) >= 12 for n in failed_cur):
             break
+        cur_score = (len(failed_cur) + conflicts, conflicts, len(failed_cur))
+        if cur_score < best_score:
+            best_score = cur_score
+            stagnant_iters = 0
+        else:
+            stagnant_iters += 1
+        if (
+            (len(failed_cur) > 0 or len(sorted_congested) > 15)
+            and iter_idx >= 30
+            and stagnant_iters >= 20
+        ):
+            break
+
+    if conflicts > 0 and max_iterations >= 20:
+        for net_name, cur_res in list(grid.net_routes.items()):
+            if cur_res.is_success and _is_net_over_capacity(cur_res):
+                grid.net_routes[net_name] = RouteResult(
+                    net_name=net_name,
+                    nodes=cur_res.nodes,
+                    edges=cur_res.edges,
+                    cost=cur_res.cost,
+                    is_success=False,
+                    error_message=f"Unresolved congestion conflict ({conflicts} conflicted tiles)",
+                )
 
     return grid.net_routes

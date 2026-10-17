@@ -387,6 +387,20 @@ def insert_pipeline_pumps(
         if not overextended:
             break  # All components are within max_segment_extent
 
+        full_adj: dict[Any, set[Any]] = {node: set(nbs) for node, nbs in adj.items()}
+        for ent in placement.entities:
+            if ent.get("name") == "pump":
+                pos_p = ent.get("position", {})
+                pcx = float(pos_p.get("x", 0)) if isinstance(pos_p, dict) else float(pos_p[0])
+                pcy = float(pos_p.get("y", 0)) if isinstance(pos_p, dict) else float(pos_p[1])
+                pump_d = ent.get("direction", DIRECTION_NORTH)
+                in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
+                in_node = ("pump_in", id(ent), in_t[0], in_t[1])
+                out_node = ("pump_out", id(ent), out_t[0], out_t[1])
+                if in_node in full_adj and out_node in full_adj:
+                    full_adj[in_node].add(out_node)
+                    full_adj[out_node].add(in_node)
+
         overextended.sort(key=lambda item: item[0], reverse=True)
 
         candidates: list[
@@ -402,21 +416,53 @@ def insert_pipeline_pumps(
         comp_pipes: dict[tuple[int, int], dict[str, Any]] = {}
 
         for worst_extent, worst_comp in overextended:
-            # Identify sources for this component
+            # Identify sources and sinks for this component, weighting pump endpoints
+            # by the true fluid sources and sinks reachable beyond the pump.
             sources: list[Any] = []
             sinks: list[Any] = []
+            raw_src: dict[Any, int] = {}
+            raw_sink: dict[Any, int] = {}
             for node in worst_comp:
                 ntype = node[0]
-                if ntype == "pump_out":
-                    sources.append(node)
-                elif ntype == "pump_in":
-                    sinks.append(node)
+                if ntype in ("pump_out", "pump_in"):
+                    ext_visited: set[Any] = {node}
+                    ext_q: collections.deque[Any] = collections.deque([node])
+                    ext_srcs = 0
+                    ext_sinks = 0
+                    while ext_q:
+                        cur_ext = ext_q.popleft()
+                        for nb_ext in full_adj.get(cur_ext, ()):
+                            if nb_ext in worst_comp or nb_ext in ext_visited:
+                                continue
+                            ext_visited.add(nb_ext)
+                            ext_q.append(nb_ext)
+                            if nb_ext[0] in ("pipe", "pipe-to-ground"):
+                                pt_ext = (nb_ext[1], nb_ext[2])
+                                if pt_ext in fluid_source_tiles:
+                                    ext_srcs += 1
+                                if pt_ext in fluid_sink_tiles:
+                                    ext_sinks += 1
+                    if ntype == "pump_out":
+                        sources.append(node)
+                        raw_src[node] = max(1, ext_srcs)
+                        raw_sink[node] = ext_sinks
+                    else:
+                        sinks.append(node)
+                        raw_src[node] = ext_srcs
+                        raw_sink[node] = max(1, ext_sinks)
                 elif ntype in ("pipe", "pipe-to-ground"):
                     pt = (node[1], node[2])
-                    if pt in fluid_source_tiles:
+                    is_src = pt in fluid_source_tiles
+                    is_sink = pt in fluid_sink_tiles
+                    if is_src:
                         sources.append(node)
-                    if pt in fluid_sink_tiles:
+                        raw_src[node] = 1
+                    if is_sink:
                         sinks.append(node)
+                        raw_sink[node] = 1
+
+            total_comp_srcs = sum(raw_src.values())
+            total_comp_sinks = sum(raw_sink.values())
 
             use_sources = bool(sources)
             ref_nodes = sources if use_sources else sinks
@@ -522,21 +568,22 @@ def insert_pipeline_pumps(
                         sep_penalty = 1
                     else:
                         comp_v = worst_comp - comp_u
-                        u_has_src = bool(comp_u & src_set)
-                        v_has_src = bool(comp_v & src_set)
-                        u_has_sink = bool(comp_u & sink_set)
-                        v_has_sink = bool(comp_v & sink_set)
+                        u_srcs = sum(raw_src.get(n, 0) for n in comp_u)
+                        u_sinks = sum(raw_sink.get(n, 0) for n in comp_u)
+                        v_srcs = total_comp_srcs - u_srcs
+                        v_sinks = total_comp_sinks - u_sinks
+                        u_has_src = u_srcs > 0 or bool(comp_u & src_set)
+                        v_has_src = v_srcs > 0 or bool(comp_v & src_set)
+                        u_has_sink = u_sinks > 0 or bool(comp_u & sink_set)
+                        v_has_sink = v_sinks > 0 or bool(comp_v & sink_set)
 
                         if src_set and sink_set:
-                            if u_has_src and v_has_sink and not (v_has_src and not u_has_src):
-                                if not v_has_src or not u_has_sink:
+                            flow_u_to_v = u_srcs * v_sinks
+                            flow_v_to_u = v_srcs * u_sinks
+                            if flow_u_to_v > 0 or flow_v_to_u > 0:
+                                if flow_u_to_v > flow_v_to_u:
                                     is_u_in = True
-                                else:
-                                    is_u_in = (
-                                        (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-                                    )
-                            elif v_has_src and u_has_sink and not (u_has_src and not v_has_src):
-                                if not u_has_src or not v_has_sink:
+                                elif flow_v_to_u > flow_u_to_v:
                                     is_u_in = False
                                 else:
                                     is_u_in = (

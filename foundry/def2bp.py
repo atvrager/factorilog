@@ -266,6 +266,7 @@ def route_with_maze_router(
     netlist_data: dict[str, Any],
     placement: Any,
     engine: Any | None = None,
+    strict_drc: bool = False,
 ) -> RouteResult:
     """Route DEF nets using the 3D multi-layer DualLaneMazeRouter.
 
@@ -547,6 +548,7 @@ def route_with_maze_router(
 
         margin = h_floorplan.chassis.core_margin_x
         total_intra = sum(len(ns) for ns in intra_block_specs.values())
+        t_stage1_start = time.perf_counter()
         print(
             f"[def2bp] Stage 1: routing {total_intra} intra-block nets across {len(intra_block_specs)} blocks (margin={margin})...",
             file=sys.stderr,
@@ -557,6 +559,7 @@ def route_with_maze_router(
         for (bx, by), blk_nets in sorted(intra_block_specs.items()):
             if not blk_nets:
                 continue
+            t_blk = time.perf_counter()
             b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
                 (bx, by), bay_blocks, margin=margin
             )
@@ -588,15 +591,39 @@ def route_with_maze_router(
                 no_hood_tiles=port_no_hood_tiles,
             )
             b_routes, b_entities, _ = blk_router.route(blk_nets, verify=False)
+            dt_blk = time.perf_counter() - t_blk
+            b_failed = [r for r in b_routes.values() if not r.is_success]
+            if dt_blk >= 0.5 or b_failed:
+                print(
+                    f"[def2bp]   block ({bx},{by}): {len(blk_nets)} nets in {dt_blk:.2f}s (failed={len(b_failed)})",
+                    file=sys.stderr,
+                    flush=True,
+                )
             routes.update(b_routes)
             all_routed_specs.extend(blk_nets)
             for ent in b_entities:
                 epos = ent.get("position", {})
                 pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
                 entities_by_pos[pkey] = ent
+            if b_failed and strict_drc:
+                for f in b_failed[:25]:
+                    sys.stderr.write(
+                        f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
+                    )
+                raise ValueError(
+                    f"Stage 1 block ({bx},{by}) router failed on {len(b_failed)} net(s): "
+                    + ", ".join(r.net_name for r in b_failed[:5])
+                )
+
+        print(
+            f"[def2bp] Stage 1 completed in {time.perf_counter() - t_stage1_start:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
 
         # Stage 2: Route inter-block highway trunks through street channels, switchboxes, and matrix bays
         if highway_specs:
+            t_stage2_start = time.perf_counter()
             print(
                 f"[def2bp] Stage 2: routing {len(highway_specs)} highway nets across {grid_w}x{grid_h} street grid...",
                 file=sys.stderr,
@@ -636,19 +663,36 @@ def route_with_maze_router(
             h_routes, h_entities, _ = hwy_router.route(
                 highway_specs, max_iterations=60, verify=False
             )
+            h_failed = [r for r in h_routes.values() if not r.is_success]
+            print(
+                f"[def2bp] Stage 2 completed in {time.perf_counter() - t_stage2_start:.2f}s (failed={len(h_failed)})",
+                file=sys.stderr,
+                flush=True,
+            )
             routes.update(h_routes)
             all_routed_specs.extend(highway_specs)
             for ent in h_entities:
                 epos = ent.get("position", {})
                 pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
                 entities_by_pos[pkey] = ent
+            if h_failed and strict_drc:
+                for f in h_failed[:25]:
+                    sys.stderr.write(
+                        f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
+                    )
+                raise ValueError(
+                    f"Stage 2 highway router failed on {len(h_failed)} net(s): "
+                    + ", ".join(r.net_name for r in h_failed[:5])
+                )
 
         entities = list(entities_by_pos.values())
         for idx, ent in enumerate(entities, start=1):
             ent["entity_number"] = idx
 
+        failed = [res for res in routes.values() if not res.is_success]
         verif_res = None
-        if engine is not None and entities:
+        if engine is not None and entities and not failed:
+            t_verif = time.perf_counter()
             verifier = NativeLayoutVerifier(engine, prototypes=prototypes)
             verifier_nets = [
                 NetSpec(
@@ -661,6 +705,11 @@ def route_with_maze_router(
                 for n in net_specs
             ]
             verif_res = verifier.verify_blueprint(entities, nets=verifier_nets, ticks=60)
+            print(
+                f"[def2bp] NativeLayoutVerifier completed in {time.perf_counter() - t_verif:.2f}s",
+                file=sys.stderr,
+                flush=True,
+            )
 
         placement.router_routes = routes
         placement.router_net_specs = all_routed_specs
@@ -696,6 +745,11 @@ def route_with_maze_router(
         for f in failed[:25]:
             sys.stderr.write(
                 f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
+            )
+        if strict_drc:
+            raise ValueError(
+                f"Router failed on {len(failed)} net(s): "
+                + ", ".join(r.net_name for r in failed[:5])
             )
 
     for ent in entities:
@@ -961,7 +1015,9 @@ def build_entities(
     # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
     debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
     if use_maze_router:
-        routes = route_with_maze_router(def_data, netlist_data, placement, engine=engine)
+        routes = route_with_maze_router(
+            def_data, netlist_data, placement, engine=engine, strict_drc=strict_drc
+        )
     else:
         routes = route_and_resolve_jumpers(
             def_data, netlist_data, placement, debug_trace=debug_trace
@@ -1032,6 +1088,18 @@ def build_entities(
                         occupied_tiles.add((round(tx + 0.5, 2), round(ty + 0.5, 2)))
             occupied_tiles.add((round(ex, 2), round(ey, 2)))
 
+        lamp_pole_buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+        for e in entities:
+            if "position" not in e:
+                continue
+            ename = e.get("name")
+            if ename == "big-electric-pole":
+                px, py = float(e["position"]["x"]), float(e["position"]["y"])
+                lamp_pole_buckets.setdefault((int(px // 4), int(py // 4)), []).append((px, py, 2.0))
+            elif ename == "medium-electric-pole":
+                px, py = float(e["position"]["x"]), float(e["position"]["y"])
+                lamp_pole_buckets.setdefault((int(px // 4), int(py // 4)), []).append((px, py, 3.5))
+
         sorted_base_entities = sorted(
             chassis_base_entities,
             key=lambda item: 0 if item.get("name") == "big-electric-pole" else 1,
@@ -1063,19 +1131,12 @@ def build_entities(
                 continue
 
             if bname == "small-lamp":
+                bk_x, bk_y = int(bx // 4), int(by // 4)
                 has_pole = any(
-                    (
-                        e.get("name") == "big-electric-pole"
-                        and abs(float(e["position"]["x"]) - bx) <= 2.0
-                        and abs(float(e["position"]["y"]) - by) <= 2.0
-                    )
-                    or (
-                        e.get("name") == "medium-electric-pole"
-                        and abs(float(e["position"]["x"]) - bx) <= 3.5
-                        and abs(float(e["position"]["y"]) - by) <= 3.5
-                    )
-                    for e in entities
-                    if "position" in e
+                    abs(px - bx) <= r and abs(py - by) <= r
+                    for dx_b in (-1, 0, 1)
+                    for dy_b in (-1, 0, 1)
+                    for px, py, r in lamp_pole_buckets.get((bk_x + dx_b, bk_y + dy_b), ())
                 )
                 if not has_pole:
                     continue
@@ -1088,6 +1149,10 @@ def build_entities(
             new_be.pop("connections", None)
             new_be.pop("entity_number", None)
             entities.append(new_be)
+            if bname == "big-electric-pole":
+                lamp_pole_buckets.setdefault((int(bx // 4), int(by // 4)), []).append((bx, by, 2.0))
+            elif bname == "medium-electric-pole":
+                lamp_pole_buckets.setdefault((int(bx // 4), int(by // 4)), []).append((bx, by, 3.5))
 
     grid_entities = {
         (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities

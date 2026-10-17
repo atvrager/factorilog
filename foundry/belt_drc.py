@@ -895,6 +895,7 @@ class BeltDrcChecker:
                 output_inserters.append((ix, iy, drop_tile))
 
         # 4. Check connectivity and downstream reachability for machine outputs
+        known_reaching_sink: set[tuple[int, int]] = set(sink_tiles)
         for ix, iy, drop_tile in output_inserters:
             if drop_tile not in supply_tiles and drop_tile not in machine_tiles:
                 violations.append(
@@ -912,15 +913,20 @@ class BeltDrcChecker:
 
             # When the design defines sinks, verify reachability from drop_tile
             if sink_tiles:
+                if drop_tile in known_reaching_sink:
+                    continue
                 visited: set[tuple[int, int]] = {drop_tile}
+                parent_tile: dict[tuple[int, int], tuple[int, int]] = {}
                 queue = collections.deque([drop_tile])
                 reached = False
+                reached_from: tuple[int, int] | None = None
                 dead_end_tile: tuple[int, int] | None = None
 
                 while queue:
                     curr = queue.popleft()
-                    if curr in sink_tiles:
+                    if curr in known_reaching_sink:
                         reached = True
+                        reached_from = curr
                         break
                     ents = tile_map.get(curr, [])
                     if not ents:
@@ -933,8 +939,9 @@ class BeltDrcChecker:
 
                         if "transport-belt" in e_name:
                             next_tile = (curr[0] + e_dx, curr[1] + e_dy)
-                            if next_tile in sink_tiles:
+                            if next_tile in known_reaching_sink:
                                 reached = True
+                                reached_from = curr
                                 break
                             next_ents = tile_map.get(next_tile, [])
                             for ne in next_ents:
@@ -953,6 +960,7 @@ class BeltDrcChecker:
                                     or ("splitter" in ne_name and ne_dir == e_dir)
                                 ):
                                     visited.add(next_tile)
+                                    parent_tile[next_tile] = curr
                                     queue.append(next_tile)
                         elif "underground-belt" in e_name:
                             u_type = e.get("type", "")
@@ -968,24 +976,29 @@ class BeltDrcChecker:
                                         ):
                                             if out_pos not in visited:
                                                 visited.add(out_pos)
+                                                parent_tile[out_pos] = curr
                                                 queue.append(out_pos)
                                             front_tile = (out_pos[0] + e_dx, out_pos[1] + e_dy)
-                                            if front_tile in sink_tiles:
+                                            if front_tile in known_reaching_sink:
                                                 reached = True
+                                                reached_from = out_pos
                                                 break
                                             if front_tile not in visited:
                                                 visited.add(front_tile)
+                                                parent_tile[front_tile] = out_pos
                                                 queue.append(front_tile)
                                             break
                                     if reached:
                                         break
                             elif u_type == "output":
                                 front_tile = (curr[0] + e_dx, curr[1] + e_dy)
-                                if front_tile in sink_tiles:
+                                if front_tile in known_reaching_sink:
                                     reached = True
+                                    reached_from = curr
                                     break
                                 if front_tile not in visited:
                                     visited.add(front_tile)
+                                    parent_tile[front_tile] = curr
                                     queue.append(front_tile)
                         elif "splitter" in e_name:
                             pos = e.get("position", {})
@@ -1000,18 +1013,25 @@ class BeltDrcChecker:
                             out1 = (half1[0] + e_dx, half1[1] + e_dy)
                             out2 = (half2[0] + e_dx, half2[1] + e_dy)
                             for t in (half1, half2, out1, out2):
-                                if t in sink_tiles:
+                                if t in known_reaching_sink:
                                     reached = True
+                                    reached_from = curr
                                     break
                                 if t not in visited:
                                     visited.add(t)
+                                    parent_tile[t] = curr
                                     queue.append(t)
                             if reached:
                                 break
                     if reached:
                         break
 
-                if not reached:
+                if reached:
+                    trace_curr = reached_from
+                    while trace_curr is not None:
+                        known_reaching_sink.add(trace_curr)
+                        trace_curr = parent_tile.get(trace_curr)
+                else:
                     violations.append(
                         DrcViolation(
                             code="DRC-06",
@@ -1659,6 +1679,19 @@ class BeltDrcChecker:
                     best_comp = comp_poles
             main_pole_ids = best_comp
 
+        pole_buckets: dict[tuple[int, int], list[tuple[dict[str, Any], float, float, float]]] = {}
+        max_pole_radius = 0.0
+        for p in poles:
+            ppos = p.get("position", {})
+            px = float(ppos.get("x", 0)) if isinstance(ppos, dict) else float(ppos[0])
+            py = float(ppos.get("y", 0)) if isinstance(ppos, dict) else float(ppos[1])
+            p_radius = get_pole_supply_radius(p.get("name", ""))
+            if p_radius > max_pole_radius:
+                max_pole_radius = p_radius
+            pole_buckets.setdefault((int(px // 16), int(py // 16)), []).append(
+                (p, px, py, p_radius)
+            )
+
         # Check every electric consumer for pole supply coverage and main PDN connectivity
         consumers = [e for e in entities if is_electric_consumer(e.get("name", ""))]
         for ent in consumers:
@@ -1667,24 +1700,27 @@ class BeltDrcChecker:
             ex = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
             ey = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
             cx, cy = entity_collision_half_size(ename, ent.get("direction", DIRECTION_NORTH))
+            search_r = max_pole_radius + max(cx, cy)
+            min_bx = int((ex - search_r) // 16)
+            max_bx = int((ex + search_r) // 16)
+            min_by = int((ey - search_r) // 16)
+            max_by = int((ey + search_r) // 16)
 
             covering_poles: list[dict[str, Any]] = []
-            for p in poles:
-                ppos = p.get("position", {})
-                px = float(ppos.get("x", 0)) if isinstance(ppos, dict) else float(ppos[0])
-                py = float(ppos.get("y", 0)) if isinstance(ppos, dict) else float(ppos[1])
-                p_radius = get_pole_supply_radius(p.get("name", ""))
-                max_reach = p_radius + max(cx, cy)
-                if abs(ex - px) > max_reach or abs(ey - py) > max_reach:
-                    continue
-                if (
-                    max(
-                        max(0.0, abs(ex - px) - cx),
-                        max(0.0, abs(ey - py) - cy),
-                    )
-                    <= p_radius
-                ):
-                    covering_poles.append(p)
+            for bx in range(min_bx, max_bx + 1):
+                for by in range(min_by, max_by + 1):
+                    for p, px, py, p_radius in pole_buckets.get((bx, by), ()):
+                        max_reach = p_radius + max(cx, cy)
+                        if abs(ex - px) > max_reach or abs(ey - py) > max_reach:
+                            continue
+                        if (
+                            max(
+                                max(0.0, abs(ex - px) - cx),
+                                max(0.0, abs(ey - py) - cy),
+                            )
+                            <= p_radius
+                        ):
+                            covering_poles.append(p)
 
             if not covering_poles:
                 violations.append(

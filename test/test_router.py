@@ -236,13 +236,13 @@ class TestDualLaneMazeRouter(unittest.TestCase):
 
     def test_router_multi_tier_weaving(self) -> None:
         """Verify that conflicting subterranean routes weave across discrete tiers."""
-        # Block the surface intersection so both nets must dive underground
-        obstacles = {(3, 3), (4, 3), (5, 3), (4, 2), (4, 4)}
+        # Block the surface intersection so both nets must dive underground across distinct spans
+        obstacles = {(2, 3), (3, 3), (4, 3), (5, 3), (6, 3), (4, 2), (4, 4)}
 
         net_horiz = RouterNetSpec(
             name="net_horiz",
-            source=(1, 3),
-            sink=(7, 3),
+            source=(0, 3),
+            sink=(8, 3),
             commodity="iron-plate",
             start_heading=4,
             end_heading=4,
@@ -564,6 +564,61 @@ class TestDualLaneMazeRouter(unittest.TestCase):
 
         self.assertEqual(len(failed), 0, f"Router failed for {len(failed)} nets: {list(failed.keys())[:20]}")
         self.assertTrue(placement.router_verif_res.is_valid)
+
+    def test_science_chassis_factory(self) -> None:
+        """Route the 7-science chassis factory and verify routing performance and DRC."""
+        import time
+
+        def_path = None
+        netlist_path = None
+        for base in [
+            Path("flow"),
+            Path("bazel-bin/flow"),
+            Path(os.environ.get("RUNFILES_DIR", "")) / "_main/flow",
+            Path(os.environ.get("TEST_SRCDIR", "")) / "_main/flow",
+            Path(__file__).parent.parent / "flow",
+            Path(__file__).parent.parent / "bazel-bin/flow",
+        ]:
+            c_def = (
+                base / "science_chassis.def"
+                if base.name != "flow"
+                else base.parent / "flow/science_chassis.def"
+            )
+            c_net = (
+                base / "science_chassis_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/science_chassis_netlist.json"
+            )
+            if c_def.exists() and c_net.exists():
+                def_path = c_def
+                netlist_path = c_net
+                break
+
+        if not def_path or not netlist_path:
+            self.skipTest("science_chassis build artifacts not present")
+
+        from foundry.def2bp import build_entities, parse_def
+
+        t0 = time.perf_counter()
+        def_data = parse_def(def_path.read_text())
+        netlist_data = json.loads(netlist_path.read_text())
+        sys.stderr.write(f"[perf] parse_def took {time.perf_counter() - t0:.2f}s\n")
+        sys.stderr.flush()
+
+        entities, _wires = build_entities(
+            def_data, netlist_data, strict_drc=True, use_maze_router=True, engine=self.engine
+        )
+        placement = def_data["_placement"]
+        failed = {rn: r for rn, r in placement.router_routes.items() if not r.is_success}
+        for rn, r in list(failed.items())[:25]:
+            sys.stderr.write(f"  FAILED: {rn}: {r.error_message}\n")
+        sys.stderr.flush()
+
+        self.assertEqual(
+            len(failed), 0, f"Router failed for {len(failed)} nets: {list(failed.keys())[:20]}"
+        )
+        self.assertTrue(placement.router_verif_res.is_valid)
+        self.assertGreater(len(entities), 0)
 
 
 if __name__ == "__main__":

@@ -254,14 +254,16 @@ def build(
             raise RuntimeError(f"no cell for {machine} running {recipe}")
         nl.cells[cell["cell"]] = cell
         is_single_pack = len(demand) <= 1 and "space-science-pack" not in demand
+        is_full_chassis = len(demand) >= 6 or "space-science-pack" in demand
+        scale_for_throughput = is_single_pack or is_full_chassis
         eff_cpm = (
             float(cell.get("effective_crafts_per_minute", cell["crafts_per_minute"]))
-            if is_single_pack
+            if scale_for_throughput
             else float(cell["crafts_per_minute"])
         )
         count = (
             max(1, math.ceil(rate / eff_cpm - 1e-9))
-            if (is_single_pack and eff_cpm > 0)
+            if (scale_for_throughput and eff_cpm > 0)
             else max(1, math.ceil(plan_count.get(recipe, 1.0)))
         )
         if (
@@ -982,8 +984,18 @@ def split_net(
     )
     sink_recipes = {inst_by_name[s].recipe for s in net.sinks if s in inst_by_name}
     has_multi_recipe_sinks = len(orig_drivers) >= 3 and len(sink_recipes) >= 2
+    is_full_chassis = len(nl.outputs) >= 6 or "space-science-pack" in nl.outputs
     can_multibus_base = (
-        is_single_pack
+        (
+            is_single_pack
+            or (
+                is_full_chassis
+                and belt_cap > 0
+                and net.rate_per_min > belt_cap
+                and len(orig_drivers) >= 4
+                and len(net.sinks) >= 4
+            )
+        )
         and synthesize_trees
         and not net.bus_inputs
         and net.material not in nl.inputs
@@ -1019,19 +1031,20 @@ def split_net(
             belt_cap, max_drvs_per_bus * max_drv_rated if max_drv_rated > 0 else belt_cap
         )
         force_multibus = net.rate_per_min > belt_cap or needs_multibus_for_heavy_sink
+        max_sink_groups = len(ordered_sinks) if is_single_pack else len(ordered_sinks) // 2
         if force_multibus:
             base_k = min(
                 max(2, min_buses_by_drv, min_buses_by_rate),
                 len(ordered_drivers) // 2,
-                len(ordered_sinks),
+                max_sink_groups,
             )
-            max_f_k = min(len(ordered_drivers) // 2, len(ordered_sinks))
+            max_f_k = min(len(ordered_drivers) // 2, max_sink_groups)
             if len(sink_recipes) > 1 and base_k + 1 <= max_f_k:
                 cand_ks = [base_k, base_k + 1]
             else:
                 cand_ks = [base_k]
         else:
-            max_k = min(len(sink_recipes), len(ordered_drivers) - 1, len(ordered_sinks))
+            max_k = min(len(sink_recipes), len(ordered_drivers) - 1, max_sink_groups)
             cand_ks = list(range(max_k, 1, -1))
 
         recipe_totals = {
@@ -1053,6 +1066,13 @@ def split_net(
                 bus_max_cap=bus_max_cap,
                 inst_by_name=inst_by_name,
             )
+            if not is_single_pack:
+                while any(len(g) < 2 for g in s_groups) and any(len(g) > 2 for g in s_groups):
+                    small_idx = next(i for i, g in enumerate(s_groups) if len(g) < 2)
+                    big_idx = max(range(len(s_groups)), key=lambda i: len(s_groups[i]))
+                    s_groups[small_idx].append(s_groups[big_idx].pop())
+                if any(len(g) < 2 for g in s_groups):
+                    continue
             eff_k = len(s_groups)
             if eff_k < 2:
                 continue

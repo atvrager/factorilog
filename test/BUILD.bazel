@@ -309,6 +309,8 @@ py_test(
         "//flow:chemical_science_netlist.json",
         "//flow:production_science.def",
         "//flow:production_science_netlist.json",
+        "//flow:science_chassis.def",
+        "//flow:science_chassis_netlist.json",
     ],
     local = True,
     main = "test_router.py",

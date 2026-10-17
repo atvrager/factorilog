@@ -262,6 +262,9 @@ class AnalyticalPlacer:
         self.split_pad_y = max(2, split_pad_y)
         self.core_margin = max(4, core_margin)
         self.max_core_utilization = max(0.15, min(0.85, max_core_utilization))
+        self._sink_wire_rates: dict[str, float] = {}
+        self._driver_wire_rates: dict[str, float] = {}
+        self._belt_capacity: float = 900.0
 
     def _make_node(
         self,
@@ -441,6 +444,21 @@ class AnalyticalPlacer:
                 node.outputs.append(w_name)
                 wire_drivers[w_name].append((inst.name, float(off_out + idx)))
 
+        self._sink_wire_rates = {}
+        self._driver_wire_rates = {}
+        b_cap = float(getattr(nl, "belt_capacity", 0.0))
+        if b_cap > 0.0:
+            self._belt_capacity = b_cap
+        for mat_name, net_obj in getattr(nl, "nets", {}).items():
+            s_mat = _sanitize(mat_name)
+            for snk_name, s_rate in getattr(net_obj, "sink_rates", {}).items():
+                self._sink_wire_rates[f"{s_mat}__{snk_name}"] = float(s_rate)
+            drv_rates = getattr(net_obj, "driver_rates", {})
+            drv_rated = getattr(net_obj, "driver_rated", {})
+            for drv_name in set(drv_rates) | set(drv_rated):
+                d_rate = float(drv_rated.get(drv_name, drv_rates.get(drv_name, 1.0)))
+                self._driver_wire_rates[f"{s_mat}__{drv_name}"] = d_rate
+
         edges: list[PlacerEdge] = []
         for wire, drvs in wire_drivers.items():
             base_mat = wire.split("__")[0]
@@ -476,6 +494,21 @@ class AnalyticalPlacer:
         fluid_set = {_sanitize(f) for f in netlist_data.get("fluids", [])} | set(
             netlist_data.get("fluids", [])
         )
+        self._sink_wire_rates = {}
+        self._driver_wire_rates = {}
+        for inst in inst_list:
+            cname = inst["name"]
+            macro = inst.get("cell", "")
+            cmeta = cells_map.get(macro, {})
+            p_rate = float(inst.get("plan_rate_per_min", 0.0))
+            r_rate = float(inst.get("rated_per_min", p_rate))
+            if p_rate > 0.0:
+                for inp, amt in (cmeta.get("in_amounts") or {}).items():
+                    self._sink_wire_rates[f"{_sanitize(inp)}__{cname}"] = p_rate * float(amt)
+            eff_r = r_rate if r_rate > 0.0 else p_rate
+            if eff_r > 0.0:
+                for outp, amt in (cmeta.get("out_amounts") or {}).items():
+                    self._driver_wire_rates[f"{_sanitize(outp)}__{cname}"] = eff_r * float(amt)
 
         nodes: dict[str, PlacerNode] = {}
         if def_data and def_data.get("components"):
@@ -654,10 +687,12 @@ class AnalyticalPlacer:
                 else 0
             ),
         )
+        # Fast path: build full graph and run Kahn's algorithm in O(V + E).
+        # Fall back to incremental cycle-breaking _has_path only if a cycle exists.
         for e in sorted_edges:
             if e.source in nodes and e.sink in nodes and e.source != e.sink:
                 u, v = e.source, e.sink
-                if v in adj[u] or _has_path(v, u):
+                if v in adj[u]:
                     continue
                 adj[u].append(v)
                 rev_adj[v].append(u)
@@ -694,6 +729,39 @@ class AnalyticalPlacer:
                 in_deg[v] -= 1
                 if in_deg[v] <= 0 and v not in visited:
                     ready.append(v)
+
+        if len(visited) < len(nodes):
+            adj.clear()
+            rev_adj.clear()
+            in_deg = dict.fromkeys(nodes, 0)
+            for e in sorted_edges:
+                if e.source in nodes and e.sink in nodes and e.source != e.sink:
+                    u, v = e.source, e.sink
+                    if v in adj[u] or _has_path(v, u):
+                        continue
+                    adj[u].append(v)
+                    rev_adj[v].append(u)
+                    in_deg[v] += 1
+            ready = [name for name, d in in_deg.items() if d == 0]
+            topo_order = []
+            visited = set()
+            while ready:
+                ready.sort(
+                    key=lambda n: (
+                        nodes[n].rank,
+                        type_order.get(nodes[n].node_type, 2),
+                        _natural_key(n),
+                    )
+                )
+                u = ready.pop(0)
+                if u in visited:
+                    continue
+                visited.add(u)
+                topo_order.append(u)
+                for v in adj[u]:
+                    in_deg[v] -= 1
+                    if in_deg[v] <= 0 and v not in visited:
+                        ready.append(v)
 
         topo_order.extend(
             name
@@ -1111,6 +1179,15 @@ class AnalyticalPlacer:
                         fluid_machines.add(e.source)
                     if e.sink in nodes and nodes[e.sink].node_type in ("machine", "pump"):
                         fluid_machines.add(e.sink)
+            for u_name, nd in nodes.items():
+                if nd.node_type == "merge" and nd.recipe:
+                    hub = f"MAT_HUB:{nd.recipe}"
+                    fwd_adj[u_name].append(hub)
+                    rev_adj[hub].append(u_name)
+                elif nd.node_type == "split" and nd.recipe:
+                    hub = f"MAT_HUB:{nd.recipe}"
+                    fwd_adj[hub].append(u_name)
+                    rev_adj[u_name].append(hub)
 
         machine_set = set(machine_names)
         mach_adj: dict[str, dict[str, float]] = collections.defaultdict(
@@ -1132,7 +1209,9 @@ class AnalyticalPlacer:
                     east_out_weight[u] += 2.5
                 elif cur in machine_set:
                     down_machs.append(cur)
-                elif cur in nodes and nodes[cur].node_type in ("split", "merge", "balancer"):
+                elif cur.startswith("MAT_HUB:") or (
+                    cur in nodes and nodes[cur].node_type in ("split", "merge", "balancer")
+                ):
                     stack_m.extend(fwd_adj.get(cur, []))
             if down_machs:
                 wt = 1.0 / max(1.0, math.sqrt(float(len(down_machs))))
@@ -1148,14 +1227,16 @@ class AnalyticalPlacer:
                 seen_up.add(cur)
                 if cur.startswith("PIN_IN:"):
                     west_in_weight[u] += 6.0 if u in fluid_machines else 2.0
-                elif (
-                    cur not in machine_set
-                    and cur in nodes
-                    and nodes[cur].node_type
-                    in (
-                        "split",
-                        "merge",
-                        "balancer",
+                elif cur not in machine_set and (
+                    cur.startswith("MAT_HUB:")
+                    or (
+                        cur in nodes
+                        and nodes[cur].node_type
+                        in (
+                            "split",
+                            "merge",
+                            "balancer",
+                        )
                     )
                 ):
                     stack_up.extend(rev_adj.get(cur, []))
@@ -1178,7 +1259,9 @@ class AnalyticalPlacer:
                 seen_u.add(cur)
                 if cur.startswith("PIN_OUT:"):
                     outs.add(cur)
-                elif cur in nodes and nodes[cur].node_type not in ("combinator", "display"):
+                elif cur.startswith("MAT_HUB:") or (
+                    cur in nodes and nodes[cur].node_type not in ("combinator", "display")
+                ):
                     stack_u.extend(fwd_adj.get(cur, []))
             reachable_outs[u] = outs
 
@@ -1230,7 +1313,10 @@ class AnalyticalPlacer:
                     by_rec_only.keys(),
                     key=lambda rk: (min(nodes[u].rank for u in by_rec_only[rk]), rk),
                 ):
-                    rg = by_rec_only[rec_k]
+                    rg = sorted(
+                        by_rec_only[rec_k],
+                        key=lambda u: (nodes[u].rank, _natural_key(u)),
+                    )
                     if len(rg) <= chunk_sz:
                         res_grps.append(rg)
                     else:
@@ -1783,6 +1869,12 @@ class AnalyticalPlacer:
                         q.append(nb)
             m_comps.append(comp)
 
+        valid_m_list: list[
+            tuple[str, str, tuple[str, str], list[tuple[str, str]], list[PlacerEdge]]
+        ] = []
+        valid_m_by_recipe: dict[
+            str, list[tuple[str, tuple[str, str], list[tuple[str, str]], list[PlacerEdge]]]
+        ] = collections.defaultdict(list)
         for comp in m_comps:
             comp_set = set(comp)
             out_w: dict[str, str] = {}
@@ -1811,7 +1903,183 @@ class AnalyticalPlacer:
 
             avail_pairs = [(m, out_w[m]) for m in sorted(internal_m, key=_natural_key)]
             root_pair = (root_m[0], out_w[root_m[0]])
+            r_wire = out_w[root_m[0]]
+            r_key = nodes[root_m[0]].recipe or r_wire.split("__")[0]
+            valid_m_list.append((r_key, r_wire, root_pair, avail_pairs, leaf_edges))
+            valid_m_by_recipe[r_key].append((r_wire, root_pair, avail_pairs, leaf_edges))
 
+        # 2. Collect belt_split2 forests by material
+        split_names = [n for n, nd in nodes.items() if nd.node_type == "split"]
+        split_set = set(split_names)
+        s_adj: dict[str, set[str]] = collections.defaultdict(set)
+        for e in edges:
+            if (
+                e.source in split_set
+                and e.sink in split_set
+                and nodes[e.source].recipe == nodes[e.sink].recipe
+            ):
+                s_adj[e.source].add(e.sink)
+                s_adj[e.sink].add(e.source)
+
+        seen_s: set[str] = set()
+        s_comps: list[list[str]] = []
+        for s in sorted(split_names, key=_natural_key):
+            if s in seen_s:
+                continue
+            comp = []
+            q = [s]
+            seen_s.add(s)
+            while q:
+                cur = q.pop(0)
+                comp.append(cur)
+                for nb in sorted(s_adj.get(cur, ()), key=_natural_key):
+                    if nb not in seen_s:
+                        seen_s.add(nb)
+                        q.append(nb)
+            s_comps.append(comp)
+
+        valid_s_by_recipe: dict[str, list[tuple[str, list[str], set[str], list[PlacerEdge]]]] = (
+            collections.defaultdict(list)
+        )
+        for comp in s_comps:
+            comp_set = set(comp)
+            in_w: dict[str, str] = {}
+            valid_s = True
+            for s in comp:
+                iw_set = {e.wire for e in in_edges.get(s, [])}
+                ow_set = {e.wire for e in out_edges.get(s, [])}
+                if len(iw_set) != 1 or len(ow_set) != 2:
+                    valid_s = False
+                    break
+                in_w[s] = next(iter(iw_set))
+            if not valid_s:
+                continue
+
+            int_wires = {e.wire for e in edges if e.source in comp_set and e.sink in comp_set}
+            root_s = [s for s in comp if in_w[s] not in int_wires]
+            leaf_edges = [e for s in comp for e in out_edges.get(s, []) if e.sink not in comp_set]
+            if (
+                len(root_s) != 1
+                or len(int_wires) != len(comp) - 1
+                or len(leaf_edges) != len(comp) + 1
+                or len({e.wire for e in leaf_edges}) != len(leaf_edges)
+                or not all(e.sink in assigned and e.sink in nodes for e in leaf_edges)
+            ):
+                continue
+
+            r_wire = in_w[root_s[0]]
+            r_key = nodes[root_s[0]].recipe or r_wire.split("__")[0]
+            valid_s_by_recipe[r_key].append((r_wire, comp, int_wires, leaf_edges))
+
+        has_multibus_merges = any(len(v) > 1 for v in valid_m_by_recipe.values())
+
+        # Precompute splitter slices and per-bus demands
+        s_slice_demands: dict[str, list[float]] = {}
+        s_precomputed: dict[
+            str, tuple[list[str], list[str], list[str], list[PlacerEdge], list[int]]
+        ] = {}
+        for r_key, comp_infos in sorted(valid_s_by_recipe.items()):
+            comp_infos.sort(key=lambda item: _natural_key(item[0]))
+            root_wires = [item[0] for item in comp_infos]
+            orig_sizes = [len(item[3]) for item in comp_infos]
+            avail_splits = sorted((s for item in comp_infos for s in item[1]), key=_natural_key)
+            avail_int_w = sorted((w for item in comp_infos for w in item[2]), key=_natural_key)
+            all_leaves = [e for item in comp_infos for e in item[3]]
+            all_leaves.sort(
+                key=lambda e: (
+                    blk_to_seq_idx.get(nodes[e.sink].assigned_block, 0),
+                    nodes[e.sink].rank,
+                    nodes[e.sink].flow_depth,
+                    _natural_key(e.sink),
+                    _natural_key(e.wire),
+                )
+            )
+
+            total_s = len(all_leaves)
+            k_trees = len(root_wires)
+            blk_bounds = [
+                idx
+                for idx in range(1, total_s)
+                if nodes[all_leaves[idx].sink].assigned_block
+                != nodes[all_leaves[idx - 1].sink].assigned_block
+            ]
+            if len(valid_m_by_recipe.get(r_key, [])) > 1 and k_trees > 1:
+                leaf_w = [max(1e-6, self._sink_wire_rates.get(e.wire, 1.0)) for e in all_leaves]
+                prefix_w = [0.0]
+                for w in leaf_w:
+                    prefix_w.append(prefix_w[-1] + w)
+                total_w = prefix_w[-1]
+                cuts = [0]
+                b_cap = max(1.0, getattr(self, "_belt_capacity", 900.0))
+                for t_idx in range(k_trees - 1):
+                    prev_c = cuts[-1]
+                    rem_trees = k_trees - 1 - t_idx
+                    min_c = prev_c + 2
+                    max_c = total_s - 2 * rem_trees
+                    rem_w = max(1e-6, total_w - prefix_w[prev_c])
+                    ideal_slice_w = rem_w / float(rem_trees + 1)
+                    cap_w = max(b_cap * 0.94, ideal_slice_w * 1.10)
+                    best_c = min(
+                        range(min_c, max_c + 1),
+                        key=lambda c: (
+                            0
+                            if (
+                                (prefix_w[c] - prefix_w[prev_c]) <= cap_w + 1e-6
+                                and (total_w - prefix_w[c]) / float(rem_trees) <= cap_w + 1e-6
+                            )
+                            else 1,
+                            round(abs((prefix_w[c] - prefix_w[prev_c]) - ideal_slice_w), 4),
+                            abs(
+                                c
+                                - (
+                                    prev_c
+                                    + max(2, round((total_s - prev_c) / float(rem_trees + 1)))
+                                )
+                            ),
+                        ),
+                    )
+                    for b_cut in sorted(blk_bounds, key=lambda x: abs(x - best_c)):
+                        if min_c <= b_cut <= max_c:
+                            b_slice_w = prefix_w[b_cut] - prefix_w[prev_c]
+                            b_rem_avg = (total_w - prefix_w[b_cut]) / float(rem_trees)
+                            if (
+                                b_slice_w <= cap_w + 1e-6
+                                and b_rem_avg <= cap_w + 1e-6
+                                and abs(b_slice_w - ideal_slice_w) <= 0.35 * ideal_slice_w
+                            ):
+                                best_c = b_cut
+                                break
+                    cuts.append(best_c)
+                cuts.append(total_s)
+                s_slice_demands[r_key] = [
+                    prefix_w[cuts[i + 1]] - prefix_w[cuts[i]] for i in range(k_trees)
+                ]
+            else:
+                cuts = [0]
+                cum = 0
+                max_b_size = max(max(orig_sizes), 24)
+                for t_idx in range(k_trees - 1):
+                    cum += orig_sizes[t_idx]
+                    best_c = cum
+                    rem_trees = k_trees - 1 - t_idx
+                    for b_cut in sorted(blk_bounds, key=lambda x: abs(x - cum)):
+                        if (
+                            abs(b_cut - cum) <= 6
+                            and 2 <= (b_cut - cuts[-1]) <= max_b_size
+                            and 2 * rem_trees <= (total_s - b_cut) <= max_b_size * rem_trees
+                        ):
+                            best_c = b_cut
+                            break
+                    cuts.append(best_c)
+                cuts.append(total_s)
+
+            s_precomputed[r_key] = (root_wires, avail_splits, avail_int_w, all_leaves, cuts)
+
+        def _rewire_single_merge_tree(
+            leaf_edges: list[PlacerEdge],
+            avail_pairs: list[tuple[str, str]],
+            root_pair: tuple[str, str],
+        ) -> None:
             by_blk: dict[tuple[int, int], list[PlacerEdge]] = collections.defaultdict(list)
             for e in leaf_edges:
                 by_blk[nodes[e.source].assigned_block].append(e)
@@ -1901,111 +2169,93 @@ class AnalyticalPlacer:
                 for m_name in used_mat:
                     nodes[m_name].is_matrix_node = True
 
-        # 2. Re-parenthesize belt_split2 forests by material
-        split_names = [n for n, nd in nodes.items() if nd.node_type == "split"]
-        split_set = set(split_names)
-        s_adj: dict[str, set[str]] = collections.defaultdict(set)
-        for e in edges:
-            if (
-                e.source in split_set
-                and e.sink in split_set
-                and nodes[e.source].recipe == nodes[e.sink].recipe
-            ):
-                s_adj[e.source].add(e.sink)
-                s_adj[e.sink].add(e.source)
-
-        seen_s: set[str] = set()
-        s_comps: list[list[str]] = []
-        for s in sorted(split_names, key=_natural_key):
-            if s in seen_s:
-                continue
-            comp = []
-            q = [s]
-            seen_s.add(s)
-            while q:
-                cur = q.pop(0)
-                comp.append(cur)
-                for nb in sorted(s_adj.get(cur, ()), key=_natural_key):
-                    if nb not in seen_s:
-                        seen_s.add(nb)
-                        q.append(nb)
-            s_comps.append(comp)
-
-        valid_s_by_recipe: dict[str, list[tuple[str, list[str], set[str], list[PlacerEdge]]]] = (
-            collections.defaultdict(list)
-        )
-        for comp in s_comps:
-            comp_set = set(comp)
-            in_w: dict[str, str] = {}
-            valid_s = True
-            for s in comp:
-                iw_set = {e.wire for e in in_edges.get(s, [])}
-                ow_set = {e.wire for e in out_edges.get(s, [])}
-                if len(iw_set) != 1 or len(ow_set) != 2:
-                    valid_s = False
-                    break
-                in_w[s] = next(iter(iw_set))
-            if not valid_s:
-                continue
-
-            int_wires = {e.wire for e in edges if e.source in comp_set and e.sink in comp_set}
-            root_s = [s for s in comp if in_w[s] not in int_wires]
-            leaf_edges = [e for s in comp for e in out_edges.get(s, []) if e.sink not in comp_set]
-            if (
-                len(root_s) != 1
-                or len(int_wires) != len(comp) - 1
-                or len(leaf_edges) != len(comp) + 1
-                or len({e.wire for e in leaf_edges}) != len(leaf_edges)
-                or not all(e.sink in assigned and e.sink in nodes for e in leaf_edges)
-            ):
-                continue
-
-            r_wire = in_w[root_s[0]]
-            r_key = nodes[root_s[0]].recipe or r_wire.split("__")[0]
-            valid_s_by_recipe[r_key].append((r_wire, comp, int_wires, leaf_edges))
-
-        for _r_key, comp_infos in sorted(valid_s_by_recipe.items()):
-            comp_infos.sort(key=lambda item: _natural_key(item[0]))
-            root_wires = [item[0] for item in comp_infos]
-            orig_sizes = [len(item[3]) for item in comp_infos]
-            avail_splits = sorted((s for item in comp_infos for s in item[1]), key=_natural_key)
-            avail_int_w = sorted((w for item in comp_infos for w in item[2]), key=_natural_key)
-            all_leaves = [e for item in comp_infos for e in item[3]]
-            all_leaves.sort(
-                key=lambda e: (
-                    blk_to_seq_idx.get(nodes[e.sink].assigned_block, 0),
-                    nodes[e.sink].rank,
-                    nodes[e.sink].flow_depth,
-                    _natural_key(e.sink),
-                    _natural_key(e.wire),
+        if not has_multibus_merges:
+            for _r_key, _r_wire, root_pair, avail_pairs, leaf_edges in valid_m_list:
+                _rewire_single_merge_tree(leaf_edges, avail_pairs, root_pair)
+        else:
+            for r_key, m_comp_infos in sorted(valid_m_by_recipe.items()):
+                m_comp_infos.sort(key=lambda item: _natural_key(item[0]))
+                k_m = len(m_comp_infos)
+                if k_m == 1:
+                    _r_wire, root_pair, avail_pairs, leaf_edges = m_comp_infos[0]
+                    _rewire_single_merge_tree(leaf_edges, avail_pairs, root_pair)
+                    continue
+                avail_m_pairs = sorted(
+                    (pair for item in m_comp_infos for pair in item[2]),
+                    key=lambda p: _natural_key(p[0]),
                 )
-            )
+                root_m_pairs = [item[1] for item in m_comp_infos]
+                all_m_leaves = [e for item in m_comp_infos for e in item[3]]
+                all_m_leaves.sort(
+                    key=lambda e: (
+                        blk_to_seq_idx.get(nodes[e.source].assigned_block, 0),
+                        nodes[e.source].rank,
+                        nodes[e.source].flow_depth,
+                        _natural_key(e.source),
+                        _natural_key(e.wire),
+                    )
+                )
+                total_m = len(all_m_leaves)
+                m_blk_bounds = [
+                    idx
+                    for idx in range(1, total_m)
+                    if nodes[all_m_leaves[idx].source].assigned_block
+                    != nodes[all_m_leaves[idx - 1].source].assigned_block
+                ]
+                m_w = [max(1e-6, self._driver_wire_rates.get(e.wire, 1.0)) for e in all_m_leaves]
+                m_prefix_w = [0.0]
+                for w in m_w:
+                    m_prefix_w.append(m_prefix_w[-1] + w)
+                total_m_w = m_prefix_w[-1]
+                demands = s_slice_demands.get(r_key)
+                if not demands or len(demands) != k_m:
+                    demands = [total_m_w / float(k_m)] * k_m
+                m_cuts = [0]
+                for t_idx in range(k_m - 1):
+                    prev_mc = m_cuts[-1]
+                    rem_m = k_m - 1 - t_idx
+                    min_mc = prev_mc + 2
+                    max_mc = total_m - 2 * rem_m
+                    d_cur = max(1e-6, demands[t_idx])
+                    d_rem_after = sum(max(1e-6, d) for d in demands[t_idx + 1 :])
+                    d_rem_total = d_cur + d_rem_after
+                    rem_sup = max(1e-6, total_m_w - m_prefix_w[prev_mc])
+                    ideal_sup = rem_sup * (d_cur / d_rem_total)
+                    best_mc = min(
+                        range(min_mc, max_mc + 1),
+                        key=lambda mc: (
+                            0
+                            if (
+                                (m_prefix_w[mc] - m_prefix_w[prev_mc]) >= d_cur - 1e-6
+                                and (total_m_w - m_prefix_w[mc]) >= d_rem_after - 1e-6
+                            )
+                            else 1
+                            if (m_prefix_w[mc] - m_prefix_w[prev_mc])
+                            >= min(d_cur, ideal_sup) - 1e-6
+                            else 2,
+                            round(abs((m_prefix_w[mc] - m_prefix_w[prev_mc]) - ideal_sup), 4),
+                            mc,
+                        ),
+                    )
+                    for b_mc in sorted(m_blk_bounds, key=lambda x: abs(x - best_mc)):
+                        if (
+                            min_mc <= b_mc <= max_mc
+                            and abs(b_mc - best_mc) <= 4
+                            and (m_prefix_w[b_mc] - m_prefix_w[prev_mc]) >= d_cur - 1e-6
+                            and (total_m_w - m_prefix_w[b_mc]) >= d_rem_after - 1e-6
+                        ):
+                            best_mc = b_mc
+                            break
+                    m_cuts.append(best_mc)
+                m_cuts.append(total_m)
+                for t_idx in range(k_m):
+                    sub_leaves = all_m_leaves[m_cuts[t_idx] : m_cuts[t_idx + 1]]
+                    _rewire_single_merge_tree(sub_leaves, avail_m_pairs, root_m_pairs[t_idx])
 
-            total_s = len(all_leaves)
+        for _r_key, (root_wires, avail_splits, avail_int_w, all_leaves, cuts) in sorted(
+            s_precomputed.items()
+        ):
             k_trees = len(root_wires)
-            cuts = [0]
-            cum = 0
-            max_b_size = max(max(orig_sizes), 24)
-            blk_bounds = [
-                idx
-                for idx in range(1, total_s)
-                if nodes[all_leaves[idx].sink].assigned_block
-                != nodes[all_leaves[idx - 1].sink].assigned_block
-            ]
-            for t_idx in range(k_trees - 1):
-                cum += orig_sizes[t_idx]
-                best_c = cum
-                rem_trees = k_trees - 1 - t_idx
-                for b_cut in sorted(blk_bounds, key=lambda x: abs(x - cum)):
-                    if (
-                        abs(b_cut - cum) <= 6
-                        and 2 <= (b_cut - cuts[-1]) <= max_b_size
-                        and 2 * rem_trees <= (total_s - b_cut) <= max_b_size * rem_trees
-                    ):
-                        best_c = b_cut
-                        break
-                cuts.append(best_c)
-            cuts.append(total_s)
 
             def _build_split_subtree(
                 in_wire: str,
@@ -3113,13 +3363,34 @@ class AnalyticalPlacer:
         extra_chassis_grids: list[tuple[int, int]] | None = None,
     ) -> str:
         """Emit TCL dictionaries with analytical coordinates for single-core and chassis modes."""
-        single_res = self.place_netlist(
-            nl,
-            merge_plans=merge_plans,
-            split_plans=split_plans,
-            balancer_plans=balancer_plans,
-            use_chassis=False,
-        )
+        if extra_chassis_grids:
+            grids = list(dict.fromkeys(extra_chassis_grids))
+        else:
+            grids = [(1, 1), (2, 2), (3, 3)]
+
+        chassis_results: dict[tuple[int, int], AnalyticalPlacementResult] = {}
+        if extra_chassis_grids and len(getattr(nl, "outputs", [])) >= 3:
+            gw0, gh0 = grids[0]
+            first_ch = self.place_netlist(
+                nl,
+                merge_plans=merge_plans,
+                split_plans=split_plans,
+                balancer_plans=balancer_plans,
+                use_chassis=True,
+                grid_w=gw0,
+                grid_h=gh0,
+            )
+            chassis_results[(gw0, gh0)] = first_ch
+            single_res = first_ch
+        else:
+            single_res = self.place_netlist(
+                nl,
+                merge_plans=merge_plans,
+                split_plans=split_plans,
+                balancer_plans=balancer_plans,
+                use_chassis=False,
+            )
+
         c_lo_x, c_lo_y, c_hi_x, c_hi_y = single_res.core_bounds
         lines = [
             "",
@@ -3141,24 +3412,18 @@ class AnalyticalPlacer:
                 px, py = single_res.pin_coords[pname]
                 lines.append(f"dict set analytical_pins {pname} [list {px} {py}]")
 
-        grids = [(1, 1), (2, 2), (3, 3)]
-        if len(getattr(nl, "instances", [])) > 150:
-            grids.extend([(4, 4), (5, 5), (6, 6), (7, 7)])
-        if extra_chassis_grids:
-            for g in extra_chassis_grids:
-                if g not in grids:
-                    grids.append(g)
-
         for gw, gh in grids:
-            ch_res = self.place_netlist(
-                nl,
-                merge_plans=merge_plans,
-                split_plans=split_plans,
-                balancer_plans=balancer_plans,
-                use_chassis=True,
-                grid_w=gw,
-                grid_h=gh,
-            )
+            ch_res = chassis_results.get((gw, gh))
+            if ch_res is None:
+                ch_res = self.place_netlist(
+                    nl,
+                    merge_plans=merge_plans,
+                    split_plans=split_plans,
+                    balancer_plans=balancer_plans,
+                    use_chassis=True,
+                    grid_w=gw,
+                    grid_h=gh,
+                )
             dict_name = f"analytical_chassis_{gw}x{gh}"
             lines.append(f"set {dict_name} [dict create]")
             for name in sorted(ch_res.coords.keys(), key=_natural_key):
