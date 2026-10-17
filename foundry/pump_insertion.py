@@ -228,12 +228,91 @@ def component_extent(comp: set[Any]) -> tuple[float, float, float, float, float]
     return extent, min_x, max_x, min_y, max_y
 
 
+def _compress_straight_pipes(
+    placement: PlacementResult,
+    protected_tiles: set[tuple[int, int]],
+) -> None:
+    """Convert interior tiles of long straight surface pipe runs into pipe-to-ground pairs."""
+    adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)
+    max_span = get_underground_span("pipe-to-ground", 10)
+
+    blocked_ug_tiles: set[tuple[int, int]] = set()
+    for ent in placement.entities:
+        if ent.get("name") != "pipe-to-ground":
+            continue
+        pos = ent.get("position", {})
+        px = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
+        py = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
+        d = ent.get("direction", DIRECTION_NORTH)
+        dx, dy = DIR_STEPS.get(d, (0, 0))
+        for s in range(-max_span, max_span + 1):
+            blocked_ug_tiles.add((px + dx * s, py + dy * s))
+
+    def _nb_tile(nb: Any) -> tuple[int, int]:
+        return (int(nb[2]), int(nb[3])) if len(nb) == 4 else (int(nb[1]), int(nb[2]))
+
+    to_remove_ids: set[int] = set()
+    axes = (
+        (1, 0, DIRECTION_WEST, DIRECTION_EAST),
+        (0, 1, DIRECTION_NORTH, DIRECTION_SOUTH),
+    )
+    for dx, dy, dir_neg, dir_pos in axes:
+        eligible: set[tuple[int, int]] = set()
+        for x, y in pipe_entities:
+            if (x, y) in protected_tiles or (x, y) in blocked_ug_tiles:
+                continue
+            nbs = adj.get(("pipe", x, y), set())
+            if len(nbs) != 2:
+                continue
+            if {_nb_tile(nb) for nb in nbs} == {(x - dx, y - dy), (x + dx, y + dy)}:
+                eligible.add((x, y))
+
+        for x, y in sorted(eligible):
+            if (x - dx, y - dy) in eligible:
+                continue
+            run: list[tuple[int, int]] = []
+            cx, cy = x, y
+            while (cx, cy) in eligible:
+                run.append((cx, cy))
+                cx += dx
+                cy += dy
+            if len(run) < 8:
+                continue
+            inner = run[1:-1]
+            m = len(inner)
+            i = 0
+            while m - i >= 4:
+                span = min(max_span, m - 1 - i)
+                t_start = inner[i]
+                t_end = inner[i + span]
+                ent_start = pipe_entities.get(t_start)
+                ent_end = pipe_entities.get(t_end)
+                if ent_start is not None and ent_end is not None:
+                    ent_start["name"] = "pipe-to-ground"
+                    ent_start["direction"] = dir_neg
+                    ent_end["name"] = "pipe-to-ground"
+                    ent_end["direction"] = dir_pos
+                    for j in range(i + 1, i + span):
+                        t_mid = inner[j]
+                        ent_mid = pipe_entities.get(t_mid)
+                        if ent_mid is not None:
+                            to_remove_ids.add(id(ent_mid))
+                            placement.grid_entities.pop(
+                                (round(t_mid[0] + 0.5, 2), round(t_mid[1] + 0.5, 2)),
+                                None,
+                            )
+                i += span + 1
+
+    if to_remove_ids:
+        placement.entities[:] = [e for e in placement.entities if id(e) not in to_remove_ids]
+
+
 def insert_pipeline_pumps(
     placement: PlacementResult,
     routes: RouteResult,
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
-    max_segment_extent: int = 250,
+    max_segment_extent: int = 300,
     max_pumps: int = 50,
 ) -> int:
     """Insert powered inline pumps to split pipelines exceeding max_segment_extent.
@@ -286,6 +365,15 @@ def insert_pipeline_pumps(
                 ax, ay = geom["inserter_pos"]
                 fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
 
+    protected_tiles: set[tuple[int, int]] = set(fluid_source_tiles) | set(fluid_sink_tiles)
+    for px_f, py_f in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
+        protected_tiles.add((math.floor(px_f), math.floor(py_f)))
+    macro_fp = def_data.get("_macro_floorplan")
+    if macro_fp is not None:
+        for bport in getattr(macro_fp, "block_ports", []):
+            protected_tiles.add((int(bport.core_pos[0]), int(bport.core_pos[1])))
+            protected_tiles.add((int(bport.channel_pos[0]), int(bport.channel_pos[1])))
+
     for _iteration in range(max_pumps):
         adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)
         components = find_fluid_components(adj)
@@ -302,7 +390,14 @@ def insert_pipeline_pumps(
         overextended.sort(key=lambda item: item[0], reverse=True)
 
         candidates: list[
-            tuple[tuple[int, float, int], tuple[int, int], tuple[int, int], int, float, float]
+            tuple[
+                tuple[int, float, float, int],
+                tuple[int, int],
+                tuple[int, int],
+                int,
+                float,
+                float,
+            ]
         ] = []
         comp_pipes: dict[tuple[int, int], dict[str, Any]] = {}
 
@@ -380,15 +475,8 @@ def insert_pipeline_pumps(
                     if v_dist is None or u_dist == v_dist:
                         continue
 
-                    # Ensure neither tile is an I/O pin or machine approach tile
-                    if (ux + 0.5, uy + 0.5) in routes.pin_tiles or (
-                        vx + 0.5,
-                        vy + 0.5,
-                    ) in routes.pin_tiles:
-                        continue
-                    if (ux, uy) in fluid_source_tiles or (vx, vy) in fluid_source_tiles:
-                        continue
-                    if (ux, uy) in fluid_sink_tiles or (vx, vy) in fluid_sink_tiles:
+                    # Ensure neither tile is a protected pin, port, or machine approach tile
+                    if (ux, uy) in protected_tiles or (vx, vy) in protected_tiles:
                         continue
 
                     # Check degree in component: each pipe must connect to the other and one collinear neighbor
@@ -428,6 +516,8 @@ def insert_pipeline_pumps(
                     sep_penalty = 0
                     if v_node in comp_u:
                         split_ext = worst_extent
+                        over_limit = worst_extent
+                        primary_metric = round(worst_extent, 2)
                         is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
                         sep_penalty = 1
                     else:
@@ -461,6 +551,14 @@ def insert_pipeline_pumps(
                         ext_u, _, _, _, _ = component_extent(comp_u)
                         ext_v, _, _, _, _ = component_extent(comp_v)
                         split_ext = max(ext_u, ext_v)
+                        ext_out = ext_v if is_u_in else ext_u
+                        in_has_sink = u_has_sink if is_u_in else v_has_sink
+                        out_has_src = v_has_src if is_u_in else u_has_src
+                        over_limit = max(0.0, split_ext - float(max_segment_extent))
+                        if over_limit == 0.0 and in_has_sink and not out_has_src:
+                            primary_metric = round(ext_out, 2)
+                        else:
+                            primary_metric = round(split_ext, 2)
 
                     if is_u_in:
                         in_t, out_t = (ux, uy), (vx, vy)
@@ -488,7 +586,12 @@ def insert_pipeline_pumps(
                             center_x = float(in_t[0])
                             center_y = in_t[1] + 0.5
 
-                    score = (sep_penalty, round(split_ext, 2), abs(base_dist - target_dist))
+                    score = (
+                        sep_penalty,
+                        round(over_limit, 2),
+                        primary_metric,
+                        abs(base_dist - target_dist),
+                    )
                     candidates.append((score, in_t, out_t, pump_dir, center_x, center_y))
 
             if candidates:
@@ -497,7 +600,7 @@ def insert_pipeline_pumps(
         if not candidates:
             break
 
-        # Pick candidate with best score (smallest post-split extent, then closest to target distance)
+        # Pick candidate with best score
         candidates.sort(key=lambda c: c[0])
         _, best_in, best_out, best_dir, best_cx, best_cy = candidates[0]
 
@@ -526,4 +629,5 @@ def insert_pipeline_pumps(
 
         pumps_inserted += 1
 
+    _compress_straight_pipes(placement, protected_tiles)
     return pumps_inserted

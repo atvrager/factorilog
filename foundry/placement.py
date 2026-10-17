@@ -285,13 +285,52 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             )
             inst_to_entity[cname] = ent
 
+            def _select_port_inserter(
+                inst_rec: dict[str, Any],
+                cell_rec: dict[str, Any],
+                port_name: str,
+                is_out: bool,
+            ) -> tuple[str, dict[str, Any] | None]:
+                tiers = cell_rec.get("inserter_tiers") or []
+                default_name = str(tiers[-1]["name"]) if tiers else "fast-inserter"
+                plan_r = float(inst_rec.get("plan_rate_per_min", 0.0))
+                rated_r = float(inst_rec.get("rated_per_min", 0.0))
+                if (
+                    not tiers
+                    or plan_r <= 0.0
+                    or rated_r <= 0.0
+                    or plan_r >= 0.35 * rated_r
+                    or cell_rec.get("landing_pad")
+                ):
+                    return default_name, None
+                amt_map = (
+                    cell_rec.get("out_amounts") if is_out else cell_rec.get("in_amounts")
+                ) or {}
+                port_amt = float(amt_map.get(port_name, 1.0))
+                req_rate = 1.40 * plan_r * port_amt
+                candidates: list[tuple[float, str, int, int]] = []
+                for t_entry in tiers:
+                    t_name = str(t_entry.get("name", default_name))
+                    max_s = int(t_entry.get("max_stack", 3))
+                    rate_key = "out_rates_by_stack" if is_out else "rates_by_stack"
+                    rate_map = t_entry.get(rate_key) or t_entry.get("rates_by_stack") or {}
+                    for s_key, s_rate in rate_map.items():
+                        candidates.append((float(s_rate), t_name, int(s_key), max_s))
+                candidates.sort(key=lambda c: (c[0], c[2]))
+                for c_rate, c_name, c_stack, c_max_s in candidates:
+                    if c_rate >= req_rate:
+                        ins_extra = {"override_stack_size": c_stack} if c_stack < c_max_s else None
+                        return c_name, ins_extra
+                return default_name, None
+
             for port in sorted(inputs):
                 if port in fluids:
                     continue
                 geom = get_macro_port_geometry(cell, port, is_output=False)
                 ix, iy = geom["inserter_pos"]
                 idir = geom["inserter_dir"]
-                add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
+                ins_name, ins_extra = _select_port_inserter(inst, cell, port, is_out=False)
+                add_entity(ins_name, gx + ix, gy + iy, direction=idir, extra=ins_extra)
                 occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
             pad_name = cell.get("landing_pad")
@@ -322,7 +361,8 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                     idir = geom["inserter_dir"]
                     ins_x = float(pad_right) + 0.5
                     ins_y = gy + iy
-                    add_entity("fast-inserter", ins_x, ins_y, direction=idir)
+                    ins_name, ins_extra = _select_port_inserter(inst, cell, port, is_out=True)
+                    add_entity(ins_name, ins_x, ins_y, direction=idir, extra=ins_extra)
                     occupied_positions.add((round(ins_x, 2), round(ins_y, 2)))
                     out_x = gx + ix
                     if round(ins_x, 2) < round(out_x, 2):
@@ -336,7 +376,8 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                     geom = get_macro_port_geometry(cell, port, is_output=True)
                     ix, iy = geom["inserter_pos"]
                     idir = geom["inserter_dir"]
-                    add_entity("fast-inserter", gx + ix, gy + iy, direction=idir)
+                    ins_name, ins_extra = _select_port_inserter(inst, cell, port, is_out=True)
+                    add_entity(ins_name, gx + ix, gy + iy, direction=idir, extra=ins_extra)
                     occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
             for tx in range(m_w):
@@ -344,6 +385,9 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                     occupied_positions.add(
                         (round(gx + in_offset + tx + 0.5, 2), round(gy + y_offset + ty + 0.5, 2))
                     )
+            if not def_data.get("blockages"):
+                for ux, uy in cell.get("unused_fluid_ports", []):
+                    occupied_positions.add((round(gx + float(ux), 2), round(gy + float(uy), 2)))
 
     return PlacementResult(
         entities=entities,

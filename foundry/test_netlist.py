@@ -101,6 +101,47 @@ class NetlistTest(unittest.TestCase):
         self.assertEqual(len(inserter_coords), 6)
         self.assertEqual(len(approach_coords), 6)
 
+    def test_net_rate_per_min_not_multiplied_by_instance_count(self) -> None:
+        """Internal net rate_per_min equals total item production rate, not count * rate."""
+        nl_log = netlist.build(self.data, {"logistic-science-pack": 60.0}, self.allowed)
+        self.assertAlmostEqual(nl_log.nets["iron-plate"].rate_per_min, 330.0, places=2)
+        self.assertAlmostEqual(nl_log.nets["iron-gear-wheel"].rate_per_min, 90.0, places=2)
+
+    def test_demand_weighted_splitter_tree_balances_branches(self) -> None:
+        """Heavy sink (>50% of net) gets dedicated sub-bus and remaining bus balances by demand."""
+        nl_log = netlist.build(self.data, {"logistic-science-pack": 60.0}, self.allowed)
+        merge_plans = netlist.merge_plans_of(nl_log)
+        split_plans = netlist.split_plans_of(nl_log)
+        ip_merges = merge_plans["iron-plate"]
+        self.assertTrue(
+            any(m[3] == "iron_plate__u_iron_gear_wheel_1" for m in ip_merges),
+            f"Expected dedicated merge sub-bus for u_iron_gear_wheel_1, got {ip_merges}",
+        )
+        ip_plan = split_plans["iron-plate"]
+        root_entry = next(e for e in ip_plan if e[1] == "iron_plate__bus1")
+        _name, _in_w, y1_w, y2_w = root_entry
+        self.assertIn("iron_plate__u_electronic_circuit_1", (y1_w, y2_w))
+
+    def test_multibus_intermediate_nets_under_belt_capacity(self) -> None:
+        """High-rate internal solid nets partition into multiple sub-buses under belt capacity."""
+        nl_prod = netlist.build(self.data, {"production-science-pack": 60.0}, self.allowed)
+        merge_plans = netlist.merge_plans_of(nl_prod)
+        split_plans = netlist.split_plans_of(nl_prod)
+        bal_plans = netlist.balancer_plans_of(nl_prod)
+        for mat in ("iron-plate", "copper-plate", "copper-cable"):
+            net = nl_prod.nets[mat]
+            self.assertGreater(net.rate_per_min, nl_prod.belt_capacity)
+            self.assertGreaterEqual(len(net.sub_buses), 2, f"{mat} was not partitioned into buses")
+        if HAVE_PYSLANG:
+            v_text = netlist.emit_verilog(nl_prod, merge_plans, split_plans, bal_plans)
+            c_text = netlist.emit_cells_v(nl_prod)
+            compilation = Compilation()
+            compilation.addSyntaxTree(SyntaxTree.fromText(c_text))
+            compilation.addSyntaxTree(SyntaxTree.fromText(v_text))
+            all_diags = list(compilation.getAllDiagnostics())
+            errors = [d for d in all_diags if d.isError if hasattr(d, "isError")]
+            self.assertEqual(errors, [], _report(compilation.sourceManager, errors))
+
 
 def _report(manager: Any, diags: list) -> str:
     if not diags:

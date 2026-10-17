@@ -619,6 +619,7 @@ class AnalyticalPlacer:
         self,
         nodes: dict[str, PlacerNode],
         edges: list[PlacerEdge],
+        use_chassis: bool = False,
     ) -> None:
         """Assign topological flow depths and tighten splitter/merger column indices."""
         if not nodes:
@@ -730,10 +731,13 @@ class AnalyticalPlacer:
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 depth[u] = max([max_non_disp + 2] + [depth[p] + 1 for p in preds])
 
-        # Backward tightening pass: pull splitters, balancers, and machines East toward sinks
+        fluid_nodes = {u for e in edges if e.is_fluid for u in (e.source, e.sink) if u in nodes}
+        # Backward tightening pass: pull splitters, balancers, and solid machines East toward sinks
         for u in reversed(topo_order):
             node = nodes[u]
-            if node.node_type in ("split", "balancer", "machine"):
+            if node.node_type in ("split", "balancer", "machine") and (
+                use_chassis or u not in fluid_nodes
+            ):
                 succs = [s for s in adj.get(u, []) if s in depth]
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 min_allowed = max([0] + [depth[p] + 1 for p in preds])
@@ -1424,7 +1428,7 @@ class AnalyticalPlacer:
                     if e.source in nodes and e.sink in nodes and e.source != e.sink:
                         out_sinks[e.source].append(e.sink)
                         in_drivers[e.sink].append(e.source)
-                self._compute_flow_depths_and_columns(nodes, edges)
+                self._compute_flow_depths_and_columns(nodes, edges, use_chassis=True)
 
         pin_in_nodes: set[str] = set()
         pin_out_nodes: set[str] = set()
@@ -2758,7 +2762,7 @@ class AnalyticalPlacer:
         distribute_across_blocks: bool = False,
     ) -> AnalyticalPlacementResult:
         """Execute the 4-stage analytical placement and directed legalization pipeline."""
-        self._compute_flow_depths_and_columns(nodes, edges)
+        self._compute_flow_depths_and_columns(nodes, edges, use_chassis=use_chassis)
 
         if use_chassis:
             gw = max(1, grid_w)

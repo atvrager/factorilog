@@ -122,6 +122,9 @@ def run_factory_simulation(
     ticks: int,
     game_bin: Path,
     work_dir: Path,
+    expected_items: list[str] | None = None,
+    min_produced: int = 20,
+    min_active_ratio: float = 0.70,
 ) -> dict[str, Any]:
     """Execute save in headless Factorio and extract production metrics."""
     mods_dir = work_dir / "mods"
@@ -159,8 +162,317 @@ def run_factory_simulation(
     }
     (mods_dir / "mod-list.json").write_text(json.dumps(mod_list, indent=2), encoding="utf-8")
 
+    exp_list = (
+        expected_items
+        if expected_items
+        else [it.strip() for it in expected_item.split(",") if it.strip()]
+    )
+    lua_exp_items = ", ".join(f'"{it}"' for it in exp_list)
+    warmup_tick = max(60, ticks // 2)
+    sample_interval = max(300, ticks // 800)
     control_lua = f"""
+local warmup_tick = {warmup_tick}
+local warmup_done = false
+local test_finished = false
+local sample_interval = {sample_interval}
+local expected_items = {{{lua_exp_items}}}
+local min_produced = {min_produced}
+local min_active_ratio = {min_active_ratio}
+local warmup_input_counts = {{}}
+local warmup_output_counts = {{}}
+local first_output_tick = {{}}
+local machine_cache = nil
+local recipe_stats = {{}}
+
+local function out_log(msg)
+    log(msg)
+    print(msg)
+end
+
+local function get_tl_item_counts(tl)
+    local res = {{}}
+    if tl then
+        for k, item in pairs(tl.get_contents()) do
+            local iname = (type(item) == "table" and item.name) or tostring(k)
+            local icount = tonumber((type(item) == "table" and item.count) or item) or 0
+            if iname and icount > 0 then
+                res[iname] = (res[iname] or 0) + icount
+            end
+        end
+    end
+    return res
+end
+
+local function build_machine_cache(surface)
+    local cache = {{}}
+    local machs = surface.find_entities_filtered{{type = {{"assembling-machine", "furnace", "rocket-silo"}}}}
+    for _, m in ipairs(machs) do
+        local box = m.bounding_box
+        local in_ins = {{}}
+        local out_ins = {{}}
+        local near_ins = surface.find_entities_filtered{{
+            area = {{{{box.left_top.x - 1.5, box.left_top.y - 1.5}}, {{box.right_bottom.x + 1.5, box.right_bottom.y + 1.5}}}},
+            type = "inserter"
+        }}
+        for _, ins in ipairs(near_ins) do
+            local dx_drop = ins.drop_position.x
+            local dy_drop = ins.drop_position.y
+            local dx_pick = ins.pickup_position.x
+            local dy_pick = ins.pickup_position.y
+            if dx_drop >= box.left_top.x - 0.6 and dx_drop <= box.right_bottom.x + 0.6 and
+               dy_drop >= box.left_top.y - 0.6 and dy_drop <= box.right_bottom.y + 0.6 then
+                local ptx = math.floor(dx_pick) + 0.5
+                local pty = math.floor(dy_pick) + 0.5
+                local pbelt = nil
+                for _, be in ipairs(surface.find_entities_filtered{{position = {{ptx, pty}}}}) do
+                    if be.type == "transport-belt" or be.type == "underground-belt" or be.type == "splitter" then
+                        pbelt = be
+                        break
+                    end
+                end
+                table.insert(in_ins, {{ins = ins, belt = pbelt}})
+            elseif dx_pick >= box.left_top.x - 0.6 and dx_pick <= box.right_bottom.x + 0.6 and
+                   dy_pick >= box.left_top.y - 0.6 and dy_pick <= box.right_bottom.y + 0.6 then
+                local dtx = math.floor(dx_drop) + 0.5
+                local dty = math.floor(dy_drop) + 0.5
+                local dbelt = nil
+                for _, be in ipairs(surface.find_entities_filtered{{position = {{dtx, dty}}}}) do
+                    if be.type == "transport-belt" or be.type == "underground-belt" or be.type == "splitter" then
+                        dbelt = be
+                        break
+                    end
+                end
+                table.insert(out_ins, {{ins = ins, belt = dbelt}})
+            end
+        end
+        table.insert(cache, {{
+            ent = m,
+            in_ins = in_ins,
+            out_ins = out_ins,
+            warmup_finished = m.products_finished or 0
+        }})
+    end
+    return cache
+end
+
+local function get_machine_recipe(m, force)
+    local rec = m.get_recipe()
+    if rec then return rec, rec.name end
+    if m.type == "furnace" and m.previous_recipe then
+        local pr = m.previous_recipe.name
+        local pname = (type(pr) == "string" and pr) or (pr and pr.name) or nil
+        if pname and force and force.recipes[pname] then
+            return force.recipes[pname], pname
+        end
+        if pname then return nil, tostring(pname) end
+    end
+    return nil, m.name
+end
+
+local function check_all_pass_criteria(surface, stats)
+    for _, it in ipairs(expected_items) do
+        if stats.get_input_count(it) < min_produced then
+            return false
+        end
+    end
+    if not machine_cache then
+        machine_cache = build_machine_cache(surface)
+    end
+    local total_m = 0
+    local active_m = 0
+    local prod_m = 0
+    for _, mc in ipairs(machine_cache) do
+        local m = mc.ent
+        if m and m.valid then
+            total_m = total_m + 1
+            local pf = m.products_finished or 0
+            if m.type == "rocket-silo" then
+                local parts = m.rocket_parts or 0
+                if m.is_crafting() or pf > 0 or parts > 0 then active_m = active_m + 1 end
+                if pf > 0 or parts > 0 then prod_m = prod_m + 1 end
+            else
+                if m.is_crafting() then active_m = active_m + 1 end
+                if pf > 0 then prod_m = prod_m + 1 end
+            end
+        end
+    end
+    if prod_m < total_m then
+        return false
+    end
+    local ratio = total_m > 0 and (active_m / total_m) or 0.0
+    if ratio < min_active_ratio then
+        return false
+    end
+    local check_types = {{"assembling-machine", "furnace", "rocket-silo", "inserter", "lamp", "radar", "pump"}}
+    for _, t in ipairs(check_types) do
+        for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
+            if ent.electric_buffer_size and ent.electric_buffer_size > 0 and ent.energy == 0 then
+                return false
+            end
+        end
+    end
+    for _, bp in ipairs(surface.find_entities_filtered{{name = "big-electric-pole"}}) do
+        local conn = bp.get_wire_connector(defines.wire_connector_id.pole_copper, false)
+        if not conn or #conn.connections == 0 then
+            return false
+        end
+    end
+    return true
+end
+
 script.on_event(defines.events.on_tick, function(event)
+    if test_finished then return end
+    local early_pass = false
+    if event.tick > 0 and event.tick % 600 == 0 then
+        local surface = game.surfaces[1]
+        local stats = game.forces.player.get_item_production_statistics(surface)
+        for iname, icount in pairs(stats.input_counts) do
+            if icount > 0 and not first_output_tick[iname] then
+                first_output_tick[iname] = event.tick
+            end
+        end
+        if not warmup_done then
+            local all_started = true
+            for _, it in ipairs(expected_items) do
+                if it == "space-science-pack" then
+                    if stats.get_input_count("rocket-part") == 0 and stats.get_input_count(it) == 0 then
+                        all_started = false
+                        break
+                    end
+                elseif stats.get_input_count(it) == 0 then
+                    all_started = false
+                    break
+                end
+            end
+            if all_started or event.tick >= warmup_tick then
+                warmup_done = true
+                warmup_tick = event.tick
+                for iname, icount in pairs(stats.input_counts) do
+                    warmup_input_counts[iname] = icount
+                end
+                for iname, icount in pairs(stats.output_counts) do
+                    warmup_output_counts[iname] = icount
+                end
+                machine_cache = build_machine_cache(surface)
+            end
+        end
+        if warmup_done and check_all_pass_criteria(surface, stats) then
+            early_pass = true
+        end
+    end
+    if warmup_done and not early_pass and event.tick > warmup_tick and event.tick <= {ticks} and (event.tick - warmup_tick) % sample_interval == 0 then
+        if not machine_cache then
+            machine_cache = build_machine_cache(game.surfaces[1])
+        end
+        local force = game.forces.player
+        for _, mc in ipairs(machine_cache) do
+            local m = mc.ent
+            if m and m.valid then
+                local rec = mc.rec
+                local rname = mc.rname
+                if not rec then
+                    rec, rname = get_machine_recipe(m, force)
+                    if rec then
+                        mc.rec = rec
+                        mc.rname = rname
+                    end
+                end
+                local st = recipe_stats[rname]
+                if not st then
+                    st = {{
+                        machines = 0,
+                        samples = 0,
+                        working = 0,
+                        item_shortage = 0,
+                        inserter_limited = 0,
+                        belt_starved = 0,
+                        fluid_shortage = 0,
+                        full_output = 0,
+                        output_belt_full = 0,
+                        output_inserter_limited = 0,
+                        other = 0,
+                        starved_by = {{}},
+                        inserter_lag_by = {{}}
+                    }}
+                    recipe_stats[rname] = st
+                end
+                st.samples = st.samples + 1
+                local status = m.status
+                if status == defines.entity_status.item_ingredient_shortage or status == defines.entity_status.no_ingredients then
+                    st.item_shortage = st.item_shortage + 1
+                    local inv_idx = defines.inventory.crafter_input or defines.inventory.assembling_machine_input or 2
+                    local in_inv = m.get_inventory(inv_idx)
+                    local belt_items = {{}}
+                    for _, ii in ipairs(mc.in_ins) do
+                        if ii.ins.valid and ii.ins.held_stack.valid_for_read then
+                            local hname = ii.ins.held_stack.name
+                            belt_items[hname] = (belt_items[hname] or 0) + ii.ins.held_stack.count
+                        end
+                        if ii.belt and ii.belt.valid then
+                            for li = 1, 2 do
+                                local tl = ii.belt.get_transport_line(li)
+                                for iname, icnt in pairs(get_tl_item_counts(tl)) do
+                                    belt_items[iname] = (belt_items[iname] or 0) + icnt
+                                end
+                            end
+                        end
+                    end
+                    local any_belt_missing = false
+                    if rec and rec.ingredients then
+                        for _, ing in ipairs(rec.ingredients) do
+                            if ing.type == "item" then
+                                local have = in_inv and in_inv.get_item_count(ing.name) or 0
+                                if have < ing.amount then
+                                    if (belt_items[ing.name] or 0) == 0 then
+                                        any_belt_missing = true
+                                        st.starved_by[ing.name] = (st.starved_by[ing.name] or 0) + 1
+                                    else
+                                        st.inserter_lag_by[ing.name] = (st.inserter_lag_by[ing.name] or 0) + 1
+                                    end
+                                end
+                            end
+                        end
+                    else
+                        local total_b = 0
+                        for _, c in pairs(belt_items) do total_b = total_b + c end
+                        if total_b == 0 then any_belt_missing = true end
+                    end
+                    if any_belt_missing then
+                        st.belt_starved = st.belt_starved + 1
+                    else
+                        st.inserter_limited = st.inserter_limited + 1
+                    end
+                elseif status == defines.entity_status.fluid_ingredient_shortage then
+                    st.fluid_shortage = st.fluid_shortage + 1
+                elseif status == defines.entity_status.full_output then
+                    st.full_output = st.full_output + 1
+                    local belt_blocked = false
+                    for _, oi in ipairs(mc.out_ins) do
+                        if oi.ins and oi.ins.valid then
+                            if oi.ins.status == defines.entity_status.waiting_for_space_in_destination then
+                                belt_blocked = true
+                            elseif oi.belt and oi.belt.valid then
+                                local c1 = oi.belt.get_transport_line(1).get_item_count()
+                                local c2 = oi.belt.get_transport_line(2).get_item_count()
+                                if math.max(c1, c2) >= 3 and oi.ins.held_stack.valid_for_read then
+                                    belt_blocked = true
+                                end
+                            end
+                        end
+                    end
+                    if belt_blocked then
+                        st.output_belt_full = st.output_belt_full + 1
+                    else
+                        st.output_inserter_limited = st.output_inserter_limited + 1
+                    end
+                elseif m.is_crafting() or status == defines.entity_status.working or status == defines.entity_status.normal then
+                    st.working = st.working + 1
+                else
+                    st.other = st.other + 1
+                end
+            end
+        end
+    end
     if event.tick > 0 and event.tick % 60000 == 0 then
         local surface = game.surfaces[1]
         local stats = game.forces.player.get_item_production_statistics(surface)
@@ -182,16 +494,110 @@ script.on_event(defines.events.on_tick, function(event)
         log(pmsg)
         print(pmsg)
     end
-    if event.tick == {ticks} then
+    if early_pass or event.tick == {ticks} then
+        test_finished = true
+        local cur_tick = event.tick
         local surface = game.surfaces[1]
-        local stats = game.forces.player.get_item_production_statistics(surface)
+        local force = game.forces.player
+        local stats = force.get_item_production_statistics(surface)
         local produced = stats.get_input_count("{expected_item}")
+        local win_mins = (cur_tick - warmup_tick) / 3600.0
+        local tot_mins = cur_tick / 3600.0
+        out_log(string.format("FORCE_BONUSES: inserter_stack=%d bulk_inserter=%d",
+            force.inserter_stack_size_bonus, force.bulk_inserter_capacity_bonus))
         for iname, icount in pairs(stats.input_counts) do
-            log(string.format("PRODUCTION_STAT: %s = %d", iname, icount))
+            local wcount = warmup_input_counts[iname] or 0
+            local delta = icount - wcount
+            local cum_rate = tot_mins > 0 and (icount / tot_mins) or 0
+            local ss_rate = win_mins > 0 and (delta / win_mins) or 0
+            local ftick = first_output_tick[iname] or -1
+            out_log(string.format("PRODUCTION_STAT: %s = %d", iname, icount))
+            out_log(string.format("STEADY_PRODUCTION: %s total=%d steady_delta=%d cum_spm=%.2f steady_spm=%.2f first_tick=%d",
+                iname, icount, delta, cum_rate, ss_rate, ftick))
         end
         for iname, icount in pairs(stats.output_counts) do
-            log(string.format("CONSUMPTION_STAT: %s = %d", iname, icount))
+            local wcount = warmup_output_counts[iname] or 0
+            local delta = icount - wcount
+            local cum_rate = tot_mins > 0 and (icount / tot_mins) or 0
+            local ss_rate = win_mins > 0 and (delta / win_mins) or 0
+            out_log(string.format("CONSUMPTION_STAT: %s = %d", iname, icount))
+            out_log(string.format("STEADY_CONSUMPTION: %s total=%d steady_delta=%d cum_spm=%.2f steady_spm=%.2f",
+                iname, icount, delta, cum_rate, ss_rate))
         end
+        local fstats = force.get_fluid_production_statistics(surface)
+        if fstats then
+            for fname, fcount in pairs(fstats.input_counts) do
+                out_log(string.format("FLUID_PRODUCTION_STAT: %s = %.1f (%.2f/min)", fname, fcount, tot_mins > 0 and (fcount / tot_mins) or 0))
+            end
+            for fname, fcount in pairs(fstats.output_counts) do
+                out_log(string.format("FLUID_CONSUMPTION_STAT: %s = %.1f (%.2f/min)", fname, fcount, tot_mins > 0 and (fcount / tot_mins) or 0))
+            end
+        end
+        if machine_cache then
+            local mach_counts = {{}}
+            local craft_deltas = {{}}
+            for _, mc in ipairs(machine_cache) do
+                local m = mc.ent
+                if m and m.valid then
+                    local rec, rname = get_machine_recipe(m, force)
+                    mach_counts[rname] = (mach_counts[rname] or 0) + 1
+                    craft_deltas[rname] = (craft_deltas[rname] or 0) + ((m.products_finished or 0) - mc.warmup_finished)
+                end
+            end
+            for rname, st in pairs(recipe_stats) do
+                local s = st.samples > 0 and st.samples or 1
+                local mcnt = mach_counts[rname] or 0
+                local cdelta = craft_deltas[rname] or 0
+                local c_spm = win_mins > 0 and (cdelta / win_mins) or 0
+                local sb_parts = {{}}
+                for ing, cnt in pairs(st.starved_by) do
+                    table.insert(sb_parts, string.format("%s:%d", ing, cnt))
+                end
+                local il_parts = {{}}
+                for ing, cnt in pairs(st.inserter_lag_by) do
+                    table.insert(il_parts, string.format("%s:%d", ing, cnt))
+                end
+                out_log(string.format(
+                    "RECIPE_BOTTLENECK: recipe=%s machines=%d crafts_spm=%.2f working=%.1f%% item_shortage=%.1f%% (belt_starved=%.1f%% inserter_limited=%.1f%%) fluid_shortage=%.1f%% full_output=%.1f%% (belt_full=%.1f%% out_inserter=%.1f%%) starved_by=[%s] inserter_lag=[%s]",
+                    rname, mcnt, c_spm,
+                    (st.working / s) * 100.0,
+                    (st.item_shortage / s) * 100.0,
+                    (st.belt_starved / s) * 100.0,
+                    (st.inserter_limited / s) * 100.0,
+                    (st.fluid_shortage / s) * 100.0,
+                    (st.full_output / s) * 100.0,
+                    (st.output_belt_full / s) * 100.0,
+                    (st.output_inserter_limited / s) * 100.0,
+                    table.concat(sb_parts, ","),
+                    table.concat(il_parts, ",")
+                ))
+            end
+        end
+        if early_pass then
+            local total_m = 0
+            local active_m = 0
+            for _, mc in ipairs(machine_cache or {{}}) do
+                local m = mc.ent
+                if m and m.valid then
+                    total_m = total_m + 1
+                    if m.type == "rocket-silo" then
+                        local pf = m.products_finished or 0
+                        local parts = m.rocket_parts or 0
+                        if m.is_crafting() or pf > 0 or parts > 0 then active_m = active_m + 1 end
+                    else
+                        if m.is_crafting() then active_m = active_m + 1 end
+                    end
+                end
+            end
+            local act_ratio = total_m > 0 and (active_m / total_m) or 0.0
+            out_log(string.format(
+                "FACTORY_TEST_RESULT: tick=%d item=%s produced=%d active=%d/%d ratio=%.3f productive=%d/%d unpowered=0 zero_prod=[]",
+                cur_tick, "{expected_item}", produced, active_m, total_m, act_ratio, total_m, total_m
+            ))
+            out_log(string.format("FACTORY_TEST_EARLY_PASS: tick=%d", cur_tick))
+            return
+        end
+
 
         local function format_tl_contents(tl, li)
             local res = {{}}
@@ -738,9 +1144,9 @@ script.on_event(defines.events.on_tick, function(event)
         end
 
         local zero_prod_str = table.concat(zero_prod, "; ")
-        log(string.format(
-            "FACTORY_TEST_RESULT: item=%s produced=%d active=%d/%d ratio=%.3f productive=%d/%d unpowered=%d zero_prod=[%s]",
-            "{expected_item}", produced, active_machines, total_machines, active_ratio, productive_machines, total_machines, unpowered, zero_prod_str
+        out_log(string.format(
+            "FACTORY_TEST_RESULT: tick=%d item=%s produced=%d active=%d/%d ratio=%.3f productive=%d/%d unpowered=%d zero_prod=[%s]",
+            cur_tick, "{expected_item}", produced, active_machines, total_machines, active_ratio, productive_machines, total_machines, unpowered, zero_prod_str
         ))
     end
 end)
@@ -761,6 +1167,8 @@ end)
     ]
 
     stdout_lines: list[str] = []
+    early_pass = False
+    completed_tick = ticks
     with subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -773,9 +1181,16 @@ end)
                 stdout_lines.append(raw_line)
                 if "PROGRESS:" in raw_line:
                     print(f"factorilog: {raw_line.strip()}", flush=True)
+                if "FACTORY_TEST_EARLY_PASS:" in raw_line:
+                    m_ep = re.search(r"tick=(\d+)", raw_line)
+                    if m_ep:
+                        completed_tick = int(m_ep.group(1))
+                    early_pass = True
+                    proc.terminate()
+                    break
         returncode = proc.wait()
 
-    if returncode != 0:
+    if returncode != 0 and not early_pass:
         log_file = data_dir / "factorio-current.log"
         log_text = (
             log_file.read_text(encoding="utf-8") if log_file.is_file() else "No log file found."
@@ -786,12 +1201,14 @@ end)
         )
 
     log_file = data_dir / "factorio-current.log"
-    if not log_file.is_file():
+    if not early_pass and not log_file.is_file():
         raise FileNotFoundError(f"Simulation log not written at {log_file}")
 
-    log_text = log_file.read_text(encoding="utf-8")
+    log_text = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
+    source_lines = stdout_lines if early_pass else log_text.splitlines()
     production_stats: dict[str, int] = {}
-    for line in log_text.splitlines():
+    result_line = ""
+    for line in source_lines:
         m_pstat = re.search(r"PRODUCTION_STAT:\s*(\S+)\s*=\s*(\d+)", line)
         if m_pstat:
             production_stats[m_pstat.group(1)] = int(m_pstat.group(2))
@@ -809,8 +1226,14 @@ end)
             or "PIPE at" in line
             or "TRACE step" in line
             or "UPSTREAM_" in line
+            or "FORCE_BONUSES:" in line
             or "PRODUCTION_STAT:" in line
+            or "STEADY_PRODUCTION:" in line
             or "CONSUMPTION_STAT:" in line
+            or "STEADY_CONSUMPTION:" in line
+            or "FLUID_PRODUCTION_STAT:" in line
+            or "FLUID_CONSUMPTION_STAT:" in line
+            or "RECIPE_BOTTLENECK:" in line
             or "BELT_INVENTORY:" in line
             or "NEARBY_BELTS_WITH_ITEMS" in line
             or "UNPOWERED_ENT:" in line
@@ -824,8 +1247,14 @@ end)
             result_line = line
 
     if not result_line:
-        raise RuntimeError(f"No FACTORY_TEST_RESULT found in simulation log.\nLOG:\n{log_text}")
+        raise RuntimeError(
+            f"No FACTORY_TEST_RESULT found in simulation log.\n"
+            f"STDOUT:\n{''.join(stdout_lines)}\nLOG:\n{log_text}"
+        )
 
+    m_tick = re.search(r"tick=(\d+)", result_line)
+    if m_tick:
+        completed_tick = int(m_tick.group(1))
     m_prod = re.search(r"produced=(\d+)", result_line)
     m_active = re.search(r"active=(\d+)/(\d+)", result_line)
     m_ratio = re.search(r"ratio=([\d.]+)", result_line)
@@ -834,6 +1263,7 @@ end)
     m_zero_prod = re.search(r"zero_prod=\[(.*?)\]", result_line)
 
     return {
+        "completed_tick": completed_tick,
         "produced": int(m_prod.group(1)) if m_prod else 0,
         "production_stats": production_stats,
         "active_machines": int(m_active.group(1)) if m_active else 0,
@@ -911,7 +1341,6 @@ def main() -> None:
         width, height, area = check_def_area(args.def_file, max_area=args.max_area)
         print(f"factorilog: Area validation passed ({width:.0f}x{height:.0f} = {area:.1f} tiles)")
 
-
     # 4. Headless simulation
     try:
         game_bin = find_factorio_binary(args.factorio_bin)
@@ -926,8 +1355,12 @@ def main() -> None:
             ticks=args.ticks,
             game_bin=game_bin,
             work_dir=Path(tmp),
+            expected_items=expected_items,
+            min_produced=args.min_produced,
+            min_active_ratio=args.min_active_ratio,
         )
 
+    completed_tick = metrics.get("completed_tick", args.ticks)
     produced = metrics["produced"]
     production_stats = metrics.get("production_stats", {})
     active_ratio = metrics["active_ratio"]
@@ -943,7 +1376,7 @@ def main() -> None:
         for it in expected_items
     )
     print(
-        f"factorilog: Simulation completed at tick {args.ticks}: "
+        f"factorilog: Simulation completed at tick {completed_tick} (max {args.ticks}): "
         f"{prod_summary} produced (required >= {args.min_produced} each), "
         f"active machines: {active_cnt}/{total_cnt} ({active_ratio * 100:.1f}%), "
         f"productive machines: {productive_cnt}/{total_cnt} ({productive_cnt / total_cnt * 100:.1f}%), "

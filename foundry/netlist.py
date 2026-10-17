@@ -148,6 +148,12 @@ class Net:
         self.sinks: list[str] = []
         self.rate_per_min = 0.0
         self.bus_inputs: list[str] = []
+        self.sub_buses: list[str] = []
+        self.orig_drivers: list[str] = []
+        self.driver_rates: dict[str, float] = {}
+        self.driver_rated: dict[str, float] = {}
+        self.sink_rates: dict[str, float] = {}
+        self.sink_rated: dict[str, float] = {}
 
 
 class Netlist:
@@ -162,7 +168,9 @@ class Netlist:
         self.inputs: list[str] = []
         self.outputs: list[str] = []
         self.balancer_plans: dict[str, list[tuple[str, str, str, str, str]]] = {}
+        self.merge_plans: dict[str, list[tuple[str, str, str, str]]] = {}
         self.material_depths: dict[str, int] = {}
+        self.belt_capacity: float = 0.0
 
     def net(self, material: str) -> Net:
         if material not in self.nets:
@@ -225,6 +233,11 @@ def build(
     plan_count = {line[0]: line[3] for line in lines}
 
     nl = Netlist("factory", fluids=set(data.prototypes.get("fluid", {}).keys()))
+    belt_tiers = tech.belt_tiers()
+    if belt_tiers:
+        nl.belt_capacity = (
+            float(belt_tiers[0]["items_per_lane"]) * pdk.LANES_PER_BELT * pdk.TICKS_PER_SECOND
+        )
     for recipe, rate in sorted(rates.items()):
         if isinstance(machine_override, dict):
             machine = machine_override.get(recipe, "assembling-machine-3")
@@ -240,20 +253,104 @@ def build(
         if cell is None:
             raise RuntimeError(f"no cell for {machine} running {recipe}")
         nl.cells[cell["cell"]] = cell
-        count = max(1, math.ceil(plan_count.get(recipe, 1.0)))
+        is_single_pack = len(demand) <= 1 and "space-science-pack" not in demand
+        eff_cpm = (
+            float(cell.get("effective_crafts_per_minute", cell["crafts_per_minute"]))
+            if is_single_pack
+            else float(cell["crafts_per_minute"])
+        )
+        count = (
+            max(1, math.ceil(rate / eff_cpm - 1e-9))
+            if (is_single_pack and eff_cpm > 0)
+            else max(1, math.ceil(plan_count.get(recipe, 1.0)))
+        )
+        if (
+            is_single_pack
+            and eff_cpm > 0
+            and cell.get("has_fluids")
+            and len(cell.get("outputs", [])) > 1
+            and rate / (count * eff_cpm) > 0.90
+        ):
+            count += 1
+        if (
+            is_single_pack
+            and eff_cpm > 0
+            and nl.belt_capacity > 0
+            and len(cell.get("outputs", [])) == 1
+            and recipe_proto
+        ):
+            out_name = cell["outputs"][0]
+            res_entry = next(
+                (e for e in solve.Data.results_of(recipe_proto) if solve.name_of(e) == out_name),
+                None,
+            )
+            out_amt = solve.amount_of(res_entry) if res_entry else 1.0
+            drv_cap = eff_cpm * out_amt
+            if rate * out_amt > nl.belt_capacity and drv_cap > 0:
+                max_drvs_bus = max(1, int((0.90 * nl.belt_capacity) // drv_cap))
+                b_max_cap = min(nl.belt_capacity, max_drvs_bus * drv_cap)
+                c_totals: list[float] = []
+                for c_rec, c_rate in rates.items():
+                    c_proto = data.recipes.get(c_rec)
+                    if c_proto:
+                        c_totals.extend(
+                            c_rate * solve.amount_of(ing)
+                            for ing in c_proto.get("ingredients", [])
+                            if solve.name_of(ing) == out_name
+                        )
+                if len(c_totals) > 1:
+                    whole_d = sum(d for d in c_totals if d <= b_max_cap + 1e-6)
+                    split_ds = [d for d in c_totals if d > b_max_cap + 1e-6]
+                    if 0.50 * b_max_cap <= whole_d <= b_max_cap + 1e-6 and len(split_ds) == 1:
+                        k_split = math.ceil(split_ds[0] / b_max_cap - 1e-9)
+                        min_part_drvs = math.ceil(whole_d / drv_cap - 1e-9) + math.ceil(
+                            split_ds[0] / drv_cap - 1e-9
+                        )
+                        if k_split >= 2 and min_part_drvs > count:
+                            count = min_part_drvs
+        if is_single_pack and count > 2 and (count & (count - 1)) != 0 and eff_cpm > 0:
+            d_tree = int(math.log2(count))
+            next_pow2 = 1 << (d_tree + 1)
+            if eff_cpm < rate * (0.5**d_tree) - 1e-6:
+                item_amts = [
+                    solve.amount_of(e)
+                    for e in (recipe_proto.get("ingredients", []) if recipe_proto else [])
+                    if solve.name_of(e) not in nl.fluids
+                ]
+                if item_amts and (
+                    nl.belt_capacity <= 0 or rate * max(item_amts) <= nl.belt_capacity + 1e-6
+                ):
+                    excess_item_rate = min(item_amts) * (rate * (0.5**d_tree) - eff_cpm)
+                    belt_ips = (
+                        (nl.belt_capacity / pdk.TICKS_PER_SECOND) if nl.belt_capacity > 0 else 15.0
+                    )
+                    if 0.0 < excess_item_rate <= belt_ips / 3.0 + 1e-6:
+                        count = next_pow2
         # Each instance of the fleet takes an equal share of the recipe.
         share = rate / count
+        rated_crafts = eff_cpm
         for index in range(count):
             inst = Instance(
                 f"u_{sanitize(recipe)}_{index + 1}",
                 cell["cell"],
                 recipe,
                 share,
-                cell["crafts_per_minute"],
+                rated_crafts,
             )
             nl.instances.append(inst)
             for inp in cell.get("inputs", []):
-                nl.net(inp).sinks.append(inst.name)
+                in_amt = 1.0
+                if recipe_proto:
+                    in_entry = next(
+                        (e for e in recipe_proto.get("ingredients", []) if solve.name_of(e) == inp),
+                        None,
+                    )
+                    if in_entry:
+                        in_amt = solve.amount_of(in_entry)
+                in_net = nl.net(inp)
+                in_net.sinks.append(inst.name)
+                in_net.sink_rates[inst.name] = share * in_amt
+                in_net.sink_rated[inst.name] = rated_crafts * in_amt
             for outp in cell.get("outputs", []):
                 amt = 1.0
                 if recipe_proto:
@@ -267,17 +364,19 @@ def build(
                     )
                     if res_entry:
                         amt = solve.amount_of(res_entry)
-                nl.net(outp).rate_per_min += rate * amt
-                nl.net(outp).drivers.append(inst.name)
+                out_net = nl.net(outp)
+                out_net.rate_per_min += share * amt
+                out_net.drivers.append(inst.name)
+                out_net.driver_rates[inst.name] = share * amt
+                out_net.driver_rated[inst.name] = rated_crafts * amt
 
     for material, rate in raw.items():
         net = nl.net(material)
         net.rate_per_min = rate
         is_fluid = net.is_fluid or material in nl.fluids
-        # Yellow belt capacity is 900 items per minute (15 items/sec).
         # Divide high-throughput input lines into power-of-two buses.
-        if not is_fluid and rate > 900.0:
-            num_belts = 2 ** math.ceil(math.log2(math.ceil(rate / 900.0)))
+        if not is_fluid and nl.belt_capacity > 0 and rate > nl.belt_capacity:
+            num_belts = 2 ** math.ceil(math.log2(math.ceil(rate / nl.belt_capacity)))
             net.bus_inputs = [f"{material}__bus{i}" for i in range(num_belts)]
             for bus_name in net.bus_inputs:
                 nl.net(bus_name).rate_per_min = rate / num_belts
@@ -398,6 +497,8 @@ def merge_net(nl: Netlist, net: Net) -> list[tuple[str, str, str, str]]:
     """
     if net.is_fluid or net.material in nl.fluids or len(net.drivers) <= 1:
         return []
+    if not net.orig_drivers:
+        net.orig_drivers = list(net.drivers)
     material = sanitize(net.material)
     entries: list[tuple[str, str, str, str]] = []
     count = 0
@@ -478,6 +579,203 @@ def _balance_inputs(
     return s1
 
 
+def _partition_sinks_by_demand(
+    sinks: list[str],
+    sink_rates: dict[str, float],
+    k: int,
+    bus_max_cap: float | None = None,
+    inst_by_name: dict[str, Instance] | None = None,
+) -> list[list[str]]:
+    """Partition an ordered list of sinks into k groups balanced by demand."""
+    if k <= 1 or len(sinks) <= 1:
+        return [list(sinks)]
+    k = min(k, len(sinks))
+
+    if inst_by_name is not None:
+        by_recipe: dict[str, list[str]] = collections.defaultdict(list)
+        first_idx: dict[str, int] = {}
+        for idx, s in enumerate(sinks):
+            rec = inst_by_name[s].recipe if s in inst_by_name else ""
+            if rec not in first_idx:
+                first_idx[rec] = idx
+            by_recipe[rec].append(s)
+        if len(by_recipe) > 1:
+            groups: list[list[str]] = [[] for _ in range(k)]
+            bus_loads = [0.0] * k
+            recipe_totals = {
+                r: sum(max(1e-6, sink_rates.get(s, 1.0)) for s in r_sinks)
+                for r, r_sinks in by_recipe.items()
+            }
+            if len(by_recipe) >= k and (
+                bus_max_cap is None or max(recipe_totals.values()) <= bus_max_cap + 1e-6
+            ):
+                block_recipes = sorted(
+                    by_recipe.keys(),
+                    key=lambda r: (-round(recipe_totals[r], 6), first_idx[r]),
+                )
+                for rec in block_recipes:
+                    r_sinks = by_recipe[rec]
+                    group_w = recipe_totals[rec]
+                    best_b = min(range(k), key=lambda b: (round(bus_loads[b], 6), b))
+                    groups[best_b].extend(r_sinks)
+                    bus_loads[best_b] += group_w
+                inst_map = inst_by_name
+                groups = [g for g in groups if g]
+                groups.sort(
+                    key=lambda g: (
+                        min(
+                            (inst_map[s].rank for s in g if s in inst_map),
+                            default=0,
+                        ),
+                        _natural_key(g[0]),
+                    )
+                )
+                return groups
+
+            if bus_max_cap is not None:
+                whole_recipes = [r for r in by_recipe if recipe_totals[r] <= bus_max_cap + 1e-6]
+                split_recipes = [r for r in by_recipe if recipe_totals[r] > bus_max_cap + 1e-6]
+                if (
+                    whole_recipes
+                    and len(split_recipes) == 1
+                    and sum(recipe_totals[r] for r in whole_recipes) >= 0.50 * bus_max_cap
+                ):
+                    whole_sorted = sorted(
+                        whole_recipes,
+                        key=lambda r: (first_idx[r], -round(recipe_totals[r], 6)),
+                    )
+                    for rec in whole_sorted:
+                        r_sinks = by_recipe[rec]
+                        group_w = recipe_totals[rec]
+                        placed = False
+                        for b in range(k - 1):
+                            if groups[b] and bus_loads[b] + group_w <= bus_max_cap + 1e-6:
+                                groups[b].extend(r_sinks)
+                                bus_loads[b] += group_w
+                                placed = True
+                                break
+                        if not placed:
+                            for b in range(k - 1):
+                                if not groups[b] and group_w <= bus_max_cap + 1e-6:
+                                    groups[b].extend(r_sinks)
+                                    bus_loads[b] += group_w
+                                    placed = True
+                                    break
+                            if not placed:
+                                best_b = min(range(k), key=lambda b: (round(bus_loads[b], 6), b))
+                                groups[best_b].extend(r_sinks)
+                                bus_loads[best_b] += group_w
+                    empty_buses = [b for b in range(k) if not groups[b]]
+                    s_rec = split_recipes[0]
+                    s_sinks = by_recipe[s_rec]
+                    s_total = recipe_totals[s_rec]
+                    if (
+                        empty_buses
+                        and len(s_sinks) >= len(empty_buses)
+                        and s_total / len(empty_buses) <= bus_max_cap + 1e-6
+                    ):
+                        s_idx = 0
+                        n_s = len(s_sinks)
+                        for b_pos, b in enumerate(empty_buses):
+                            rem_b = len(empty_buses) - b_pos
+                            rem_s = n_s - s_idx
+                            chunk = (rem_s + rem_b - 1) // rem_b
+                            groups[b].extend(s_sinks[s_idx : s_idx + chunk])
+                            bus_loads[b] += sum(
+                                max(1e-6, sink_rates.get(s, 1.0))
+                                for s in s_sinks[s_idx : s_idx + chunk]
+                            )
+                            s_idx += chunk
+                        return [g for g in groups if g]
+                    groups = [[] for _ in range(k)]
+                    bus_loads = [0.0] * k
+
+            sorted_recipes = sorted(
+                by_recipe.keys(),
+                key=lambda r: (
+                    -round(max(sink_rates.get(s, 1.0) for s in by_recipe[r]), 6),
+                    -round(recipe_totals[r], 6),
+                    first_idx[r],
+                ),
+            )
+            for rec in sorted_recipes:
+                r_sinks = by_recipe[rec]
+                r_weights = [max(1e-6, sink_rates.get(s, 1.0)) for s in r_sinks]
+                group_w = sum(r_weights)
+                target_after = (sum(bus_loads) + group_w) / k
+                if len(r_sinks) <= k:
+                    bus_order = sorted(range(k), key=lambda b: (round(bus_loads[b], 6), b))
+                    for s, w, b in zip(r_sinks, r_weights, bus_order, strict=False):
+                        groups[b].append(s)
+                        bus_loads[b] += w
+                elif len(r_sinks) <= 2 * k and max(r_weights) > target_after / 3.0:
+                    for s, w in zip(r_sinks, r_weights, strict=True):
+                        best_b = min(range(k), key=lambda b: (round(bus_loads[b], 6), b))
+                        groups[best_b].append(s)
+                        bus_loads[best_b] += w
+                else:
+                    needs = [max(0.0, target_after - bus_loads[b]) for b in range(k)]
+                    sum_needs = sum(needs)
+                    quotas = (
+                        [group_w * (nd / sum_needs) for nd in needs]
+                        if sum_needs > 1e-6
+                        else [group_w / k] * k
+                    )
+                    cur_bus = 0
+                    cur_added = 0.0
+                    n_r = len(r_sinks)
+                    for idx, (s, w) in enumerate(zip(r_sinks, r_weights, strict=True)):
+                        rem_sinks = n_r - idx
+                        while cur_bus < k - 1 and (cur_added > 0 or groups[cur_bus]):
+                            empty_after = sum(1 for b in range(cur_bus + 1, k) if not groups[b])
+                            if (
+                                rem_sinks <= empty_after
+                                or (
+                                    bus_max_cap is not None
+                                    and bus_loads[cur_bus] + w > bus_max_cap + 1e-6
+                                )
+                                or (
+                                    cur_added + w > quotas[cur_bus]
+                                    and abs((cur_added + w) - quotas[cur_bus])
+                                    > abs(cur_added - quotas[cur_bus])
+                                )
+                            ):
+                                cur_bus += 1
+                                cur_added = 0.0
+                            else:
+                                break
+                        groups[cur_bus].append(s)
+                        bus_loads[cur_bus] += w
+                        cur_added += w
+            return [g for g in groups if g]
+
+    weights = [max(1e-6, sink_rates.get(s, 1.0)) for s in sinks]
+    total_w = sum(weights)
+    target_w = total_w / k
+
+    groups = [[] for _ in range(k)]
+    cur_bus = 0
+    cur_w = 0.0
+    n_sinks = len(sinks)
+    for idx, (s, w) in enumerate(zip(sinks, weights, strict=True)):
+        rem_sinks = n_sinks - idx
+        rem_buses = k - 1 - cur_bus
+        if (
+            cur_bus < k - 1
+            and groups[cur_bus]
+            and (
+                rem_sinks <= rem_buses
+                or (bus_max_cap is not None and cur_w + w > bus_max_cap + 1e-6)
+                or (cur_w + w > target_w and abs((cur_w + w) - target_w) > abs(cur_w - target_w))
+            )
+        ):
+            cur_bus += 1
+            cur_w = 0.0
+        groups[cur_bus].append(s)
+        cur_w += w
+    return [g for g in groups if g]
+
+
 def split_net(
     nl: Netlist,
     net: Net,
@@ -511,7 +809,11 @@ def split_net(
         rank = 0
 
     wire_target_rank: dict[str, int] = {}
+    wire_weight: dict[str, float] = {}
     for s in net.sinks:
+        w_s = max(1e-6, net.sink_rates.get(s, 1.0))
+        wire_weight[s] = w_s
+        wire_weight[f"{material}__{s}"] = w_s
         if s in inst_by_name:
             wire_target_rank[s] = inst_by_name[s].rank
             wire_target_rank[f"{material}__{s}"] = inst_by_name[s].rank
@@ -524,7 +826,17 @@ def split_net(
             return int(m.group(1))
         return default
 
-    def _build_tree(in_wire: str, sinks: list[str], tree_rank: int | None = None) -> None:
+    def _sink_weight(w: str) -> float:
+        return max(1e-6, wire_weight.get(w, 1.0))
+
+    is_single_pack = len(nl.outputs) <= 1 and "space-science-pack" not in nl.outputs
+
+    def _build_tree(
+        in_wire: str,
+        sinks: list[str],
+        tree_rank: int | None = None,
+        unbacked_flow: float | None = None,
+    ) -> None:
         if not synthesize_trees or len(sinks) <= 1:
             return
         count[0] += 1
@@ -541,22 +853,67 @@ def split_net(
             nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
             return
 
-        mid = len(sinks) // 2
+        weights = [_sink_weight(w) for w in sinks]
+        total_w = sum(weights)
+        if not is_single_pack:
+            mid = len(sinks) // 2
+        else:
+            eff_flow = min(total_w, unbacked_flow) if unbacked_flow is not None else total_w
+            if weights[0] > eff_flow / 4.0 + 1e-6 and (
+                weights[0] > weights[1] + 1e-6
+                or (
+                    unbacked_flow is None
+                    and len(sinks) >= 6
+                    and weights[0] >= 4.0 * weights[-1] - 1e-6
+                )
+            ):
+                best_mid = 1
+            elif weights[-1] > eff_flow / 4.0 + 1e-6 and (
+                weights[-1] > weights[-2] + 1e-6
+                or (
+                    unbacked_flow is None
+                    and len(sinks) >= 6
+                    and weights[-1] >= 4.0 * weights[0] - 1e-6
+                )
+            ):
+                best_mid = len(sinks) - 1
+            else:
+                best_mid = len(sinks) // 2
+                best_key: tuple[float, int, int] | None = None
+                acc_w = 0.0
+                for idx in range(1, len(sinks)):
+                    acc_w += weights[idx - 1]
+                    diff = round(abs(acc_w - (total_w - acc_w)), 6)
+                    rank_boundary = (
+                        0 if _sink_rank(sinks[idx - 1], r) != _sink_rank(sinks[idx], r) else 1
+                    )
+                    cand_key = (diff, rank_boundary, abs(idx - len(sinks) // 2))
+                    if best_key is None or cand_key < best_key:
+                        best_key = cand_key
+                        best_mid = idx
+            mid = best_mid
         left = sinks[:mid]
         right = sinks[mid:]
         r_left = min((_sink_rank(w, r) for w in left), default=r)
         r_right = min((_sink_rank(w, r) for w in right), default=r)
         is_trunk = r <= min(r_left, r_right) and r_left < r_right
 
-        left_sub = [inst_by_name[s].rank for s in left if s in inst_by_name]
-        left_rank = min(left_sub) if left_sub else r
-        right_sub = [inst_by_name[s].rank for s in right if s in inst_by_name]
-        right_rank = min(right_sub) if right_sub else r
+        if not is_single_pack:
+            left_rank = r_left if r_left == max((_sink_rank(w, r) for w in left), default=r) else r
+            right_rank = (
+                r_right if r_right == max((_sink_rank(w, r) for w in right), default=r) else r
+            )
+        else:
+            left_rank = r_left
+            right_rank = r_right
 
         w_left = left[0] if len(left) == 1 else f"{material}__sp_{count[0]}_1"
         w_right = right[0] if len(right) == 1 else f"{material}__sp_{count[0]}_2"
         wire_target_rank[w_left] = r_left
         wire_target_rank[w_right] = r_right
+        wire_weight[w_left] = sum(_sink_weight(w) for w in left)
+        wire_weight[w_right] = sum(_sink_weight(w) for w in right)
+        child_flow = (unbacked_flow / 2.0) if unbacked_flow is not None else (total_w / 2.0)
 
         if is_trunk:
             y1_wire = w_right
@@ -564,62 +921,248 @@ def split_net(
             entries.append((name, in_wire, y1_wire, y2_wire))
             nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
             if len(right) > 1:
-                _build_tree(y1_wire, right, tree_rank=right_rank)
+                _build_tree(y1_wire, right, tree_rank=right_rank, unbacked_flow=child_flow)
             if len(left) > 1:
-                _build_tree(y2_wire, left, tree_rank=left_rank)
+                _build_tree(y2_wire, left, tree_rank=left_rank, unbacked_flow=child_flow)
         else:
             y1_wire = w_left
             y2_wire = w_right
             entries.append((name, in_wire, y1_wire, y2_wire))
             nl.instances.append(Instance(name, SPLIT_CELL, net.material, 0.0, 0.0, rank=r))
             if len(left) > 1:
-                _build_tree(y1_wire, left, tree_rank=left_rank)
+                _build_tree(y1_wire, left, tree_rank=left_rank, unbacked_flow=child_flow)
             if len(right) > 1:
-                _build_tree(y2_wire, right, tree_rank=right_rank)
+                _build_tree(y2_wire, right, tree_rank=right_rank, unbacked_flow=child_flow)
 
-    def _build_rank_grouped_tree(in_wire: str, sink_names: list[str]) -> None:
-        sinks_by_rank: dict[int, list[str]] = collections.defaultdict(list)
-        for s in sink_names:
-            inst = inst_by_name.get(s)
-            r = inst.rank if inst else rank
-            sinks_by_rank[r].append(s)
-
-        sorted_sink_ranks = sorted(sinks_by_rank.keys())
-        sub_targets = [f"{material}__{s}" for s in sink_names]
+    def _build_rank_grouped_tree(
+        in_wire: str, sink_names: list[str], bus_supply: float | None = None
+    ) -> None:
+        if not is_single_pack:
+            ordered_sinks = sorted(
+                sink_names,
+                key=lambda s: (
+                    inst_by_name[s].rank if s in inst_by_name else rank,
+                    _natural_key(s),
+                ),
+            )
+        else:
+            ordered_sinks = sorted(
+                sink_names,
+                key=lambda s: (
+                    inst_by_name[s].rank if s in inst_by_name else rank,
+                    -round(net.sink_rates.get(s, 1.0), 6),
+                    _natural_key(s),
+                ),
+            )
+        sink_r_set = {inst_by_name[s].rank if s in inst_by_name else rank for s in ordered_sinks}
+        sorted_sink_ranks = sorted(sink_r_set)
+        sub_targets = [f"{material}__{s}" for s in ordered_sinks]
         if len(sorted_sink_ranks) <= 1:
             target_rank = sorted_sink_ranks[0] if sorted_sink_ranks else rank
-            chosen_rank = rank if (driver_ranks and not is_primary) else target_rank
-            _build_tree(in_wire, sub_targets, tree_rank=chosen_rank)
+            if (
+                is_single_pack
+                and driver_ranks
+                and net.material not in nl.inputs
+                and target_rank > max(driver_ranks) + 1
+            ):
+                chosen_rank = (max(driver_ranks) + target_rank) // 2
+            else:
+                chosen_rank = rank if (driver_ranks and not is_primary) else target_rank
         else:
-            rank_feeds: list[str] = []
-            sub_sink_lists: list[tuple[str, list[str], int]] = []
-            for r in sorted_sink_ranks:
-                sub_sinks = [f"{material}__{s}" for s in sinks_by_rank[r]]
-                if len(sub_sinks) == 1:
-                    rank_feeds.append(sub_sinks[0])
-                else:
-                    count[0] += 1
-                    feed_wire = f"{material}__rf_{r}_{count[0]}"
-                    wire_target_rank[feed_wire] = r
-                    rank_feeds.append(feed_wire)
-                    sub_sink_lists.append((feed_wire, sub_sinks, r))
+            chosen_rank = rank if rank < min(sorted_sink_ranks) else min(sorted_sink_ranks)
+        _build_tree(in_wire, sub_targets, tree_rank=chosen_rank, unbacked_flow=bus_supply)
 
-            trunk_rank = rank if rank < min(sorted_sink_ranks) else min(sorted_sink_ranks)
-            _build_tree(in_wire, rank_feeds, tree_rank=trunk_rank)
-            for feed_wire, sub_sinks, r in sub_sink_lists:
-                _build_tree(feed_wire, sub_sinks, tree_rank=r)
+    orig_drivers = net.orig_drivers if net.orig_drivers else list(net.drivers)
+    belt_cap = nl.belt_capacity
+    max_sink_rate = max((net.sink_rates.get(s, 0.0) for s in net.sinks), default=0.0)
+    needs_multibus_for_heavy_sink = (
+        len(orig_drivers) >= 4
+        and len(net.sinks) >= 2
+        and max_sink_rate > 0.50 * net.rate_per_min + 1e-6
+    )
+    sink_recipes = {inst_by_name[s].recipe for s in net.sinks if s in inst_by_name}
+    has_multi_recipe_sinks = len(orig_drivers) >= 3 and len(sink_recipes) >= 2
+    can_multibus_base = (
+        is_single_pack
+        and synthesize_trees
+        and not net.bus_inputs
+        and net.material not in nl.inputs
+        and net.material not in nl.outputs
+        and belt_cap > 0
+        and (net.rate_per_min > belt_cap or needs_multibus_for_heavy_sink or has_multi_recipe_sinks)
+        and len(orig_drivers) >= 2
+        and len(net.sinks) >= 2
+        and net.material in getattr(nl, "merge_plans", {})
+    )
+
+    multibus_plan: tuple[list[list[str]], list[list[str]], list[float], list[float]] | None = None
+    if can_multibus_base:
+        eff_cap = 0.90 * belt_cap
+        ordered_drivers = sorted(
+            orig_drivers,
+            key=lambda d: (inst_by_name[d].rank if d in inst_by_name else 0, _natural_key(d)),
+        )
+        ordered_sinks = sorted(
+            net.sinks,
+            key=lambda s: (inst_by_name[s].rank if s in inst_by_name else rank, _natural_key(s)),
+        )
+        max_drv_rated = max(
+            (net.driver_rated.get(d, net.driver_rates.get(d, 0.0)) for d in ordered_drivers),
+            default=0.0,
+        )
+        max_drvs_per_bus = (
+            max(1, int(eff_cap // max_drv_rated)) if max_drv_rated > 0 else len(ordered_drivers)
+        )
+        min_buses_by_drv = math.ceil(len(ordered_drivers) / max_drvs_per_bus)
+        min_buses_by_rate = math.ceil(net.rate_per_min / eff_cap)
+        bus_max_cap = min(
+            belt_cap, max_drvs_per_bus * max_drv_rated if max_drv_rated > 0 else belt_cap
+        )
+        force_multibus = net.rate_per_min > belt_cap or needs_multibus_for_heavy_sink
+        if force_multibus:
+            base_k = min(
+                max(2, min_buses_by_drv, min_buses_by_rate),
+                len(ordered_drivers) // 2,
+                len(ordered_sinks),
+            )
+            max_f_k = min(len(ordered_drivers) // 2, len(ordered_sinks))
+            if len(sink_recipes) > 1 and base_k + 1 <= max_f_k:
+                cand_ks = [base_k, base_k + 1]
+            else:
+                cand_ks = [base_k]
+        else:
+            max_k = min(len(sink_recipes), len(ordered_drivers) - 1, len(ordered_sinks))
+            cand_ks = list(range(max_k, 1, -1))
+
+        recipe_totals = {
+            r: sum(
+                max(1e-6, net.sink_rates.get(s, 1.0))
+                for s in ordered_sinks
+                if s in inst_by_name and inst_by_name[s].recipe == r
+            )
+            for r in sink_recipes
+        }
+
+        for cand_k in cand_ks:
+            if cand_k < 2:
+                continue
+            s_groups = _partition_sinks_by_demand(
+                ordered_sinks,
+                net.sink_rates,
+                cand_k,
+                bus_max_cap=bus_max_cap,
+                inst_by_name=inst_by_name,
+            )
+            eff_k = len(s_groups)
+            if eff_k < 2:
+                continue
+            if (
+                force_multibus
+                and len(cand_ks) > 1
+                and cand_k == cand_ks[0]
+                and any(v > bus_max_cap + 1e-6 for v in recipe_totals.values())
+                and any(
+                    len({inst_by_name[s].recipe for s in grp if s in inst_by_name}) > 1
+                    and any(
+                        recipe_totals.get(inst_by_name[s].recipe, 0.0) > bus_max_cap + 1e-6
+                        for s in grp
+                        if s in inst_by_name
+                    )
+                    for grp in s_groups
+                )
+            ):
+                next_groups = _partition_sinks_by_demand(
+                    ordered_sinks,
+                    net.sink_rates,
+                    cand_ks[1],
+                    bus_max_cap=bus_max_cap,
+                    inst_by_name=inst_by_name,
+                )
+                next_demands = [
+                    sum(max(1e-6, net.sink_rates.get(s, 1.0)) for s in grp) for grp in next_groups
+                ]
+                next_needed = (
+                    sum(math.ceil((d - 1e-6) / max_drv_rated) for d in next_demands)
+                    if max_drv_rated > 0
+                    else len(ordered_drivers) + 1
+                )
+                if next_needed <= len(ordered_drivers):
+                    continue
+            min_drvs = [2 if (force_multibus or len(grp) < 2) else 1 for grp in s_groups]
+            if sum(min_drvs) > len(ordered_drivers):
+                continue
+            b_demands = [
+                sum(max(1e-6, net.sink_rates.get(s, 1.0)) for s in grp) for grp in s_groups
+            ]
+            tot_demand = sum(b_demands)
+            d_groups: list[list[str]] = []
+            n_drvs = len(ordered_drivers)
+            needed_drvs = (
+                [
+                    max(min_drvs[b], math.ceil((b_demands[b] - 1e-6) / max_drv_rated))
+                    for b in range(eff_k)
+                ]
+                if max_drv_rated > 0
+                else []
+            )
+            if needed_drvs and sum(needed_drvs) == n_drvs:
+                prev_idx = 0
+                for b in range(eff_k):
+                    next_idx = prev_idx + needed_drvs[b]
+                    d_groups.append(ordered_drivers[prev_idx:next_idx])
+                    prev_idx = next_idx
+            else:
+                prev_idx = 0
+                cum_demand = 0.0
+                for b in range(eff_k):
+                    cum_demand += b_demands[b]
+                    if b == eff_k - 1:
+                        next_idx = n_drvs
+                    else:
+                        raw_ideal = (cum_demand / tot_demand) * n_drvs
+                        ideal_idx = (
+                            math.ceil(raw_ideal - 1e-9)
+                            if b_demands[b] < (tot_demand / eff_k) - 1e-6
+                            else round(raw_ideal)
+                        )
+                        min_idx = prev_idx + min_drvs[b]
+                        max_idx = n_drvs - sum(min_drvs[b + 1 :])
+                        next_idx = max(min_idx, min(max_idx, ideal_idx))
+                    d_groups.append(ordered_drivers[prev_idx:next_idx])
+                    prev_idx = next_idx
+            b_supplies = [
+                sum(net.driver_rated.get(d, net.driver_rates.get(d, 0.0)) for d in d_grp)
+                for d_grp in d_groups
+            ]
+            if force_multibus or all(
+                b_supplies[b] >= 0.98 * b_demands[b] - 1e-6 for b in range(eff_k)
+            ):
+                multibus_plan = (s_groups, d_groups, b_demands, b_supplies)
+                break
 
     if net.bus_inputs and len(net.bus_inputs) > 1 and bal_entries is not None:
         bus_wires = [sanitize(b) for b in net.bus_inputs]
         balanced_outputs = _balance_inputs(
             nl, material, net.material, bus_wires, bal_entries, bal_count
         )
-        k = len(balanced_outputs)
-        chunk_size = len(net.sinks) / k
-        for i, out_wire in enumerate(balanced_outputs):
-            start = round(i * chunk_size)
-            end = round((i + 1) * chunk_size)
-            sub_sink_names = net.sinks[start:end]
+        if not is_single_pack:
+            k_bal = len(balanced_outputs)
+            chunk_size = len(net.sinks) / k_bal
+            sink_groups = [
+                net.sinks[round(i * chunk_size) : round((i + 1) * chunk_size)] for i in range(k_bal)
+            ]
+        else:
+            ordered_sinks = sorted(
+                net.sinks,
+                key=lambda s: (
+                    inst_by_name[s].rank if s in inst_by_name else rank,
+                    _natural_key(s),
+                ),
+            )
+            sink_groups = _partition_sinks_by_demand(
+                ordered_sinks, net.sink_rates, len(balanced_outputs), inst_by_name=inst_by_name
+            )
+        for out_wire, sub_sink_names in zip(balanced_outputs, sink_groups, strict=False):
             if synthesize_trees:
                 if len(sub_sink_names) > 1:
                     _build_rank_grouped_tree(out_wire, sub_sink_names)
@@ -631,6 +1174,85 @@ def split_net(
                             bal_entries[idx] = (b_name, b_a1, b_a2, single_target, b_y2)
                         elif b_y2 == out_wire:
                             bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, single_target)
+    elif multibus_plan is not None:
+        sink_groups, drv_groups, _bus_demands, bus_supplies = multibus_plan
+
+        # Rebuild merge trees for each sub-bus in-place
+        new_merge_entries: list[tuple[str, str, str, str]] = []
+        new_merge_insts: list[Instance] = []
+        m_count = 0
+
+        def _build_sub_merge_tree(
+            items: list[str], default_rank: int, root_wire: str | None = None
+        ) -> str:
+            nonlocal m_count
+            if len(items) == 1:
+                return items[0]
+            if len(items) == 2:
+                m_count += 1
+                m_name = f"u_merge_{material}_{m_count}"
+                y_w = root_wire if root_wire is not None else f"{material}__m{m_count}"
+                new_merge_entries.append((m_name, items[0], items[1], y_w))
+                new_merge_insts.append(
+                    Instance(m_name, MERGE_CELL, net.material, 0.0, 0.0, rank=default_rank)
+                )
+                return y_w
+            mid_idx = (len(items) + 1) // 2
+            l_out = _build_sub_merge_tree(items[:mid_idx], default_rank, root_wire=None)
+            r_out = _build_sub_merge_tree(items[mid_idx:], default_rank, root_wire=None)
+            m_count += 1
+            m_name = f"u_merge_{material}_{m_count}"
+            y_w = root_wire if root_wire is not None else f"{material}__m{m_count}"
+            new_merge_entries.append((m_name, l_out, r_out, y_w))
+            new_merge_insts.append(
+                Instance(m_name, MERGE_CELL, net.material, 0.0, 0.0, rank=default_rank)
+            )
+            return y_w
+
+        bus_wires: list[str] = []
+        bus_root_mergers: list[str] = []
+        for b, d_grp in enumerate(drv_groups):
+            if len(d_grp) == 1:
+                b_wire = f"{material}__{d_grp[0]}"
+                bus_wires.append(b_wire)
+                bus_root_mergers.append(d_grp[0])
+                continue
+            b_wire = f"{material}__bus{b}"
+            bus_wires.append(b_wire)
+            drvs_by_r: dict[int, list[str]] = collections.defaultdict(list)
+            for d in d_grp:
+                inst = inst_by_name.get(d)
+                r_d = inst.rank if inst else 0
+                drvs_by_r[r_d].append(f"{material}__{d}")
+            s_ranks = sorted(drvs_by_r.keys())
+            if len(s_ranks) == 1:
+                _build_sub_merge_tree(drvs_by_r[s_ranks[0]], s_ranks[0], root_wire=b_wire)
+            else:
+                r_roots = [
+                    _build_sub_merge_tree(drvs_by_r[r_d], r_d, root_wire=None) for r_d in s_ranks
+                ]
+                _build_sub_merge_tree(r_roots, max(s_ranks), root_wire=b_wire)
+            bus_root_mergers.append(f"u_merge_{material}_{m_count}")
+
+        nl.instances = [
+            inst
+            for inst in nl.instances
+            if not (inst.cell_key == MERGE_CELL and inst.recipe == net.material)
+        ]
+        nl.instances.extend(new_merge_insts)
+        nl.merge_plans[net.material][:] = new_merge_entries
+        net.sub_buses = list(bus_wires)
+        net.drivers = [bus_root_mergers[0]]
+
+        for in_w, s_grp, b_sup in zip(bus_wires, sink_groups, bus_supplies, strict=True):
+            if len(s_grp) > 1:
+                _build_rank_grouped_tree(in_w, s_grp, bus_supply=b_sup if b_sup > 0 else None)
+            elif len(s_grp) == 1:
+                single_target = f"{material}__{s_grp[0]}"
+                for idx, m_entry in enumerate(nl.merge_plans[net.material]):
+                    m_name, m_a, m_b, m_y = m_entry
+                    if m_y == in_w:
+                        nl.merge_plans[net.material][idx] = (m_name, m_a, m_b, single_target)
     elif synthesize_trees:
         _build_rank_grouped_tree(material, net.sinks)
 
@@ -671,7 +1293,10 @@ def emit_verilog(
     internal = [
         m
         for m in sorted(nl.nets)
-        if m not in nl.inputs and m not in nl.outputs and not nl.nets[m].bus_inputs
+        if m not in nl.inputs
+        and m not in nl.outputs
+        and not nl.nets[m].bus_inputs
+        and not getattr(nl.nets[m], "sub_buses", None)
     ]
     out.extend(f"  wire {sanitize(m)};  // {nl.nets[m].rate_per_min:.2f} per min" for m in internal)
     declared: set[str] = set(input_wires) | {sanitize(m) for m in internal}
@@ -954,6 +1579,7 @@ def merge_plans_of(nl: Netlist) -> dict[str, list[tuple[str, str, str, str]]]:
         entries = merge_net(nl, net)
         if entries:
             plans[net.material] = entries
+    nl.merge_plans = plans
     return plans
 
 

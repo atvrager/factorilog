@@ -338,6 +338,7 @@ class Pdk:
         in_slots: dict[str, int] = {}
         out_slots: dict[str, int] = {}
         port_faces: dict[str, str] | None = None
+        unused_fluid_ports: list[tuple[float, float]] = []
 
         if fluid_boxes and has_fluids:
             in_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "input"]
@@ -478,6 +479,15 @@ class Pdk:
                 else:
                     out_slots[p] = y_offset + (idx % placed_h)
 
+            used_in_slots = set(in_slots.values())
+            used_out_slots = set(out_slots.values())
+            unused_fluid_ports = [
+                (0.5, float(s) + 0.5) for s in sorted(set(in_fb_slots) - used_in_slots)
+            ] + [
+                (float(width) - 0.5, float(s) + 0.5)
+                for s in sorted(set(out_fb_slots) - used_out_slots)
+            ]
+
             port_faces = dict.fromkeys(inputs, "W")
             port_faces.update(dict.fromkeys(outputs, "E"))
         elif proto.get("fixed_recipe") and proto.get("fixed_recipe") == recipe_proto.get(
@@ -524,6 +534,20 @@ class Pdk:
             for idx, p in enumerate(outputs):
                 out_slots[p] = offset_out + idx
 
+        raw_cpm = 60.0 * speed / seconds
+        in_amounts = {solve.name_of(e): solve.amount_of(e) for e in ingredients_raw}
+        out_amounts = {solve.name_of(e): solve.amount_of(e) for e in results_raw}
+        solid_port_amounts = [
+            amt for p, amt in (*in_amounts.items(), *out_amounts.items()) if p not in fluid_table
+        ]
+        max_solid_amt = max(solid_port_amounts, default=0.0)
+        port_cap = self.port_item_capacity_per_min()
+        eff_cpm = (
+            min(raw_cpm, port_cap / max_solid_amt)
+            if (max_solid_amt > 0.0 and port_cap > 0.0)
+            else raw_cpm
+        )
+
         # One machine crafts speed * 60 / craft_seconds per minute. The
         # solver's count formula is the inverse of this number.
         res_cell: dict[str, Any] = {
@@ -539,7 +563,11 @@ class Pdk:
             "out_slots": out_slots,
             "has_fluids": has_fluids,
             "watts": watts_of(proto.get("active_energy_usage") or proto.get("energy_usage", 0)),
-            "crafts_per_minute": 60.0 * speed / seconds,
+            "crafts_per_minute": raw_cpm,
+            "effective_crafts_per_minute": eff_cpm,
+            "in_amounts": in_amounts,
+            "out_amounts": out_amounts,
+            "inserter_tiers": self.inserter_tiers(),
             "inputs": inputs,
             "outputs": outputs,
         }
@@ -556,7 +584,61 @@ class Pdk:
                 res_cell["landing_pad_grid_size"] = int(pad_proto.get("build_grid_size", 2))
         if port_faces is not None:
             res_cell["port_faces"] = port_faces
+        if unused_fluid_ports:
+            res_cell["unused_fluid_ports"] = unused_fluid_ports
         return res_cell
+
+    def inserter_stack_size(self) -> int:
+        """Compute non-bulk electric inserter hand stack size from technology prototypes."""
+        bonus = 0.0
+        for tech in self.data.techs.values():
+            for eff in tech.get("effects", []):
+                if eff.get("type") == "inserter-stack-size-bonus":
+                    bonus += float(eff.get("modifier", 0.0))
+        return max(1, round(1.0 + bonus))
+
+    def inserter_tiers(self) -> list[dict[str, Any]]:
+        """Return 1-tile-reach non-bulk electric inserters sorted slowest to fastest."""
+        belt_tiers = self.belt_tiers()
+        v_lane = float(belt_tiers[0]["items_per_lane"]) if belt_tiers else 7.5
+        v_belt = v_lane * LANES_PER_BELT
+        max_stack = self.inserter_stack_size()
+        tiers: list[dict[str, Any]] = []
+        for name, proto in self.inserters.items():
+            if proto.get("energy_source", {}).get("type") != "electric":
+                continue
+            if proto.get("bulk", False):
+                continue
+            spec = inserter_spec(proto)
+            if spec["pickup_reach"] != 1 or spec["insert_reach"] != 1:
+                continue
+            rot_speed = float(spec["rotation_speed"])
+            if rot_speed <= 0:
+                continue
+            t_rot = 1.0 / (rot_speed * TICKS_PER_SECOND)
+            rates_by_stack: dict[int, float] = {}
+            for s in range(1, max_stack + 1):
+                t_cycle = t_rot + (float(s - 1) / v_belt if v_belt > 0 else 0.0)
+                rates_by_stack[s] = 60.0 * float(s) / t_cycle if t_cycle > 0 else 0.0
+            tiers.append(
+                {
+                    "name": name,
+                    "rotation_speed": rot_speed,
+                    "max_stack": max_stack,
+                    "rates_by_stack": rates_by_stack,
+                }
+            )
+        tiers.sort(key=lambda t: float(t["rotation_speed"]))
+        return tiers
+
+    def port_item_capacity_per_min(self) -> float:
+        """Return maximum sustainable items/min for a single standard port inserter."""
+        tiers = self.inserter_tiers()
+        if not tiers:
+            return 0.0
+        fastest = tiers[-1]
+        max_stack = int(fastest["max_stack"])
+        return float(fastest["rates_by_stack"].get(max_stack, 0.0))
 
     def pipe_span(self, name: str = "pipe-to-ground") -> int:
         """Get maximum underground span for pipe-to-ground entity from prototype data."""
