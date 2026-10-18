@@ -12,6 +12,7 @@ def _openroad_stage_impl(ctx):
     # Build copy commands to stage inputs in the action work directory
     cmd_parts = [
         "set -euo pipefail",
+        "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:${PATH:-}\"",
         "mkdir -p '%s'" % work_dir,
     ]
 
@@ -219,6 +220,7 @@ def _factorilog_pnr_impl(ctx):
 
     cmd_parts = [
         "set -euo pipefail",
+        "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:${PATH:-}\"",
         "WORK_DIR='%s'" % work_dir,
         "mkdir -p \"$WORK_DIR\"",
         "cp -f '%s' \"$WORK_DIR/netlist.v\"" % ctx.file.netlist_v.path,

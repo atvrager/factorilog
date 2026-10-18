@@ -424,23 +424,40 @@ class AnalyticalPlacer:
             out_ports = list(cell.get("outputs", []))
             h = node.height
             off_in = max(0, (h - len(in_ports)) // 2)
+            nl_nets = getattr(nl, "nets", {})
             for idx, p in enumerate(in_ports):
-                w_name = (
-                    f"{_sanitize(p)}__{inst.name}"
-                    if (split_plans and p in split_plans)
-                    or (balancer_plans and p in balancer_plans)
-                    else _sanitize(p)
-                )
+                if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans):
+                    w_name = f"{_sanitize(p)}__{inst.name}"
+                elif nl_nets and p not in nl_nets:
+                    w_name = next(
+                        (
+                            _sanitize(n)
+                            for n, net_obj in nl_nets.items()
+                            if n.startswith(f"{p}__") and inst.name in getattr(net_obj, "sinks", [])
+                        ),
+                        _sanitize(p),
+                    )
+                else:
+                    w_name = _sanitize(p)
                 node.inputs.append(w_name)
                 wire_sinks[w_name].append((inst.name, float(off_in + idx)))
 
             off_out = max(0, (h - len(out_ports)) // 2)
             for idx, p in enumerate(out_ports):
-                w_name = (
-                    f"{_sanitize(p)}__{inst.name}"
-                    if (merge_plans and p in merge_plans)
-                    else _sanitize(p)
-                )
+                if merge_plans and p in merge_plans:
+                    w_name = f"{_sanitize(p)}__{inst.name}"
+                elif nl_nets and p not in nl_nets:
+                    w_name = next(
+                        (
+                            _sanitize(n)
+                            for n, net_obj in nl_nets.items()
+                            if n.startswith(f"{p}__")
+                            and inst.name in getattr(net_obj, "drivers", [])
+                        ),
+                        _sanitize(p),
+                    )
+                else:
+                    w_name = _sanitize(p)
                 node.outputs.append(w_name)
                 wire_drivers[w_name].append((inst.name, float(off_out + idx)))
 
@@ -797,6 +814,49 @@ class AnalyticalPlacer:
             d = max([base_d] + [depth[p] + 1 for p in preds if p in depth])
             depth[u] = d
 
+        has_block_assignments = use_chassis and any(
+            nd.assigned_block != (0, 0) for nd in nodes.values()
+        )
+        mach_group_of: dict[str, list[str]] = {}
+        if has_block_assignments:
+            groups_by_key: dict[tuple[tuple[int, int], str, int], list[str]] = (
+                collections.defaultdict(list)
+            )
+            for u in topo_order:
+                nd = nodes[u]
+                if nd.node_type == "machine" and nd.recipe:
+                    groups_by_key[(nd.assigned_block, nd.recipe, nd.rank)].append(u)
+            for grp in groups_by_key.values():
+                if len(grp) > 1:
+                    grp_set = set(grp)
+                    if not any(v in grp_set for m in grp for v in adj.get(m, [])):
+                        for m in grp:
+                            mach_group_of[m] = grp
+            if mach_group_of:
+                seen_grps: set[int] = set()
+                for u in topo_order:
+                    preds = rev_adj.get(u, [])
+                    if preds:
+                        depth[u] = max(
+                            depth[u], max((depth[p] + 1 for p in preds if p in depth), default=0)
+                        )
+                    grp = mach_group_of.get(u)
+                    if (
+                        grp is not None
+                        and id(grp) not in seen_grps
+                        and all(all(p in depth for p in rev_adj.get(m, [])) for m in grp)
+                    ):
+                        seen_grps.add(id(grp))
+                        max_g_d = max(
+                            max(
+                                [depth[m]]
+                                + [depth[p] + 1 for p in rev_adj.get(m, []) if p in depth]
+                            )
+                            for m in grp
+                        )
+                        for m in grp:
+                            depth[m] = max_g_d
+
         # Place telemetry displays and circuit accumulators in the final East column band
         max_non_disp = max(
             (depth[u] for u in nodes if nodes[u].node_type not in ("display", "combinator")),
@@ -815,11 +875,36 @@ class AnalyticalPlacer:
 
         fluid_nodes = {u for e in edges if e.is_fluid for u in (e.source, e.sink) if u in nodes}
         # Backward tightening pass: pull splitters, balancers, and solid machines East toward sinks
+        pulled_grps: set[int] = set()
         for u in reversed(topo_order):
             node = nodes[u]
             if node.node_type in ("split", "balancer", "machine") and (
                 use_chassis or u not in fluid_nodes
             ):
+                grp = mach_group_of.get(u)
+                if grp is not None:
+                    if id(grp) in pulled_grps:
+                        continue
+                    pulled_grps.add(id(grp))
+                    floor_d = (
+                        min_switched_depth
+                        if (
+                            min_switched_depth > 0
+                            and node.recipe not in ("boiler-steam", "steam-power")
+                        )
+                        else 0
+                    )
+                    grp_min = max(
+                        max([floor_d] + [depth[p] + 1 for p in rev_adj.get(m, []) if p in depth])
+                        for m in grp
+                    )
+                    grp_succs = [s for m in grp for s in adj.get(m, []) if s in depth]
+                    if grp_succs:
+                        grp_pull = min(depth[s] - 1 for s in grp_succs)
+                        new_d = max(grp_min, grp_pull)
+                        for m in grp:
+                            depth[m] = new_d
+                    continue
                 succs = [s for s in adj.get(u, []) if s in depth]
                 preds = [p for p in rev_adj.get(u, []) if p in depth]
                 floor_d = (
@@ -880,8 +965,12 @@ class AnalyticalPlacer:
                 for idx_e, u in enumerate(engines):
                     tgt_s = s_target if idx_e < cap_s1 else s_target2
                     depth[u] = max(max_b_d + 1, tgt_s)
+                boiler_fuels = {inp for b_u in boilers for inp in nodes[b_u].inputs}
                 for u in reversed(topo_order):
-                    if nodes[u].node_type in ("split", "balancer") and nodes[u].recipe == "coal":
+                    if (
+                        nodes[u].node_type in ("split", "balancer")
+                        and nodes[u].recipe in boiler_fuels
+                    ):
                         succs = [s for s in adj.get(u, []) if s in depth]
                         preds = [p for p in rev_adj.get(u, []) if p in depth]
                         min_allowed = max([0] + [depth[p] + 1 for p in preds])
@@ -910,17 +999,25 @@ class AnalyticalPlacer:
             nl, merge_plans, split_plans, balancer_plans
         )
         single_core_capacity = float(max(20, core_w - 10) * max(20, core_h - 14))
-        has_non_power_coal = any(
-            nd.node_type == "machine"
-            and nd.recipe not in ("boiler-steam", "steam-power")
-            and "coal" in nd.inputs
+        boiler_inputs = {
+            inp for nd in nodes.values() if nd.recipe == "boiler-steam" for inp in nd.inputs
+        }
+        non_power_inputs = {
+            inp
             for nd in nodes.values()
-        )
+            if nd.node_type == "machine" and nd.recipe not in ("boiler-steam", "steam-power")
+            for inp in nd.inputs
+        }
+        power_only_fuels = boiler_inputs - non_power_inputs
         total_demand = 0.0
+        num_boilers = 0
         for nd in nodes.values():
-            if nd.recipe in ("boiler-steam", "steam-power"):
+            if nd.recipe == "boiler-steam":
+                num_boilers += 1
                 continue
-            if not has_non_power_coal and nd.recipe == "coal":
+            if nd.recipe == "steam-power":
+                continue
+            if nd.recipe in power_only_fuels:
                 continue
             area = float((nd.width + nd.pad_w + nd.pad_e) * (nd.height + nd.pad_n + nd.pad_s))
             if nd.node_type in ("machine", "pump"):
@@ -929,7 +1026,9 @@ class AnalyticalPlacer:
                 total_demand += area * 0.35
         target_cap_per_block = single_core_capacity * 0.63
         req_blocks = max(1, math.ceil(total_demand / max(1.0, target_cap_per_block)))
-        side = max(1, math.ceil(math.sqrt(req_blocks)))
+        base_side = max(1, math.ceil(math.sqrt(req_blocks)))
+        power_blocks = math.ceil(num_boilers / 10.0) if len(getattr(nl, "outputs", [])) >= 6 else 0
+        side = base_side + round(power_blocks / float(base_side)) if power_blocks else base_side
         return side, side
 
     def _find_tarjan_sccs(
@@ -1304,6 +1403,7 @@ class AnalyticalPlacer:
                     mach_adj[u][v] += wt
 
             seen_up: set[str] = {u}
+            is_power_u = nodes[u].recipe in ("boiler-steam", "steam-power")
             stack_up = list(rev_adj.get(u, []))
             while stack_up:
                 cur = stack_up.pop()
@@ -1311,6 +1411,9 @@ class AnalyticalPlacer:
                     continue
                 seen_up.add(cur)
                 if cur.startswith("PIN_IN:"):
+                    if is_power_u and grid_w < 8:
+                        west_in_weight[u] = 4.5
+                        continue
                     west_in_weight[u] += 6.0 if u in fluid_machines else 2.0
                 elif cur not in machine_set and (
                     cur.startswith("MAT_HUB:")
@@ -1486,13 +1589,56 @@ class AnalyticalPlacer:
                 groups.extend(_chunk_by_recipe(dom_machs, max_grp_len))
 
         # 5. Power plant domain groups (boiler-steam and steam-power)
+        first_power_grp_idx = len(groups)
+        power_groups: list[list[str]] = []
         if power_machine_names:
             power_area = sum(_node_area(nodes[u]) for u in power_machine_names)
             if power_area <= single_core_capacity * 0.55:
                 groups.append(power_machine_names)
                 atomic_domain_first_nodes.add(power_machine_names[0])
-            else:
+            elif grid_w < 8:
                 groups.extend(_chunk_by_recipe(power_machine_names, 10))
+            else:
+                boilers = [u for u in power_machine_names if nodes[u].recipe == "boiler-steam"]
+                engines = [u for u in power_machine_names if nodes[u].recipe == "steam-power"]
+                if boilers and engines:
+                    used_eng: set[str] = set()
+                    triads: list[list[str]] = []
+                    eng_set = set(engines)
+                    for b_u in boilers:
+                        b_engs = sorted(
+                            [
+                                v
+                                for v in mach_adj.get(b_u, {})
+                                if v in eng_set and v not in used_eng
+                            ],
+                            key=_natural_key,
+                        )
+                        if not b_engs:
+                            b_idx_t = len(triads)
+                            b_engs = [
+                                e_u
+                                for e_u in engines[2 * b_idx_t : 2 * b_idx_t + 2]
+                                if e_u not in used_eng
+                            ]
+                        used_eng.update(b_engs)
+                        triads.append([b_u, *b_engs])
+                    rem_engs = [e_u for e_u in engines if e_u not in used_eng]
+                    if rem_engs and triads:
+                        triads[-1].extend(rem_engs)
+                    triad_chunk = 10
+                    n_p_chunks = max(1, math.ceil(len(triads) / float(triad_chunk)))
+                    p_step = math.ceil(len(triads) / float(n_p_chunks))
+                    for i in range(0, len(triads), p_step):
+                        sub_t = triads[i : i + p_step]
+                        b_part = [t[0] for t in sub_t]
+                        e_part = [e_u for t in sub_t for e_u in t[1:]]
+                        power_groups.append(b_part + e_part)
+                else:
+                    power_groups.extend(_chunk_by_recipe(power_machine_names, 10))
+                if first_power_grp_idx == 0:
+                    groups.extend(power_groups)
+                    power_groups = []
 
         def _cluster_weight(nd: PlacerNode) -> float:
             return _node_area(nd) + 45.0 * float(len(nd.inputs)) + 40.0 * float(len(nd.outputs))
@@ -1508,16 +1654,23 @@ class AnalyticalPlacer:
             pref.append(pref[-1] + gw)
 
         total_cluster_w = pref[-1]
+        total_power_w = sum(_cluster_weight(nodes[u]) for pg in power_groups for u in pg)
         num_groups = len(groups)
+        n_power_bins = min(len(power_groups), max(0, num_blocks - 1)) if power_groups else 0
+        avail_prod_blocks = max(1, num_blocks - n_power_bins)
         if distribute_across_blocks:
-            k_bins = min(num_groups, num_blocks)
+            k_bins = min(num_groups, avail_prod_blocks)
         else:
-            k_bins = min(num_groups, num_blocks, max(1, math.ceil(total_cluster_w / 1400.0)))
+            k_bins = min(
+                num_groups,
+                avail_prod_blocks,
+                max(1, math.ceil((total_cluster_w + total_power_w) / 1400.0)),
+            )
 
         assigned: set[str] = set()
         blk_to_seq_idx = {b: idx for idx, b in enumerate(active_blocks)}
 
-        if k_bins <= 1:
+        if k_bins <= 1 and not power_groups:
             blk = active_blocks[0]
             for grp in groups:
                 for u in grp:
@@ -1540,6 +1693,8 @@ class AnalyticalPlacer:
                     best_val = inf_tuple
                     for p in range(b_idx - 1, i):
                         prev_max, prev_sq, _ = dp[b_idx - 1][p]
+                        if prev_max == float("inf"):
+                            continue
                         seg_w = pref[i] - pref[p]
                         cand_max = prev_max if prev_max >= seg_w else seg_w
                         cand_sq = prev_sq + seg_w * seg_w
@@ -1561,6 +1716,14 @@ class AnalyticalPlacer:
             dp_buckets = [
                 [u for grp in groups[g_start:g_end] for u in grp] for g_start, g_end in seg_bounds
             ]
+            if power_groups:
+                if len(power_groups) <= n_power_bins:
+                    dp_buckets.extend(power_groups)
+                else:
+                    p_merged: list[list[str]] = [[] for _ in range(n_power_bins)]
+                    for idx_pg, pg in enumerate(power_groups):
+                        p_merged[min(n_power_bins - 1, idx_pg)].extend(pg)
+                    dp_buckets.extend(p_merged)
 
             if grid_w >= 5 or has_cycles:
                 bucket_to_blk = self._optimize_2d_block_assignment(
@@ -1586,7 +1749,7 @@ class AnalyticalPlacer:
                 if grid_w == 3 and grid_h == 3 and k_bins == 3 and power_machine_names:
                     blk_targets = [(0, 0), (1, 0), (0, 2)]
                 else:
-                    blk_targets = active_blocks[:k_bins]
+                    blk_targets = active_blocks[: len(dp_buckets)]
                 for b_idx, bucket in enumerate(dp_buckets):
                     blk = blk_targets[b_idx]
                     for u in bucket:
@@ -1761,6 +1924,7 @@ class AnalyticalPlacer:
             if name not in assigned and nd.node_type in ("split", "balancer")
         ]
         rem_splits.sort(key=lambda name: (-nodes[name].flow_depth, _natural_key(name)))
+        total_bals = sum(1 for nd in nodes.values() if nd.node_type == "balancer")
         while rem_splits:
             ready_idx = next(
                 (
@@ -1806,7 +1970,14 @@ class AnalyticalPlacer:
                         (bay_counts[b] // 6)
                         if (is_mat and grid_w >= 5)
                         else (1 if (is_mat and grid_h >= 2 and b[1] == 0) else 0),
-                        b[0] if (grid_w >= 5 and is_bal and s_name in pin_in_nodes) else 0,
+                        b[0]
+                        if (
+                            grid_w >= 5
+                            and is_bal
+                            and s_name in pin_in_nodes
+                            and total_bals <= grid_h + 2
+                        )
+                        else 0,
                         sum(1 for x in block_bins[b] if nodes[x].node_type == "balancer")
                         if (grid_w >= 5 and is_bal)
                         else 0,
@@ -1826,9 +1997,15 @@ class AnalyticalPlacer:
                                 + abs(((float(b[1]) - 0.5) if is_mat else float(b[1])) - upt[1])
                                 for upt in up_pts
                             )
-                            + (0.35 * bay_counts[b] if is_mat else 0.0),
+                            + (0.35 * bay_counts[b] if is_mat else 0.0)
+                            + (
+                                0.5 * float(b[0])
+                                if (grid_w >= 5 and is_bal and s_name in pin_in_nodes)
+                                else 0.0
+                            ),
                             3,
                         ),
+                        b[0] if (grid_w >= 5 and is_bal and s_name in pin_in_nodes) else 0,
                         -counts[b],
                         bay_counts[b] if is_mat else block_area[b],
                         blk_to_seq_idx[b],
@@ -2712,8 +2889,72 @@ class AnalyticalPlacer:
 
         # Fold any column whose vertical height exceeds usable_h into sub-columns when fixed_core is True
         expanded_cols: list[list[PlacerNode]] = []
+        eng_col_ids = (
+            [
+                cid
+                for cid, cn in raw_cols.items()
+                if cn and all(nd.recipe == "steam-power" for nd in cn)
+            ]
+            if fixed_core
+            else []
+        )
+        boiler_col_ids = (
+            [
+                cid
+                for cid, cn in raw_cols.items()
+                if cn and all(nd.recipe == "boiler-steam" for nd in cn)
+            ]
+            if fixed_core
+            else []
+        )
+        paired_power_cols = bool(eng_col_ids and boiler_col_ids)
+        handled_col_ids: set[int] = set()
+
         for col_id in sorted(raw_cols.keys()):
+            if col_id in handled_col_ids:
+                continue
             col_nodes = raw_cols[col_id]
+            if paired_power_cols and col_id in boiler_col_ids:
+                boilers = sorted(
+                    [nd for cid in boiler_col_ids for nd in raw_cols[cid]],
+                    key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)),
+                )
+                all_engs = {nd.name: nd for cid in eng_col_ids for nd in raw_cols[cid]}
+                engs_by_boiler: dict[str, list[PlacerNode]] = collections.defaultdict(list)
+                used_e: set[str] = set()
+                b_name_set = {b.name for b in boilers}
+                for e in edges:
+                    if e.source in b_name_set and e.sink in all_engs and e.sink not in used_e:
+                        engs_by_boiler[e.source].append(all_engs[e.sink])
+                        used_e.add(e.sink)
+                for b_nd in boilers:
+                    engs_by_boiler[b_nd.name].sort(key=lambda nd: _natural_key(nd.name))
+                req_h = _col_req_h(boilers)
+                num_b_subcols = max(1, math.ceil(float(req_h) / float(usable_h)))
+                b_per_col = max(1, math.ceil(len(boilers) / float(num_b_subcols)))
+                for i in range(0, len(boilers), b_per_col):
+                    b_sub = boilers[i : i + b_per_col]
+                    expanded_cols.append(b_sub)
+                    max_fan = max((len(engs_by_boiler[b.name]) for b in b_sub), default=0)
+                    for f_idx in range(max_fan):
+                        e_sub = [
+                            engs_by_boiler[b.name][f_idx]
+                            for b in b_sub
+                            if len(engs_by_boiler[b.name]) > f_idx
+                        ]
+                        if e_sub:
+                            expanded_cols.append(e_sub)
+                rem_e = [
+                    nd
+                    for nd in sorted(all_engs.values(), key=lambda x: _natural_key(x.name))
+                    if nd.name not in used_e
+                ]
+                if rem_e:
+                    expanded_cols.append(rem_e)
+                handled_col_ids.update(boiler_col_ids)
+                handled_col_ids.update(eng_col_ids)
+                continue
+
             col_nodes.sort(key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)))
 
             req_h = _col_req_h(col_nodes)
@@ -2744,7 +2985,8 @@ class AnalyticalPlacer:
             def _total_hard_w(cols: list[list[PlacerNode]]) -> int:
                 if not cols:
                     return 0
-                return sum(max(nd.width for nd in col) for col in cols) + 2 * (len(cols) - 1)
+                gap_w = 4 if paired_power_cols else 2
+                return sum(max(nd.width for nd in col) for col in cols) + gap_w * (len(cols) - 1)
 
             for allow_cross in (False, True):
                 while (
@@ -2755,7 +2997,7 @@ class AnalyticalPlacer:
                     > avail_w
                 ):
                     best_idx = -1
-                    best_h: int | None = None
+                    best_key: tuple[int, int] | None = None
                     for idx in range(len(expanded_cols) - 1):
                         if not allow_cross:
                             names_a = {nd.name for nd in expanded_cols[idx]}
@@ -2778,8 +3020,11 @@ class AnalyticalPlacer:
                         comb_h = _col_req_h(merged_cand)
                         if comb_h > usable_h:
                             continue
-                        if best_h is None or comb_h < best_h:
-                            best_h = comb_h
+                        types_a = {nd.node_type for nd in expanded_cols[idx]}
+                        types_b = {nd.node_type for nd in expanded_cols[idx + 1]}
+                        cand_key = (0 if types_a == types_b else 1, comb_h)
+                        if best_key is None or cand_key < best_key:
+                            best_key = cand_key
                             best_idx = idx
                     if best_idx < 0:
                         break
@@ -2824,9 +3069,12 @@ class AnalyticalPlacer:
             max_e = max(nd.pad_e for nd in cols[c])
             max_w = max(nd.pad_w for nd in cols[c + 1])
             has_boiler = any(nd.recipe == "boiler-steam" for nd in cols[c])
+            next_has_boiler = any(nd.recipe == "boiler-steam" for nd in cols[c + 1])
             min_g = max(5, max(max_e, max_w) + 1)
             if has_boiler:
                 min_g = max(min_g, 9)
+            elif next_has_boiler:
+                min_g = max(min_g, 8)
             min_gaps.append(min_g)
             extra_ch = (
                 0 if fixed_x else min(14, max(0, max(len(cols[c]), len(cols[c + 1])) - 8) // 3)
@@ -2853,8 +3101,12 @@ class AnalyticalPlacer:
                 ]
             else:
                 spare = max(0, avail_w - sum_w)
-                base_g = max(2, spare // max(1, num_cols - 1))
-                actual_gaps = [base_g] * max(0, num_cols - 1)
+                n_gaps = max(1, num_cols - 1)
+                base_g = max(2, spare // n_gaps)
+                rem_g = max(0, spare - base_g * n_gaps)
+                actual_gaps = [
+                    base_g + (1 if i < rem_g else 0) for i in range(max(0, num_cols - 1))
+                ]
 
         # Assign integer X to each column and node
         col_x: list[int] = []
@@ -2982,16 +3234,21 @@ class AnalyticalPlacer:
                 for nd, yv in zip(col, y_vals, strict=False):
                     nd.y = yv
 
-            # 2. Forward sweep: pull mergers, pumps, and circuit/display cells to driver centroids
+            # 2. Forward sweep: pull mergers, pumps, steam engines, and circuit/display cells to driver centroids
             for c in range(num_cols):
                 col = cols[c]
                 if not any(
-                    nd.node_type in ("merge", "pump", "combinator", "display") for nd in col
+                    nd.node_type in ("merge", "pump", "combinator", "display")
+                    or nd.recipe == "steam-power"
+                    for nd in col
                 ):
                     continue
                 ideals = []
                 for nd in col:
-                    if nd.node_type in ("merge", "pump", "combinator", "display"):
+                    if (
+                        nd.node_type in ("merge", "pump", "combinator", "display")
+                        or nd.recipe == "steam-power"
+                    ):
                         drv_ys = [
                             node_map[d_name].y + src_dy - s_dy
                             for d_name, src_dy, s_dy in drivers_of.get(nd.name, [])
@@ -3138,7 +3395,7 @@ class AnalyticalPlacer:
             )
 
             if getattr(self, "_last_rewired_ports", None):
-                self._compute_flow_depths_and_columns(nodes, edges)
+                self._compute_flow_depths_and_columns(nodes, edges, use_chassis=use_chassis)
 
             for (bx, by), inst_names in block_bins.items():
                 blk_nodes = [nodes[name] for name in inst_names]

@@ -6,6 +6,7 @@ All docstrings follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
+import dataclasses
 import heapq
 
 from foundry.router.grid import RoutingGrid, base_net_name
@@ -908,12 +909,14 @@ def route_all_nets(
                 for term_pos in probe_pts:
                     is_pin_pt = term_pos in pin_pts
                     for odx in range(-rx, rx + 1):
-                        for ody in range(-6, 7):
+                        for ody in range(-8, 9):
                             nb = (term_pos[0] + odx, term_pos[1] + ody)
                             if nb in grid.surface_occupancy:
                                 congested_nets |= grid.surface_occupancy[nb]
                                 failed_blockers |= grid.surface_occupancy[nb]
-                                if is_pin_pt and abs(odx) <= 1 and abs(ody) <= 1:
+                                if (is_pin_pt and abs(odx) <= 1 and abs(ody) <= 1) or (
+                                    not is_pin_pt and abs(odx) <= 2 and abs(ody) <= 2
+                                ):
                                     pin_blockers |= grid.surface_occupancy[nb]
                                 if abs(odx) <= 3 and abs(ody) <= 3:
                                     h_key = (nb[0], nb[1], 0)
@@ -932,10 +935,17 @@ def route_all_nets(
                                     grid.historical_cost.get(h_key, 0.0) + 2.5
                                 )
                                 grid.has_congestion = True
+                            if abs(odx) <= 2 and abs(ody) <= 2:
+                                for z_l, l_occ in grid.layer_occupancy.items():
+                                    if z_l > 0 and nb in l_occ:
+                                        ug_net = l_occ[nb]
+                                        congested_nets.add(ug_net)
+                                        failed_blockers.add(ug_net)
+                                        pin_blockers.add(ug_net)
             elif _is_net_over_capacity(res):
                 congested_nets.add(net_name)
                 over_cap_nets.add(net_name)
-                if iter_idx in (12, 24, 36, 48):
+                if iter_idx in (12, 24, 36, 48, 54):
                     for node in res.nodes:
                         node_key = (node.x, node.y, node.z)
                         if node.z == LAYER_SURFACE and grid.usage_count.get(
@@ -955,7 +965,10 @@ def route_all_nets(
         if not congested_nets:
             break
 
-        neighbor_blockers -= over_cap_nets
+        if len(over_cap_nets) > 25:
+            neighbor_blockers.clear()
+        else:
+            neighbor_blockers -= over_cap_nets
 
         # When an MST branch rips up, also rip up its descendant MST branches
         # And if an MST branch failed, rip up all branches of its base net so the tree routes before blockers
@@ -1055,6 +1068,36 @@ def route_all_nets(
                 else 10
             )
             res = route_single_net(net, grid, margin=margin)
+            if (
+                iter_idx >= 20
+                and len(over_cap_nets) <= 8
+                and net_name in over_cap_nets
+                and "_hwy" in net_name
+                and net.corridor_bbox is not None
+                and res.is_success
+                and any(
+                    grid.usage_count.get((nd.x, nd.y, nd.z), 0)
+                    >= grid.get_capacity((nd.x, nd.y, nd.z))
+                    for nd in res.nodes
+                )
+            ):
+                cbx0, cby0, cbx1, cby1 = net.corridor_bbox
+                wide_net = dataclasses.replace(
+                    net,
+                    corridor_bbox=(
+                        max(grid.min_x, cbx0 - 105),
+                        max(grid.min_y, cby0 - 105),
+                        min(grid.max_x, cbx1 + 105),
+                        min(grid.max_y, cby1 + 105),
+                    ),
+                )
+                alt_res = route_single_net(wide_net, grid, margin=margin)
+                if alt_res.is_success and not any(
+                    grid.usage_count.get((nd.x, nd.y, nd.z), 0)
+                    >= grid.get_capacity((nd.x, nd.y, nd.z))
+                    for nd in alt_res.nodes
+                ):
+                    res = alt_res
             grid.net_routes[net.name] = res
             if res.is_success:
                 grid.place_net(net.name, res)

@@ -1984,6 +1984,15 @@ class BeltDrcChecker:
             if router_routes and h_name in router_routes and h_name not in checked_hwy_names:
                 checked_hwy_names.add(h_name)
                 coords = _route_coords(router_routes[h_name])
+                if (
+                    "_hwy_mst_" in h_name
+                    and coords
+                    and not any(_in_switchbox(tx, ty) for tx, ty in coords)
+                ):
+                    mst_prefix = h_name.rsplit("_hwy_mst_", 1)[0] + "_hwy_mst_"
+                    for k_name, k_route in router_routes.items():
+                        if k_name != h_name and k_name.startswith(mst_prefix):
+                            coords.extend(_route_coords(k_route))
                 if coords and not any(_in_switchbox(tx, ty) for tx, ty in coords):
                     violations.append(
                         DrcViolation(

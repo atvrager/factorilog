@@ -262,9 +262,19 @@ def render_blueprint(bp_input: str | Path, out_path: str | Path) -> Path:
             env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_sock}"
 
     if "WAYLAND_DISPLAY" not in env:
-        wayland_sock = Path(f"/run/user/{uid}/wayland-0")
-        if wayland_sock.is_socket():
-            env["WAYLAND_DISPLAY"] = "wayland-0"
+        user_run = Path(f"/run/user/{uid}")
+        if user_run.is_dir():
+            for w_sock in sorted(user_run.glob("wayland-*")):
+                if not w_sock.name.endswith(".lock") and w_sock.is_socket():
+                    env["WAYLAND_DISPLAY"] = w_sock.name
+                    break
+
+    if "XAUTHORITY" not in env:
+        user_run = Path(f"/run/user/{uid}")
+        if user_run.is_dir():
+            xauth_files = sorted(user_run.glob("xauth_*"))
+            if xauth_files:
+                env["XAUTHORITY"] = str(xauth_files[-1])
 
     if "DISPLAY" not in env:
         for disp in [":99", ":1", ":0"]:
