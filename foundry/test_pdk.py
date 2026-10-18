@@ -112,6 +112,78 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertEqual(int(pad_ent["position"]["x"]) % 2, 0)
         self.assertEqual(int(pad_ent["position"]["y"]) % 2, 0)
 
+    def test_power_plant_cells(self) -> None:
+        import placement
+
+        b_cell = self.pdk.cell("boiler", "boiler-steam")
+        assert b_cell is not None
+        self.assertEqual(b_cell["width"], 4)
+        self.assertEqual(b_cell["height"], 5)
+        self.assertEqual(b_cell["machine_width"], 2)
+        self.assertEqual(b_cell["machine_height"], 3)
+        self.assertEqual(b_cell["in_slots"], {"water": 0, "coal": 2})
+        self.assertEqual(b_cell["out_slots"], {"steam": 2})
+        self.assertEqual(b_cell["internal_pipes"], [{"x": 1.5, "y": 0.5, "fluid": "water"}])
+
+        se_cell = self.pdk.cell("steam-engine", "steam-power")
+        assert se_cell is not None
+        self.assertEqual(se_cell["width"], 7)
+        self.assertEqual(se_cell["height"], 5)
+        self.assertEqual(se_cell["machine_width"], 5)
+        self.assertEqual(se_cell["machine_height"], 3)
+        self.assertEqual(se_cell["in_slots"], {"steam": 2})
+        self.assertEqual(se_cell["out_slots"], {})
+
+        res = placement.place_components(
+            {
+                "units": 1000,
+                "components": [
+                    {
+                        "name": "u_boiler",
+                        "macro": "boiler_boiler_steam",
+                        "x": 0,
+                        "y": 0,
+                        "orient": "N",
+                    },
+                    {
+                        "name": "u_se",
+                        "macro": "steam_engine_steam_power",
+                        "x": 10000,
+                        "y": 0,
+                        "orient": "N",
+                    },
+                ],
+            },
+            {
+                "cells": {
+                    "boiler.boiler-steam": b_cell,
+                    "steam-engine.steam-power": se_cell,
+                },
+                "fluids": ["water", "steam"],
+                "instances": [
+                    {
+                        "name": "u_boiler",
+                        "cell": "boiler.boiler-steam",
+                        "recipe": "boiler-steam",
+                    },
+                    {
+                        "name": "u_se",
+                        "cell": "steam-engine.steam-power",
+                        "recipe": "steam-power",
+                    },
+                ],
+            },
+        )
+        by_name = {e["name"]: e for e in res.entities}
+        self.assertIn("boiler", by_name)
+        self.assertIn("steam-engine", by_name)
+        self.assertIn("pipe", by_name)
+        self.assertNotIn("recipe", by_name["boiler"])
+        self.assertNotIn("recipe", by_name["steam-engine"])
+        self.assertEqual(by_name["boiler"]["position"], {"x": 2.0, "y": 2.5})
+        self.assertEqual(by_name["steam-engine"]["position"], {"x": 13.5, "y": 2.5})
+        self.assertEqual(by_name["pipe"]["position"], {"x": 1.5, "y": 0.5})
+
     def test_belt_tiers(self) -> None:
         tiers = self.pdk.belt_tiers()
         self.assertEqual(len(tiers), 3)

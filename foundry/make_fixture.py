@@ -49,6 +49,13 @@ TABLES = [
     "pipe",
     "pipe-to-ground",
     "cargo-landing-pad",
+    "boiler",
+    "generator",
+    "pump",
+    "radar",
+    "lamp",
+    "arithmetic-combinator",
+    "decider-combinator",
 ]
 TRANSPORT_TABLES = frozenset(TABLES[9:])
 
@@ -68,7 +75,7 @@ def main() -> int:
     for table in TABLES:
         full = raw.get(table, {})
         if table == "recipe":
-            keep = recipes
+            keep = set(recipes) & set(full)
         elif table in TRANSPORT_TABLES:
             # Small tables. The tech layer needs them whole.
             proto[table] = full

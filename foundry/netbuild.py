@@ -61,13 +61,45 @@ def build_all(
     synthesize_splitters: bool = True,
     controller_verilog: Path | str | None = None,
     only_recipes: list[str] | None = None,
+    use_chassis: bool = False,
+    chassis_grid_w: int = 0,
+    chassis_grid_h: int = 0,
 ) -> int:
     """Run full netbuild pipeline, emitting Verilog, LEF, Liberty, and JSON."""
     out = Path(out_dir)
     data = solve.Data(str(dump_path))
     tech = pdk.Pdk(data)
     allowed = set(only_recipes) if only_recipes else data.allowed_recipes(["nauvis"])
-    nl = netlist.build(data, demand, allowed, enable_compound_cells=enable_compound_cells)
+    extra_power_watts = 0.0
+    if use_chassis:
+        gw, gh = chassis_grid_w, chassis_grid_h
+        if gw <= 0 or gh <= 0:
+            try:
+                from analytical_placer import AnalyticalPlacer
+
+                nl_pre = netlist.build(
+                    data, demand, allowed, enable_compound_cells=enable_compound_cells
+                )
+                plans_pre = netlist.merge_plans_of(nl_pre)
+                splits_pre = netlist.split_plans_of(nl_pre, synthesize_trees=synthesize_splitters)
+                bals_pre = netlist.balancer_plans_of(nl_pre)
+                gw, gh = AnalyticalPlacer().compute_auto_chassis_grid(
+                    nl_pre,
+                    merge_plans=plans_pre,
+                    split_plans=splits_pre,
+                    balancer_plans=bals_pre,
+                )
+            except Exception:
+                gw, gh = max(1, gw), max(1, gh)
+        extra_power_watts = solve.chassis_power_watts(data, gw, gh)
+
+    nl = netlist.build(
+        data,
+        demand,
+        allowed,
+        enable_compound_cells=enable_compound_cells,
+        extra_power_watts=extra_power_watts,
+    )
     plans = netlist.merge_plans_of(nl)
     split_plans = netlist.split_plans_of(nl, synthesize_trees=synthesize_splitters)
     telemetry_records = netlist.insert_telemetry(
@@ -232,6 +264,24 @@ def main() -> int:
         default=None,
         help="Comma-separated list of allowed recipes (treats their inputs as raw)",
     )
+    parser.add_argument(
+        "--use-chassis",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Include chassis base entity power demand in synthesis",
+    )
+    parser.add_argument(
+        "--chassis-grid-w",
+        type=int,
+        default=0,
+        help="Chassis grid width in city blocks (0 for auto)",
+    )
+    parser.add_argument(
+        "--chassis-grid-h",
+        type=int,
+        default=0,
+        help="Chassis grid height in city blocks (0 for auto)",
+    )
     args = parser.parse_args()
 
     if args.spc is not None:
@@ -256,6 +306,9 @@ def main() -> int:
         synthesize_splitters=args.synthesize_splitters,
         controller_verilog=args.controller_verilog,
         only_recipes=only_recipes,
+        use_chassis=args.use_chassis,
+        chassis_grid_w=args.chassis_grid_w,
+        chassis_grid_h=args.chassis_grid_h,
     )
 
 

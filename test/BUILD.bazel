@@ -237,7 +237,7 @@ py_test(
     srcs = ["test_chassis_floorplan.py"],
     data = [
         "//flow:automation_science_chassis.def",
-        "//flow:automation_science_netlist.json",
+        "//flow:automation_science_chassis_netlist.json",
     ],
     main = "test_chassis_floorplan.py",
     deps = [
@@ -331,7 +331,7 @@ py_test(
     data = [
         "data/dump-fixture.json",
         "//flow:automation_science_chassis.def",
-        "//flow:automation_science_netlist.json",
+        "//flow:automation_science_chassis_netlist.json",
     ],
     main = "test_analytical_placer.py",
     deps = [

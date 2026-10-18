@@ -430,6 +430,7 @@ def route_with_maze_router(
 
     pin_no_hood_tiles: set[tuple[int, int]] = set()
     component_headings: dict[tuple[int, int], int] = {}
+    fluid_port_approaches: dict[tuple[int, int], set[str]] = {}
     for nspec in net_specs:
         if not nspec.is_fluid:
             if (float(nspec.source[0]), float(nspec.source[1])) in valid_in_pins:
@@ -462,6 +463,15 @@ def route_with_maze_router(
             component_headings[(tx, ty)] = ed
             dx, dy = DIR_STEPS.get(ed, (0, 0))
             pin_no_hood_tiles.add((tx + dx, ty + dy))
+        elif ename == "pipe" and ent.get("fluid"):
+            pos = ent.get("position", {})
+            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
+            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
+            tx, ty = math.floor(cx), math.floor(cy)
+            p_comm = str(ent["fluid"]).replace("_", "-")
+            fluid_port_approaches.setdefault((tx, ty), set()).add(p_comm)
+            for odx, ody in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                fluid_port_approaches.setdefault((tx + odx, ty + ody), set()).add(p_comm)
 
     if engine is False:
         engine = None
@@ -589,6 +599,7 @@ def route_with_maze_router(
                 obstacles=blk_obstacles,
                 component_headings=merged_headings,
                 no_hood_tiles=port_no_hood_tiles,
+                fluid_port_approaches=fluid_port_approaches,
             )
             b_routes, b_entities, _ = blk_router.route(blk_nets, verify=False)
             dt_blk = time.perf_counter() - t_blk
@@ -659,6 +670,7 @@ def route_with_maze_router(
                 obstacles=hwy_obstacles,
                 component_headings=merged_headings,
                 no_hood_tiles=port_no_hood_tiles,
+                fluid_port_approaches=fluid_port_approaches,
             )
             h_routes, h_entities, _ = hwy_router.route(
                 highway_specs, max_iterations=60, verify=False
@@ -725,6 +737,7 @@ def route_with_maze_router(
             obstacles=obstacles,
             component_headings=component_headings,
             no_hood_tiles=pin_no_hood_tiles,
+            fluid_port_approaches=fluid_port_approaches,
         )
         routes, entities, verif_res = router.route(net_specs, verify=engine is not None)
         placement.router_routes = routes

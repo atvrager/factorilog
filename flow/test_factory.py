@@ -306,8 +306,10 @@ local function check_all_pass_criteria(surface, stats)
     local check_types = {{"assembling-machine", "furnace", "rocket-silo", "inserter", "lamp", "radar", "pump"}}
     for _, t in ipairs(check_types) do
         for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
-            if ent.electric_buffer_size and ent.electric_buffer_size > 0 and ent.energy == 0 then
-                return false
+            if ent.electric_buffer_size and ent.electric_buffer_size > 0 then
+                if ent.energy < ent.electric_buffer_size * 0.90 or ent.status == defines.entity_status.low_power then
+                    return false
+                end
             end
         end
     end
@@ -1015,9 +1017,11 @@ script.on_event(defines.events.on_tick, function(event)
         local unpowered = 0
         for _, t in ipairs(check_types) do
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
-                if ent.electric_buffer_size and ent.electric_buffer_size > 0 and ent.energy == 0 then
-                    unpowered = unpowered + 1
-                    log(string.format("UNPOWERED_ENT: %s at (%.1f, %.1f)", ent.name, ent.position.x, ent.position.y))
+                if ent.electric_buffer_size and ent.electric_buffer_size > 0 then
+                    if ent.energy < ent.electric_buffer_size * 0.90 or ent.status == defines.entity_status.low_power then
+                        unpowered = unpowered + 1
+                        log(string.format("UNPOWERED_ENT: %s at (%.1f, %.1f) energy=%.1f/%.1f", ent.name, ent.position.x, ent.position.y, ent.energy, ent.electric_buffer_size))
+                    end
                 end
             end
         end

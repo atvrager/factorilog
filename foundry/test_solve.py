@@ -82,6 +82,43 @@ class SolveTest(unittest.TestCase):
         self.assertAlmostEqual(raw["rocket-fuel"], 60.0, places=3)
         self.assertAlmostEqual(raw["satellite"], 0.06, places=4)
 
+    def test_steam_power_recipes_and_balance(self) -> None:
+        self.assertIn("boiler-steam", self.data.recipes)
+        self.assertIn("steam-power", self.data.recipes)
+        b_recipe = self.data.recipes["boiler-steam"]
+        se_recipe = self.data.recipes["steam-power"]
+        self.assertEqual(self.data.machine_for(b_recipe), ("boiler", 1.0))
+        self.assertEqual(self.data.machine_for(se_recipe), ("steam-engine", 1.0))
+        self.assertAlmostEqual(se_recipe["power_output_watts"], 900000.0)
+        rates, raw, _surplus = solve.solve_rates(
+            self.data, {"automation-science-pack": 60.0}, self.allowed
+        )
+        self.assertGreater(rates.get("steam-power", 0.0), 0.0)
+        self.assertGreater(rates.get("boiler-steam", 0.0), 0.0)
+        self.assertAlmostEqual(rates["steam-power"], 2.0 * rates["boiler-steam"], places=4)
+        self.assertGreater(raw.get("coal", 0.0), 0.0)
+        self.assertGreater(raw.get("water", 0.0), 0.0)
+
+    def test_chassis_and_inserter_power_watts(self) -> None:
+        ins_w = solve.inserter_peak_watts(self.data, "bulk-inserter")
+        self.assertGreater(ins_w, 70000.0)
+        fast_w = solve.inserter_peak_watts(self.data, "fast-inserter")
+        self.assertGreater(fast_w, 25000.0)
+        chassis_1x1 = solve.chassis_power_watts(self.data, 1, 1)
+        chassis_3x3 = solve.chassis_power_watts(self.data, 3, 3)
+        self.assertGreater(chassis_1x1, 300000.0)
+        self.assertAlmostEqual(chassis_3x3, 3780000.0, places=1)
+        rates_base, _, _ = solve.solve_rates(
+            self.data, {"automation-science-pack": 60.0}, self.allowed
+        )
+        rates_chassis, _, _ = solve.solve_rates(
+            self.data,
+            {"automation-science-pack": 60.0},
+            self.allowed,
+            extra_power_watts=chassis_3x3,
+        )
+        self.assertGreater(rates_chassis["steam-power"], rates_base["steam-power"] + 3.5)
+
     def balance_gaps(
         self,
         demand: dict[str, float],

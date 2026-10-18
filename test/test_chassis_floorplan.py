@@ -195,7 +195,7 @@ class TestChassisFloorplan(unittest.TestCase):
         from pathlib import Path
 
         def_path = Path("flow/automation_science_chassis.def")
-        json_path = Path("flow/automation_science_netlist.json")
+        json_path = Path("flow/automation_science_chassis_netlist.json")
         if not def_path.exists() or not json_path.exists():
             self.skipTest("OpenROAD generated DEF/JSON fixtures not found")
 

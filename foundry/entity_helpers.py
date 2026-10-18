@@ -112,6 +112,7 @@ def is_electric_consumer(name: str) -> bool:
             "lab",
             "radar",
             "lamp",
+            "steam-engine",
         )
     )
 
@@ -203,11 +204,22 @@ def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, flo
             return 2.0, 1.0
         return 1.0, 2.0
     if name in _PROTOTYPE_BOXES:
-        return _PROTOTYPE_BOXES[name]
+        w, h = _PROTOTYPE_BOXES[name]
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return h, w
+        return w, h
     if "rocket-silo" in name:
         return 9.0, 9.0
     if "oil-refinery" in name or "nuclear-reactor" in name:
         return 5.0, 5.0
+    if "steam-engine" in name or "steam-turbine" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 5.0, 3.0
+        return 3.0, 5.0
+    if "boiler" in name or "heat-exchanger" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 2.0, 3.0
+        return 3.0, 2.0
     if (
         "assembling-machine" in name
         or "electric-furnace" in name
@@ -221,7 +233,6 @@ def entity_size(name: str, direction: int = DIRECTION_NORTH) -> tuple[float, flo
         "steel-furnace" in name
         or "stone-furnace" in name
         or "power-switch" in name
-        or "boiler" in name
         or "big-electric-pole" in name
         or "substation" in name
     ):
@@ -240,11 +251,22 @@ def entity_collision_half_size(name: str, direction: int = DIRECTION_NORTH) -> t
             return 0.9, 0.29
         return 0.29, 0.9
     if name in _PROTOTYPE_COLLISIONS:
-        return _PROTOTYPE_COLLISIONS[name]
+        cx, cy = _PROTOTYPE_COLLISIONS[name]
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return cy, cx
+        return cx, cy
     if "rocket-silo" in name:
         return 4.2, 4.2
     if "oil-refinery" in name:
         return 2.2, 2.2
+    if "steam-engine" in name or "steam-turbine" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 2.35, 1.25
+        return 1.25, 2.35
+    if "boiler" in name or "heat-exchanger" in name:
+        if direction in (DIRECTION_EAST, DIRECTION_WEST):
+            return 0.79, 1.29
+        return 1.29, 0.79
     if (
         "assembling-machine" in name
         or "electric-furnace" in name

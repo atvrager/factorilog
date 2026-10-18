@@ -60,6 +60,46 @@ class NetlistTest(unittest.TestCase):
         names = [netlist.sanitize(m) for m in self.nl.inputs]
         self.assertIn("iron_ore", names)
         self.assertIn("copper_ore", names)
+        self.assertIn("coal", names)
+        self.assertIn("water", names)
+
+    def test_power_plant_instances_and_steam_nets(self) -> None:
+        boilers = [i for i in self.nl.instances if i.recipe == "boiler-steam"]
+        engines = [i for i in self.nl.instances if i.recipe == "steam-power"]
+        self.assertGreater(len(boilers), 0)
+        self.assertGreater(len(engines), 0)
+        self.assertLessEqual(len(engines), 2 * len(boilers))
+
+        # Verify automation-science-pack with 3x3 chassis synthesizes enough steam engines
+        # to cover 100% of integer placed machines + inserters + 3x3 chassis base entities.
+        chassis_w = solve.chassis_power_watts(self.data, 3, 3)
+        nl_auto_chassis = netlist.build(
+            self.data,
+            {"automation-science-pack": 60.0},
+            self.allowed,
+            extra_power_watts=chassis_w,
+        )
+        se_insts = [i for i in nl_auto_chassis.instances if i.recipe == "steam-power"]
+        b_insts = [i for i in nl_auto_chassis.instances if i.recipe == "boiler-steam"]
+        se_watts = float(self.data.recipes["steam-power"]["power_output_watts"])
+        total_supply_watts = len(se_insts) * se_watts
+
+        placed_mach_watts = 0.0
+        inserter_ports = 0
+        for inst in nl_auto_chassis.instances:
+            if inst.recipe in ("boiler-steam", "steam-power"):
+                inserter_ports += 1 if inst.recipe == "boiler-steam" else 0
+                continue
+            cell = nl_auto_chassis.cells[inst.cell_key]
+            m_name = cell["machine"]
+            m_proto = self.data.machines[m_name]
+            placed_mach_watts += solve.machine_peak_watts(m_proto)
+            inserter_ports += len(cell["inputs"]) + len(cell["outputs"])
+        ins_sustained = solve.inserter_peak_watts(self.data)
+        expected_load = placed_mach_watts + inserter_ports * ins_sustained + chassis_w
+        self.assertGreaterEqual(total_supply_watts, expected_load)
+        self.assertEqual(len(se_insts), 9)
+        self.assertEqual(len(b_insts), 5)
 
     def test_single_driver_nets(self) -> None:
         for material, net in self.nl.nets.items():

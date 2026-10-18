@@ -34,7 +34,12 @@ except ImportError:
 def is_aon_entity(ent: dict[str, Any]) -> bool:
     """Return True if entity belongs to always-on power domain."""
     name = ent.get("name", "")
-    return "combinator" in name or "display-panel" in name or ent.get("power_domain") == "aon"
+    return (
+        "combinator" in name
+        or "display-panel" in name
+        or name == "steam-engine"
+        or ent.get("power_domain") == "aon"
+    )
 
 
 def generate_pdn(
@@ -70,6 +75,7 @@ def generate_pdn(
                 "display-panel",
                 "lab",
                 "radar",
+                "steam-engine",
             )
         )
     ]

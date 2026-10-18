@@ -42,6 +42,8 @@ MACHINE_PREFERENCE = [
     "crusher",
     "recycler",
     "rocket-silo",
+    "boiler",
+    "steam-engine",
 ]
 
 # Items that the ground of one planet supplies without a recipe.
@@ -98,11 +100,16 @@ def power_watts(text):
     """'375kW' -> 375000.0"""
     if isinstance(text, (int, float)):
         return float(text)
-    m = re.fullmatch(r"([0-9.]+)([kMG]?)W", str(text))
+    m = re.fullmatch(r"([0-9.]+)([kMGT]?)[WJ]", str(text))
     if m is None:
         raise ValueError(f"no power in {text!r}")
-    scale = {"": 1.0, "k": 1e3, "M": 1e6, "G": 1e9}[m.group(2)]
+    scale = {"": 1.0, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}[m.group(2)]
     return float(m.group(1)) * scale
+
+
+def energy_joules(text):
+    """'4MJ' or '2kJ' -> Joules."""
+    return power_watts(text)
 
 
 def amount_of(entry):
@@ -138,8 +145,9 @@ class Data:
         # Every prototype type, for the tools that place entities.
         self.prototypes = raw
         self.machines = {}
-        for proto_type in ("assembling-machine", "furnace", "rocket-silo"):
-            self.machines.update(raw.get(proto_type, {}))
+        for proto_type in ("assembling-machine", "furnace", "rocket-silo", "boiler", "generator"):
+            for m_name, m_proto in raw.get(proto_type, {}).items():
+                self.machines[m_name] = dict(m_proto)
         self.drills = raw.get("mining-drill", {})
 
         self.ground = set()
@@ -185,6 +193,62 @@ class Data:
                             "fixed_recipe": fixed_name,
                         }
 
+        # Synthesize boiler-steam and steam-power recipes dynamically from prototypes.
+        boiler_proto = raw.get("boiler", {}).get("boiler")
+        se_proto = raw.get("generator", {}).get("steam-engine")
+        water_proto = raw.get("fluid", {}).get("water")
+        steam_proto = raw.get("fluid", {}).get("steam")
+        coal_proto = raw.get("item", {}).get("coal")
+        if boiler_proto and se_proto and water_proto and steam_proto and coal_proto:
+            self.machines["boiler"]["crafting_categories"] = ["boiler-steam"]
+            self.machines["boiler"]["crafting_speed"] = 1.0
+            self.machines["steam-engine"]["crafting_categories"] = ["steam-power"]
+            self.machines["steam-engine"]["crafting_speed"] = 1.0
+
+            water_temp = float(water_proto["default_temperature"])
+            steam_temp = float(steam_proto["default_temperature"])
+            target_temp = float(boiler_proto["target_temperature"])
+            water_hc = energy_joules(water_proto["heat_capacity"])
+            steam_hc = energy_joules(steam_proto["heat_capacity"])
+            boiler_power = power_watts(boiler_proto["energy_consumption"])
+            boiler_eff = float(boiler_proto.get("energy_source", {}).get("effectivity", 1.0))
+            coal_fuel = energy_joules(coal_proto["fuel_value"])
+
+            water_rate = boiler_power / ((target_temp - water_temp) * water_hc)
+            steam_rate = boiler_power / ((target_temp - steam_temp) * steam_hc)
+            coal_rate = boiler_power / (boiler_eff * coal_fuel)
+
+            self.recipes["boiler-steam"] = {
+                "type": "recipe",
+                "name": "boiler-steam",
+                "categories": ["boiler-steam"],
+                "energy_required": 1.0,
+                "ingredients": [
+                    {"type": "fluid", "name": "water", "amount": water_rate},
+                    {"type": "item", "name": "coal", "amount": coal_rate},
+                ],
+                "results": [
+                    {"type": "fluid", "name": "steam", "amount": steam_rate},
+                ],
+            }
+
+            fluid_per_sec = float(se_proto["fluid_usage_per_tick"]) * 60.0
+            se_eff = float(se_proto.get("effectivity", 1.0))
+            op_temp = min(float(se_proto["maximum_temperature"]), target_temp)
+            power_out = fluid_per_sec * (op_temp - steam_temp) * steam_hc * se_eff
+
+            self.recipes["steam-power"] = {
+                "type": "recipe",
+                "name": "steam-power",
+                "categories": ["steam-power"],
+                "energy_required": 1.0,
+                "ingredients": [
+                    {"type": "fluid", "name": "steam", "amount": fluid_per_sec},
+                ],
+                "results": [],
+                "power_output_watts": power_out,
+            }
+
         self.producers = collections.defaultdict(list)
         for name, recipe in self.recipes.items():
             for res in self.results_of(recipe):
@@ -226,7 +290,7 @@ class Data:
             if proto is None:
                 continue
             if set(categories) & set(proto.get("crafting_categories", [])):
-                return (name, float(proto["crafting_speed"]))
+                return (name, float(proto.get("crafting_speed", 1.0)))
         return None
 
     def tech_order(self, target):
@@ -290,12 +354,18 @@ def closure(data, demand, allowed):
     """Every recipe that may enter the plan, and every item it touches."""
     items = set(demand)
     chosen = {}
+    if "steam-power" in allowed and "boiler-steam" in allowed and "steam-power" in data.recipes:
+        chosen["steam-power"] = data.recipes["steam-power"]
+        chosen["boiler-steam"] = data.recipes["boiler-steam"]
+        items.update(["steam", "water", "coal"])
     changed = True
     while changed:
         changed = False
         for item in list(items):
             for recipe_name in data.producers.get(item, []):
                 if recipe_name not in allowed or recipe_name in chosen:
+                    continue
+                if recipe_name == "coal-liquefaction" and "crude-oil" in data.ground:
                     continue
                 chosen[recipe_name] = data.recipes[recipe_name]
                 for entry in data.ingredients_of(data.recipes[recipe_name]):
@@ -309,7 +379,87 @@ def closure(data, demand, allowed):
     return chosen, items
 
 
-def solve_rates(data, demand, allowed):
+def machine_peak_watts(m_proto):
+    """Peak electric power draw of one crafting machine, including passive drain."""
+    es = m_proto.get("energy_source", {})
+    if es.get("type") == "burner":
+        return 0.0
+    active = power_watts(m_proto.get("active_energy_usage") or m_proto.get("energy_usage", 0))
+    if active <= 0.0:
+        return 0.0
+    if "drain" in es:
+        drain = power_watts(es["drain"])
+    elif es.get("type") == "electric":
+        drain = active / 30.0
+    else:
+        drain = 0.0
+    return active + drain
+
+
+def inserter_peak_watts(data, ins_name="fast-inserter"):
+    """Active electric power draw of one inserter from prototype properties."""
+    ins_proto = data.prototypes.get("inserter", {}).get(ins_name, {})
+    es = ins_proto.get("energy_source", {})
+    if es.get("type") == "burner":
+        return 0.0
+    rot_j = energy_joules(
+        ins_proto.get("energy_per_rotation") or ins_proto.get("energy_per_movement", "7kJ")
+    )
+    ext_j = energy_joules(ins_proto.get("energy_per_movement", "7kJ"))
+    rot_s = float(ins_proto.get("rotation_speed", 0.04))
+    ext_s = float(ins_proto.get("extension_speed", 0.1))
+    drain = power_watts(es.get("drain", 0)) if "drain" in es else 0.0
+    return (rot_j * rot_s + 0.25 * ext_j * ext_s) * 60.0 + drain
+
+
+def chassis_power_watts(data, grid_w, grid_h):
+    """Total electric power draw of chassis base entities (radars and lamps) for a grid_w x grid_h chassis."""
+    if grid_w <= 0 or grid_h <= 0:
+        return 0.0
+    from pathlib import Path
+
+    try:
+        from foundry.chassis import CityBlockChassis
+    except ImportError:
+        from chassis import CityBlockChassis
+
+    chassis = None
+    if grid_w * grid_h >= 4:
+        chassis = CityBlockChassis(pitch=100, channel_width=8, programmatic=True)
+    else:
+        for cand in (
+            Path("cityblock.bp"),
+            Path(__file__).resolve().parent.parent / "cityblock.bp",
+        ):
+            if cand.is_file():
+                try:
+                    chassis = CityBlockChassis.from_blueprint_file(cand)
+                    break
+                except Exception:
+                    pass
+        if chassis is None:
+            chassis = CityBlockChassis(
+                pitch=100, core_width=94, core_height=94, channel_width=6, programmatic=True
+            )
+    base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
+    entities = base_bp.get("blueprint", {}).get("entities", [])
+    radars = data.prototypes.get("radar", {})
+    lamps = data.prototypes.get("lamp", {})
+    total = 0.0
+    for ent in entities:
+        ename = ent.get("name", "")
+        if ename in radars:
+            total += power_watts(radars[ename].get("energy_usage", 0))
+        elif ename in lamps:
+            val_str = str(lamps[ename].get("energy_usage_per_tick", 0)).strip()
+            if val_str.endswith("J"):
+                total += energy_joules(val_str) * 60.0
+            else:
+                total += power_watts(val_str)
+    return total
+
+
+def solve_rates(data, demand, allowed, extra_power_watts=0.0):
     """Recipe rates per minute that meet the demand at the least raw cost."""
     recipes, items = closure(data, demand, allowed)
     names = sorted(recipes)
@@ -348,8 +498,41 @@ def solve_rates(data, demand, allowed):
     a_eq = np.hstack([net, -np.eye(rows)])
     b_eq = np.array([demand.get(item, 0.0) for item in item_list])
 
+    a_ub = None
+    b_ub = None
+    if "steam-power" in recipes and "boiler-steam" in recipes:
+        ins_watts = inserter_peak_watts(data)
+        power_row = np.zeros(cols + rows)
+        for col, name in enumerate(names):
+            recipe = recipes[name]
+            gen_watts = float(recipe.get("power_output_watts", 0.0))
+            if gen_watts > 0.0:
+                # 1 generator running 60 s/min executes 60 / craft_seconds crafts/min.
+                power_row[col] = -gen_watts * (Data.craft_seconds(recipe) / 60.0)
+                continue
+            pick = data.machine_for(recipe)
+            if pick is None:
+                continue
+            machine, speed = pick
+            m_proto = data.machines.get(machine, {})
+            watts = machine_peak_watts(m_proto)
+            solid_ports = sum(
+                1
+                for e in (data.ingredients_of(recipe) + data.results_of(recipe))
+                if not isinstance(e, dict) or e.get("type", "item") != "fluid"
+            )
+            if watts <= 0.0 and solid_ports == 0:
+                continue
+            cell_watts = watts + solid_ports * ins_watts
+            power_row[col] = (Data.craft_seconds(recipe) / (60.0 * speed)) * cell_watts
+        if (power_row > 0).any() or extra_power_watts > 0.0:
+            a_ub = power_row.reshape(1, -1)
+            b_ub = np.array([-float(extra_power_watts)])
+
     result = linprog(
         np.concatenate([cost, np.full(rows, SURPLUS_WEIGHT)]),
+        A_ub=a_ub,
+        b_ub=b_ub,
         A_eq=a_eq,
         b_eq=b_eq,
         bounds=(0, None),

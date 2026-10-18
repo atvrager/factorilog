@@ -60,6 +60,7 @@ class RoutingGrid:
         obstacles: set[tuple[int, int]] | None = None,
         component_headings: dict[tuple[int, int], int] | None = None,
         no_hood_tiles: set[tuple[int, int]] | None = None,
+        fluid_port_approaches: dict[tuple[int, int], set[str]] | None = None,
     ) -> None:
         """Initialize the routing grid with dimensions and prototype parameters."""
         self.min_x = min_x
@@ -116,7 +117,9 @@ class RoutingGrid:
         self.reserved_terminal_bases: dict[tuple[int, int], set[str]] = {}
         self.terminal_headings: dict[tuple[int, int], int] = {}
         self.fluid_terminal_inward_dir: dict[tuple[int, int], int] = {}
-        self.fluid_port_approaches: dict[tuple[int, int], set[str]] = {}
+        self.fluid_port_approaches: dict[tuple[int, int], set[str]] = (
+            {k: set(v) for k, v in fluid_port_approaches.items()} if fluid_port_approaches else {}
+        )
         self.component_headings: dict[tuple[int, int], int] = (
             dict(component_headings) if component_headings else {}
         )

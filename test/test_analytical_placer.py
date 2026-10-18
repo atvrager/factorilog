@@ -203,7 +203,7 @@ class TestAnalyticalPlacer(unittest.TestCase):
     def test_hpwl_reduction_vs_rank_row_placement(self) -> None:
         """Verify analytical placement achieves lower HPWL than rank-based linear row placement."""
         def_path = Path("flow/automation_science_chassis.def")
-        json_path = Path("flow/automation_science_netlist.json")
+        json_path = Path("flow/automation_science_chassis_netlist.json")
         if not def_path.is_file() or not json_path.is_file():
             self.skipTest("automation_science fixtures not found")
 
@@ -287,7 +287,7 @@ class TestAnalyticalPlacer(unittest.TestCase):
     def test_end_to_end_maze_router_on_analytical_placement(self) -> None:
         """Verify 100 percent route completion and zero DRC violations with DualLaneMazeRouter."""
         def_path = Path("flow/automation_science_chassis.def")
-        json_path = Path("flow/automation_science_netlist.json")
+        json_path = Path("flow/automation_science_chassis_netlist.json")
         if not def_path.is_file() or not json_path.is_file():
             self.skipTest("automation_science fixtures not found")
 

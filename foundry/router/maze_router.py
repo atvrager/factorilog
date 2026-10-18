@@ -34,6 +34,7 @@ class DualLaneMazeRouter:
         obstacles: set[tuple[int, int]] | None = None,
         component_headings: dict[tuple[int, int], int] | None = None,
         no_hood_tiles: set[tuple[int, int]] | None = None,
+        fluid_port_approaches: dict[tuple[int, int], set[str]] | None = None,
     ) -> None:
         """Initialize the router with spatial bounds and optional engine."""
         self.min_x = min_x
@@ -45,6 +46,9 @@ class DualLaneMazeRouter:
         self.obstacles = set(obstacles) if obstacles else set()
         self.component_headings = dict(component_headings) if component_headings else {}
         self.no_hood_tiles = set(no_hood_tiles) if no_hood_tiles else set()
+        self.fluid_port_approaches = (
+            {k: set(v) for k, v in fluid_port_approaches.items()} if fluid_port_approaches else {}
+        )
 
     def route(
         self,
@@ -63,6 +67,7 @@ class DualLaneMazeRouter:
             obstacles=self.obstacles,
             component_headings=self.component_headings,
             no_hood_tiles=self.no_hood_tiles,
+            fluid_port_approaches=self.fluid_port_approaches,
         )
         grid.register_terminals(nets)
 

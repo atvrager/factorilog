@@ -94,6 +94,14 @@ def _factorilog_synth_impl(ctx):
         extra_flags.append("--no-synthesize-splitters")
     if ctx.attr.only_recipes:
         extra_flags.append("--only-recipes '%s'" % ctx.attr.only_recipes)
+    if ctx.attr.use_chassis:
+        extra_flags.append("--use-chassis")
+        if ctx.attr.chassis_grid_w > 0:
+            extra_flags.append("--chassis-grid-w %d" % ctx.attr.chassis_grid_w)
+        if ctx.attr.chassis_grid_h > 0:
+            extra_flags.append("--chassis-grid-h %d" % ctx.attr.chassis_grid_h)
+    else:
+        extra_flags.append("--no-use-chassis")
 
     flags_str = " ".join(extra_flags)
     target_str = ctx.attr.demand if ctx.attr.demand else ("--spc %s" % ctx.attr.spc)
@@ -169,6 +177,9 @@ factorilog_synth = rule(
         "synthesize_splitters": attr.bool(default = True, doc = "Synthesize binary trees of splitters for multi-consumer nets"),
         "only_recipes": attr.string(default = "", doc = "Optional comma-separated list of allowed recipes"),
         "controller_verilog": attr.label(allow_single_file = [".v"], doc = "Optional Verilog controller file"),
+        "use_chassis": attr.bool(default = False, doc = "Include city-block chassis base power load"),
+        "chassis_grid_w": attr.int(default = 1, doc = "Chassis grid width in blocks"),
+        "chassis_grid_h": attr.int(default = 1, doc = "Chassis grid height in blocks"),
         "cells_v": attr.output(mandatory = True),
         "netlist_v": attr.output(mandatory = True),
         "netlist_json": attr.output(mandatory = True),
@@ -719,6 +730,9 @@ def factorilog_science_factory(
         only_recipes = only_recipes,
         telemetry_taps = telemetry_taps,
         controller_verilog = controller_verilog,
+        use_chassis = use_chassis,
+        chassis_grid_w = chassis_grid_w,
+        chassis_grid_h = chassis_grid_h,
         tags = merged_tags,
     )
 

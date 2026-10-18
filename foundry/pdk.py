@@ -43,7 +43,7 @@ TICKS_PER_SECOND = 60.0
 LANES_PER_BELT = 2
 
 # Prototype tables that hold placeable buildings.
-MACHINE_TABLES = ("assembling-machine", "furnace", "rocket-silo")
+MACHINE_TABLES = ("assembling-machine", "furnace", "rocket-silo", "boiler", "generator")
 BELT_TABLE = "transport-belt"
 UNDERGROUND_TABLE = "underground-belt"
 INSERTER_TABLE = "inserter"
@@ -217,6 +217,8 @@ CORE_MACHINES: frozenset[str] = frozenset(
         "oil-refinery",
         "centrifuge",
         "rocket-silo",
+        "boiler",
+        "steam-engine",
     }
 )
 
@@ -339,8 +341,85 @@ class Pdk:
         out_slots: dict[str, int] = {}
         port_faces: dict[str, str] | None = None
         unused_fluid_ports: list[tuple[float, float]] = []
+        internal_pipes: list[dict[str, Any]] = []
 
-        if fluid_boxes and has_fluids:
+        if proto.get("type") == "boiler" and has_fluids:
+            direction = DIRECTION_EAST
+            placed_w = machine_height
+            placed_h = machine_width
+            width = placed_w + 2
+            height = placed_h + 2
+            cx, cy = 1.0 + placed_w / 2.0, 1.0 + placed_h / 2.0
+            out_fb = proto.get("output_fluid_box", {})
+            out_conns = out_fb.get("pipe_connections", [])
+            if out_conns:
+                bx, by = float(out_conns[0]["position"][0]), float(out_conns[0]["position"][1])
+                rx, ry = -by, bx
+                out_slot = math.floor(cy + ry)
+            else:
+                out_slot = 1 + placed_h // 2
+            for p in outputs:
+                if p in fluid_table:
+                    out_slots[p] = out_slot
+            in_fb = proto.get("fluid_box", {})
+            in_conns = in_fb.get("pipe_connections", [])
+            for conn in in_conns:
+                bx, by = float(conn["position"][0]), float(conn["position"][1])
+                rx, ry = -by, bx
+                cdir = (int(conn.get("direction", 0)) + DIRECTION_EAST) % 16
+                step_dx = (
+                    1.0 if cdir == DIRECTION_EAST else (-1.0 if cdir == DIRECTION_WEST else 0.0)
+                )
+                step_dy = (
+                    1.0 if cdir == DIRECTION_SOUTH else (-1.0 if cdir == DIRECTION_NORTH else 0.0)
+                )
+                ext_x = round(cx + rx + step_dx, 2)
+                ext_y = round(cy + ry + step_dy, 2)
+                if cdir == DIRECTION_NORTH:
+                    in_slot = math.floor(ext_y)
+                    for p in inputs:
+                        if p in fluid_table:
+                            in_slots[p] = in_slot
+                            internal_pipes.append({"x": ext_x, "y": ext_y, "fluid": p})
+                else:
+                    unused_fluid_ports.append((ext_x, ext_y))
+            mid_slot = 1 + placed_h // 2
+            for p in inputs:
+                if p not in fluid_table:
+                    in_slots[p] = mid_slot
+            port_faces = dict.fromkeys(inputs, "W")
+            port_faces.update(dict.fromkeys(outputs, "E"))
+        elif proto.get("type") == "generator" and has_fluids:
+            direction = DIRECTION_EAST
+            placed_w = machine_height
+            placed_h = machine_width
+            width = placed_w + 2
+            height = placed_h + 2
+            cx, cy = 1.0 + placed_w / 2.0, 1.0 + placed_h / 2.0
+            in_fb = proto.get("fluid_box", {})
+            in_conns = in_fb.get("pipe_connections", [])
+            for conn in in_conns:
+                bx, by = float(conn["position"][0]), float(conn["position"][1])
+                rx, ry = -by, bx
+                cdir = (int(conn.get("direction", 0)) + DIRECTION_EAST) % 16
+                step_dx = (
+                    1.0 if cdir == DIRECTION_EAST else (-1.0 if cdir == DIRECTION_WEST else 0.0)
+                )
+                step_dy = (
+                    1.0 if cdir == DIRECTION_SOUTH else (-1.0 if cdir == DIRECTION_NORTH else 0.0)
+                )
+                ext_x = round(cx + rx + step_dx, 2)
+                ext_y = round(cy + ry + step_dy, 2)
+                if cdir == DIRECTION_WEST:
+                    in_slot = math.floor(ext_y)
+                    for p in inputs:
+                        if p in fluid_table:
+                            in_slots[p] = in_slot
+                else:
+                    unused_fluid_ports.append((ext_x, ext_y))
+            port_faces = dict.fromkeys(inputs, "W")
+            port_faces.update(dict.fromkeys(outputs, "E"))
+        elif fluid_boxes and has_fluids:
             in_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "input"]
             out_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "output"]
 
@@ -556,8 +635,8 @@ class Pdk:
             "recipe": recipe,
             "width": width,
             "height": height,
-            "machine_width": machine_width,
-            "machine_height": machine_height,
+            "machine_width": placed_w,
+            "machine_height": placed_h,
             "direction": direction,
             "in_slots": in_slots,
             "out_slots": out_slots,
@@ -586,6 +665,8 @@ class Pdk:
             res_cell["port_faces"] = port_faces
         if unused_fluid_ports:
             res_cell["unused_fluid_ports"] = unused_fluid_ports
+        if internal_pipes:
+            res_cell["internal_pipes"] = internal_pipes
         return res_cell
 
     def inserter_stack_size(self) -> int:

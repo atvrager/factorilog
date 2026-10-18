@@ -266,8 +266,10 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             machine = cell.get("machine", "assembling-machine-3")
             recipe = cell.get("fixed_recipe") or inst.get("recipe", cell.get("recipe", ""))
             extra: dict[str, Any] = {}
-            if recipe:
+            if recipe and machine not in ("boiler", "steam-engine"):
                 extra["recipe"] = recipe
+            if machine == "steam-engine":
+                extra["power_domain"] = "aon"
             if cell.get("landing_pad"):
                 extra["launch_to_orbit_automatically"] = True
             inputs = cell.get("inputs", [])
@@ -330,6 +332,9 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                 ix, iy = geom["inserter_pos"]
                 idir = geom["inserter_dir"]
                 ins_name, ins_extra = _select_port_inserter(inst, cell, port, is_out=False)
+                if machine in ("boiler", "steam-engine"):
+                    ins_extra = dict(ins_extra or {})
+                    ins_extra["power_domain"] = "aon"
                 add_entity(ins_name, gx + ix, gy + iy, direction=idir, extra=ins_extra)
                 occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
@@ -380,12 +385,19 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
                     add_entity(ins_name, gx + ix, gy + iy, direction=idir, extra=ins_extra)
                     occupied_positions.add((round(gx + ix, 2), round(gy + iy, 2)))
 
+            for ipipe in cell.get("internal_pipes", []):
+                px = gx + float(ipipe["x"])
+                py = gy + float(ipipe["y"])
+                p_extra = {"fluid": str(ipipe["fluid"])} if "fluid" in ipipe else None
+                add_entity("pipe", px, py, extra=p_extra)
+                occupied_positions.add((round(px, 2), round(py, 2)))
+
             for tx in range(m_w):
                 for ty in range(m_h):
                     occupied_positions.add(
                         (round(gx + in_offset + tx + 0.5, 2), round(gy + y_offset + ty + 0.5, 2))
                     )
-            if not def_data.get("blockages"):
+            if not def_data.get("blockages") or machine in ("boiler", "steam-engine"):
                 for ux, uy in cell.get("unused_fluid_ports", []):
                     occupied_positions.add((round(gx + float(ux), 2), round(gy + float(uy), 2)))
 

@@ -443,7 +443,7 @@ class BeltDrcChecker:
             name = ent.get("name", "")
             if "switch" in name or "splitter" in name or "pole" in name:
                 continue
-            w_f, h_f = entity_size(name)
+            w_f, h_f = entity_size(name, int(ent.get("direction", DIRECTION_NORTH)))
             if w_f >= 2.0 or h_f >= 2.0:
                 w, h = int(w_f), int(h_f)
                 pos = ent.get("position", {})
@@ -793,7 +793,7 @@ class BeltDrcChecker:
             name = ent.get("name", "")
             if "switch" in name or "splitter" in name or "pole" in name:
                 continue
-            w_f, h_f = entity_size(name)
+            w_f, h_f = entity_size(name, int(ent.get("direction", DIRECTION_NORTH)))
             if w_f >= 2.0 or h_f >= 2.0:
                 w, h = int(w_f), int(h_f)
                 pos = ent.get("position", {})

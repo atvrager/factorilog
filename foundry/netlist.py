@@ -225,10 +225,13 @@ def build(
     allowed: set[str],
     machine_override: str | dict[str, str] | None = None,
     enable_compound_cells: bool = False,  # noqa: ARG001
+    extra_power_watts: float = 0.0,
 ) -> Netlist:
     """Solve the plan, then lower it to instances and nets."""
     tech = pdk.Pdk(data)
-    rates, raw, _surplus = solve.solve_rates(data, demand, allowed)
+    rates, raw, _surplus = solve.solve_rates(
+        data, demand, allowed, extra_power_watts=extra_power_watts
+    )
     lines, _power = solve.machine_counts(data, rates)
     plan_count = {line[0]: line[3] for line in lines}
 
@@ -238,7 +241,14 @@ def build(
         nl.belt_capacity = (
             float(belt_tiers[0]["items_per_lane"]) * pdk.LANES_PER_BELT * pdk.TICKS_PER_SECOND
         )
-    for recipe, rate in sorted(rates.items()):
+
+    is_single_pack = len(demand) <= 1 and "space-science-pack" not in demand
+    is_full_chassis = len(demand) >= 6 or "space-science-pack" in demand
+    scale_for_throughput = is_single_pack or is_full_chassis
+
+    def _resolve_recipe_cell_and_count(
+        recipe: str, rate: float
+    ) -> tuple[dict[str, Any], float, int]:
         if isinstance(machine_override, dict):
             machine = machine_override.get(recipe, "assembling-machine-3")
         elif machine_override:
@@ -249,13 +259,8 @@ def build(
 
         recipe_proto = data.recipes[recipe]
         cell = tech.cell(machine, recipe)
-
         if cell is None:
             raise RuntimeError(f"no cell for {machine} running {recipe}")
-        nl.cells[cell["cell"]] = cell
-        is_single_pack = len(demand) <= 1 and "space-science-pack" not in demand
-        is_full_chassis = len(demand) >= 6 or "space-science-pack" in demand
-        scale_for_throughput = is_single_pack or is_full_chassis
         eff_cpm = (
             float(cell.get("effective_crafts_per_minute", cell["crafts_per_minute"]))
             if scale_for_throughput
@@ -310,7 +315,13 @@ def build(
                         )
                         if k_split >= 2 and min_part_drvs > count:
                             count = min_part_drvs
-        if is_single_pack and count > 2 and (count & (count - 1)) != 0 and eff_cpm > 0:
+        if (
+            is_single_pack
+            and recipe not in ("boiler-steam", "steam-power")
+            and count > 2
+            and (count & (count - 1)) != 0
+            and eff_cpm > 0
+        ):
             d_tree = int(math.log2(count))
             next_pow2 = 1 << (d_tree + 1)
             if eff_cpm < rate * (0.5**d_tree) - 1e-6:
@@ -328,6 +339,54 @@ def build(
                     )
                     if 0.0 < excess_item_rate <= belt_ips / 3.0 + 1e-6:
                         count = next_pow2
+        return cell, eff_cpm, count
+
+    if "steam-power" in rates and "boiler-steam" in rates and not isinstance(machine_override, str):
+        ins_watts = solve.inserter_peak_watts(data)
+        placed_watts = float(extra_power_watts)
+        for recipe, rate in sorted(rates.items()):
+            if recipe in ("boiler-steam", "steam-power"):
+                continue
+            cell, _eff_cpm, count = _resolve_recipe_cell_and_count(recipe, rate)
+            m_proto = data.machines.get(cell["machine"], {})
+            m_watts = solve.machine_peak_watts(m_proto)
+            solid_ports = sum(
+                1 for p in (*cell.get("inputs", []), *cell.get("outputs", [])) if p not in nl.fluids
+            )
+            placed_watts += count * (m_watts + solid_ports * ins_watts)
+
+        se_recipe = data.recipes["steam-power"]
+        boiler_recipe = data.recipes["boiler-steam"]
+        gen_watts = float(se_recipe.get("power_output_watts", 0.0))
+        if gen_watts > 0.0 and placed_watts > 0.0:
+            se_steam = solve.amount_of(se_recipe["ingredients"][0])
+            boiler_steam = solve.amount_of(solve.Data.results_of(boiler_recipe)[0])
+            engines_per_boiler = boiler_steam / se_steam if se_steam > 0 else 2.0
+            net_gen_watts = max(1.0, gen_watts - (ins_watts / max(1.0, engines_per_boiler)))
+            req_engines = max(1, math.ceil(placed_watts / net_gen_watts - 1e-9))
+            se_cell = tech.cell("steam-engine", "steam-power")
+            boiler_cell = tech.cell("boiler", "boiler-steam")
+            if se_cell and boiler_cell:
+                se_cpm = float(se_cell["crafts_per_minute"])
+                boiler_cpm = float(boiler_cell["crafts_per_minute"])
+                req_se_rate = req_engines * se_cpm
+                if req_se_rate > rates["steam-power"]:
+                    old_boiler_rate = rates["boiler-steam"]
+                    new_boiler_rate = (req_se_rate * se_steam) / boiler_steam
+                    delta_boiler_rate = new_boiler_rate - old_boiler_rate
+                    rates["steam-power"] = req_se_rate
+                    rates["boiler-steam"] = new_boiler_rate
+                    plan_count["steam-power"] = float(req_engines)
+                    plan_count["boiler-steam"] = new_boiler_rate / boiler_cpm
+                    for ing in boiler_recipe.get("ingredients", []):
+                        ing_name = solve.name_of(ing)
+                        if ing_name in raw:
+                            raw[ing_name] += delta_boiler_rate * solve.amount_of(ing)
+
+    for recipe, rate in sorted(rates.items()):
+        recipe_proto = data.recipes[recipe]
+        cell, eff_cpm, count = _resolve_recipe_cell_and_count(recipe, rate)
+        nl.cells[cell["cell"]] = cell
         # Each instance of the fleet takes an equal share of the recipe.
         share = rate / count
         rated_crafts = eff_cpm
@@ -372,6 +431,25 @@ def build(
                 out_net.driver_rates[inst.name] = share * amt
                 out_net.driver_rated[inst.name] = rated_crafts * amt
 
+    if "steam" in nl.nets and len(nl.nets["steam"].drivers) > 1:
+        steam_net = nl.nets.pop("steam")
+        drvs = list(steam_net.drivers)
+        sinks = list(steam_net.sinks)
+        for b_idx, drv in enumerate(drvs):
+            sub_name = f"steam__{b_idx + 1}"
+            nl.fluids.add(sub_name)
+            sub_net = nl.net(sub_name)
+            drv_r = steam_net.driver_rates.get(drv, 0.0)
+            drv_rated = steam_net.driver_rated.get(drv, 0.0)
+            sub_net.drivers.append(drv)
+            sub_net.driver_rates[drv] = drv_r
+            sub_net.driver_rated[drv] = drv_rated
+            sub_net.rate_per_min = drv_r
+            for s_name in sinks[2 * b_idx : 2 * b_idx + 2]:
+                sub_net.sinks.append(s_name)
+                sub_net.sink_rates[s_name] = steam_net.sink_rates.get(s_name, 0.0)
+                sub_net.sink_rated[s_name] = steam_net.sink_rated.get(s_name, 0.0)
+
     for material, rate in raw.items():
         net = nl.net(material)
         net.rate_per_min = rate
@@ -403,8 +481,10 @@ def build(
         for cell in nl.cells.values():
             in_depth = max((depths.get(p, 0) for p in cell.get("inputs", [])), default=0)
             for out_p in cell.get("outputs", []):
+                if out_p in depths and depths[out_p] == 0 and out_p in raw:
+                    continue
                 new_d = in_depth + 1
-                if new_d > depths.get(out_p, 0):
+                if new_d > depths.get(out_p, 0) and new_d <= len(nl.cells) + 2:
                     depths[out_p] = new_d
                     changed = True
 
@@ -445,7 +525,11 @@ def build(
                     cell.setdefault("out_slots", {})[p] = offset_out + idx
     nl.material_depths = depths
     instances_by_depth: dict[int, list[Instance]] = collections.defaultdict(list)
+    power_plant_insts: list[Instance] = []
     for inst in nl.instances:
+        if inst.recipe in ("boiler-steam", "steam-power"):
+            power_plant_insts.append(inst)
+            continue
         c = nl.cells.get(inst.cell_key, {})
         d = min((depths.get(p, 0) for p in c.get("outputs", [])), default=0)
         if d == 0:
@@ -486,6 +570,8 @@ def build(
                 _assign_recipe_chunk_ranks(non_term_at_d, sort_recipes=True)
     if higher_term:
         _assign_recipe_chunk_ranks(higher_term, sort_recipes=False)
+    if power_plant_insts:
+        _assign_recipe_chunk_ranks(power_plant_insts, sort_recipes=True)
     return nl
 
 
@@ -730,17 +816,17 @@ def _partition_sinks_by_demand(
                         rem_sinks = n_r - idx
                         while cur_bus < k - 1 and (cur_added > 0 or groups[cur_bus]):
                             empty_after = sum(1 for b in range(cur_bus + 1, k) if not groups[b])
+                            if rem_sinks <= empty_after:
+                                cur_bus += 1
+                                cur_added = 0.0
+                                break
                             if (
-                                rem_sinks <= empty_after
-                                or (
-                                    bus_max_cap is not None
-                                    and bus_loads[cur_bus] + w > bus_max_cap + 1e-6
-                                )
-                                or (
-                                    cur_added + w > quotas[cur_bus]
-                                    and abs((cur_added + w) - quotas[cur_bus])
-                                    > abs(cur_added - quotas[cur_bus])
-                                )
+                                bus_max_cap is not None
+                                and bus_loads[cur_bus] + w > bus_max_cap + 1e-6
+                            ) or (
+                                cur_added + w > quotas[cur_bus]
+                                and abs((cur_added + w) - quotas[cur_bus])
+                                > abs(cur_added - quotas[cur_bus])
                             ):
                                 cur_bus += 1
                                 cur_added = 0.0
@@ -1425,11 +1511,31 @@ def emit_verilog(
         for p in cell["inputs"]:
             if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans):
                 conns.append(f".{sanitize(p)}({sanitize(p)}__{inst.name})")
+            elif p not in nl.nets:
+                sub_w = next(
+                    (
+                        sanitize(n)
+                        for n, net_obj in nl.nets.items()
+                        if n.startswith(f"{p}__") and inst.name in net_obj.sinks
+                    ),
+                    sanitize(p),
+                )
+                conns.append(f".{sanitize(p)}({sub_w})")
             else:
                 conns.append(f".{sanitize(p)}({sanitize(p)})")
         for port in cell["outputs"]:
             if port in merge_plans:
                 conns.append(f".{sanitize(port)}({sanitize(port)}__{inst.name})")
+            elif port not in nl.nets:
+                sub_w = next(
+                    (
+                        sanitize(n)
+                        for n, net_obj in nl.nets.items()
+                        if n.startswith(f"{port}__") and inst.name in net_obj.drivers
+                    ),
+                    sanitize(port),
+                )
+                conns.append(f".{sanitize(port)}({sub_w})")
             else:
                 conns.append(f".{sanitize(port)}({sanitize(port)})")
         util = f"{inst.plan_rate / inst.rated * 100:.0f}%" if inst.rated else "-"
@@ -1475,6 +1581,11 @@ def insert_telemetry(
                 if s == m.lower() or s == sanitize(m).lower():
                     tapped_materials.add(m)
 
+    tapped_materials = {
+        m
+        for m in tapped_materials
+        if m in nl.nets and not nl.nets[m].is_fluid and m not in nl.fluids
+    }
     if not tapped_materials:
         return []
 
@@ -1706,11 +1817,31 @@ def emit_ranks_tcl(
         for p in cell.get("inputs", []):
             if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans):
                 wire_sinks[f"{sanitize(p)}__{inst.name}"].append(inst.name)
+            elif p not in nl.nets:
+                sub_w = next(
+                    (
+                        sanitize(n)
+                        for n, net_obj in nl.nets.items()
+                        if n.startswith(f"{p}__") and inst.name in net_obj.sinks
+                    ),
+                    sanitize(p),
+                )
+                wire_sinks[sub_w].append(inst.name)
             else:
                 wire_sinks[sanitize(p)].append(inst.name)
         for p in cell.get("outputs", []):
             if merge_plans and p in merge_plans:
                 wire_driver[f"{sanitize(p)}__{inst.name}"] = inst.name
+            elif p not in nl.nets:
+                sub_w = next(
+                    (
+                        sanitize(n)
+                        for n, net_obj in nl.nets.items()
+                        if n.startswith(f"{p}__") and inst.name in net_obj.drivers
+                    ),
+                    sanitize(p),
+                )
+                wire_driver[sub_w] = inst.name
             else:
                 wire_driver[sanitize(p)] = inst.name
 
@@ -1752,11 +1883,19 @@ def emit_ranks_tcl(
     for inst in nl.instances:
         cell = nl.cells.get(inst.cell_key, {})
         for p in cell.get("inputs", []):
-            wname = (
-                f"{sanitize(p)}__{inst.name}"
-                if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans)
-                else sanitize(p)
-            )
+            if (split_plans and p in split_plans) or (balancer_plans and p in balancer_plans):
+                wname = f"{sanitize(p)}__{inst.name}"
+            elif p not in nl.nets:
+                wname = next(
+                    (
+                        sanitize(n)
+                        for n, net_obj in nl.nets.items()
+                        if n.startswith(f"{p}__") and inst.name in net_obj.sinks
+                    ),
+                    sanitize(p),
+                )
+            else:
+                wname = sanitize(p)
             inst_input_wires[inst.name].append(wname)
 
     if merge_plans:

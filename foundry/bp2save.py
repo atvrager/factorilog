@@ -301,9 +301,23 @@ script.on_init(function()
         end
     end
 
-    -- Off-chip power supply: single generator outside floorplan hooked to PDN
+    -- Seed placed boilers and steam-engines so tick-0 power generation starts immediately
+    for _, b in ipairs(surface.find_entities_filtered{{type = "boiler"}}) do
+        if b.valid then
+            b.insert{{name = "coal", count = 50}}
+            b.insert_fluid{{name = "water", amount = 200}}
+        end
+    end
+    for _, se in ipairs(surface.find_entities_filtered{{type = "generator"}}) do
+        if se.valid then
+            se.insert_fluid{{name = "steam", amount = 200, temperature = 165}}
+        end
+    end
+
+    -- Off-chip power supply: only used if no placed generators exist on the surface
+    local placed_gens = surface.find_entities_filtered{{type = {{"generator", "solar-panel"}}}}
     local all_poles = surface.find_entities_filtered{{type = "electric-pole"}}
-    if #all_poles > 0 then
+    if #placed_gens == 0 and #all_poles > 0 then
         local min_x = 1e9
         for _, p in ipairs(all_poles) do
             if p.valid and p.position.x < min_x then min_x = p.position.x end
