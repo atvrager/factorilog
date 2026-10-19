@@ -446,11 +446,46 @@ class NetlistTest(unittest.TestCase):
         low_unpart = math.ceil(0.03 * (whole_target_cp + split_target_cp) / drv_cap - 1e-9)
         self.assertEqual(len(cp_low_insts), low_unpart)
 
-        # Power-of-two promotion check: in military-science-pack at 60/min, netlist.build
-        # promotes piercing-rounds-magazine count to a power of two for balanced splitter trees.
-        nl_mil = netlist.build(self.data, {"military-science-pack": 60.0}, self.allowed)
-        prm_insts = [i for i in nl_mil.instances if i.recipe == "piercing-rounds-magazine"]
-        self.assertEqual(len(prm_insts) & (len(prm_insts) - 1), 0)
+        # Power-of-two promotion check: when count=3 and branch_rate exceeds eff_cpm by a small
+        # margin, netlist.build promotes count from 3 to 4.
+        igw_proto = self.data.recipes["iron-gear-wheel"]
+        igw_machine, _ = self.data.machine_for(igw_proto)
+        igw_cell = tech.cell(igw_machine, "iron-gear-wheel")
+        assert igw_cell is not None
+        igw_cpm = float(igw_cell.get("effective_crafts_per_minute", igw_cell["crafts_per_minute"]))
+        belt_ips = belt_cap / pdk.TICKS_PER_SECOND
+
+        pow2_data = copy.copy(self.data)
+        pow2_data.recipes = dict(self.data.recipes)
+        pow2_data.recipes["automation-science-pack"] = dict(
+            self.data.recipes["automation-science-pack"]
+        )
+        # Choose iron-gear-wheel rate = 2.02 * igw_cpm so base count = ceil(2.02) = 3,
+        # d_tree = 1, branch_rate = 1.01 * igw_cpm > igw_cpm, and excess_item_rate <= belt_ips / 3.
+        pow2_data.recipes["automation-science-pack"]["ingredients"] = [
+            {"type": "item", "name": "iron-gear-wheel", "amount": 2.02 * igw_cpm / 10.0}
+        ]
+        nl_pow2 = netlist.build(pow2_data, {"automation-science-pack": 10.0}, self.allowed)
+        igw_pow2 = [i for i in nl_pow2.instances if i.recipe == "iron-gear-wheel"]
+        self.assertEqual(len(igw_pow2), 4)
+
+        # When rate = 1.90 * igw_cpm, base count = 2 (power of two, count <= 2) -> stays 2.
+        pow2_data.recipes["automation-science-pack"]["ingredients"] = [
+            {"type": "item", "name": "iron-gear-wheel", "amount": 1.90 * igw_cpm / 10.0}
+        ]
+        nl_cnt2 = netlist.build(pow2_data, {"automation-science-pack": 10.0}, self.allowed)
+        self.assertEqual(len([i for i in nl_cnt2.instances if i.recipe == "iron-gear-wheel"]), 2)
+
+        # When excess_item_rate > belt_ips / 3, count stays 3.
+        excess_rate = 2.0 * (igw_cpm + (belt_ips / 2.0))
+        if excess_rate <= 3.0 * igw_cpm:
+            pow2_data.recipes["automation-science-pack"]["ingredients"] = [
+                {"type": "item", "name": "iron-gear-wheel", "amount": excess_rate / 10.0}
+            ]
+            nl_no_prom = netlist.build(pow2_data, {"automation-science-pack": 10.0}, self.allowed)
+            self.assertEqual(
+                len([i for i in nl_no_prom.instances if i.recipe == "iron-gear-wheel"]), 3
+            )
 
     def test_insert_telemetry_and_cell_helpers(self) -> None:
         """Verify cell record helpers and telemetry insertion scopes."""
