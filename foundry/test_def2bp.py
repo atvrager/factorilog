@@ -171,6 +171,359 @@ class TestDef2Bp(unittest.TestCase):
         coal = next(p for p in pins["inputs"] if p["name"] == "coal")
         self.assertEqual(coal["type"], "belt")
 
+    def test_place_components_belt_merge2_orientations(self) -> None:
+        from placement import place_components
+
+        expected_layouts = {
+            "W": {
+                (1.0, 2.5): ("splitter", def2bp.DIRECTION_NORTH),
+                (0.5, 1.5): ("transport-belt", def2bp.DIRECTION_NORTH),
+                (0.5, 0.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (1.5, 1.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (2.5, 1.5): ("transport-belt", def2bp.DIRECTION_NORTH),
+                (2.5, 0.5): ("transport-belt", def2bp.DIRECTION_WEST),
+                (1.5, 0.5): ("transport-belt", def2bp.DIRECTION_NORTH),
+            },
+            "E": {
+                (1.0, 0.5): ("splitter", def2bp.DIRECTION_SOUTH),
+                (0.5, 1.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (0.5, 2.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (1.5, 1.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (2.5, 1.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (2.5, 2.5): ("transport-belt", def2bp.DIRECTION_WEST),
+                (1.5, 2.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+            },
+            "S": {
+                (2.5, 1.0): ("splitter", def2bp.DIRECTION_WEST),
+                (1.5, 0.5): ("transport-belt", def2bp.DIRECTION_WEST),
+                (0.5, 0.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (1.5, 1.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (1.5, 2.5): ("transport-belt", def2bp.DIRECTION_WEST),
+                (0.5, 2.5): ("transport-belt", def2bp.DIRECTION_NORTH),
+                (0.5, 1.5): ("transport-belt", def2bp.DIRECTION_WEST),
+            },
+            "N": {
+                (0.5, 1.0): ("splitter", def2bp.DIRECTION_EAST),
+                (1.5, 0.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (2.5, 0.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (1.5, 1.5): ("transport-belt", def2bp.DIRECTION_SOUTH),
+                (1.5, 2.5): ("transport-belt", def2bp.DIRECTION_EAST),
+                (2.5, 2.5): ("transport-belt", def2bp.DIRECTION_NORTH),
+                (2.5, 1.5): ("transport-belt", def2bp.DIRECTION_EAST),
+            },
+        }
+        for orient, layout in expected_layouts.items():
+            res = place_components(
+                {
+                    "units": 1000,
+                    "components": [
+                        {
+                            "name": f"m_{orient}",
+                            "macro": "belt_merge2",
+                            "x": 10000,
+                            "y": 20000,
+                            "orient": orient,
+                        }
+                    ],
+                },
+                {},
+            )
+            self.assertEqual(len(res.entities), 7)
+            actual = {
+                (round(e["position"]["x"] - 10.0, 2), round(e["position"]["y"] - 20.0, 2)): (
+                    e["name"],
+                    e["direction"],
+                )
+                for e in res.entities
+            }
+            self.assertEqual(actual, layout)
+            for tx in range(3):
+                for ty in range(3):
+                    self.assertIn((10.5 + tx, 20.5 + ty), res.occupied_positions)
+
+    def test_place_components_splitters_pumps_and_controls(self) -> None:
+        from placement import place_components
+
+        def_data = {
+            "units": 1000,
+            "components": [
+                {"name": "sp_w", "macro": "belt_split2", "x": 0, "y": 0, "orient": "W"},
+                {"name": "sp_e", "macro": "belt_balancer2", "x": 10000, "y": 0, "orient": "E"},
+                {"name": "sp_s", "macro": "belt_split2", "x": 20000, "y": 0, "orient": "S"},
+                {"name": "sp_n", "macro": "belt_split2", "x": 30000, "y": 0, "orient": "N"},
+                {"name": "pm_w", "macro": "pump", "x": 0, "y": 10000, "orient": "W"},
+                {"name": "pm_e", "macro": "pump", "x": 10000, "y": 10000, "orient": "E"},
+                {"name": "pm_s", "macro": "pump", "x": 20000, "y": 10000, "orient": "S"},
+                {"name": "pm_n", "macro": "pump", "x": 30000, "y": 10000, "orient": "N"},
+                {"name": "dp_1", "macro": "display_panel", "x": 40000, "y": 0},
+                {"name": "ac_fluid", "macro": "arithmetic_combinator", "x": 50000, "y": 0},
+                {"name": "ac_default", "macro": "arithmetic_combinator", "x": 60000, "y": 0},
+                {"name": "dc_1", "macro": "decider_combinator", "x": 70000, "y": 0},
+                {"name": "cc_1", "macro": "constant_combinator", "x": 80000, "y": 0},
+                {"name": "ps_1", "macro": "power_switch", "x": 90000, "y": 0},
+            ],
+        }
+        netlist_data = {
+            "fluids": ["water"],
+            "instances": [
+                {"name": "dp_1", "recipe": "iron-plate"},
+                {"name": "ac_fluid", "recipe": "water"},
+                {"name": "cc_1", "control_behavior": {"sections": []}},
+            ],
+        }
+        res = place_components(def_data, netlist_data)
+        self.assertTrue(res.has_fluid_metadata)
+        self.assertIn("water", res.fluids)
+
+        # Splitters
+        self.assertEqual(res.inst_to_entity["sp_w"]["position"], {"x": 1.0, "y": 0.5})
+        self.assertEqual(res.inst_to_entity["sp_w"]["direction"], def2bp.DIRECTION_NORTH)
+        self.assertIn((0.5, 0.5), res.occupied_positions)
+        self.assertIn((1.5, 0.5), res.occupied_positions)
+
+        self.assertEqual(res.inst_to_entity["sp_e"]["position"], {"x": 11.0, "y": 0.5})
+        self.assertEqual(res.inst_to_entity["sp_e"]["direction"], def2bp.DIRECTION_SOUTH)
+        self.assertIn((10.5, 0.5), res.occupied_positions)
+        self.assertIn((11.5, 0.5), res.occupied_positions)
+
+        self.assertEqual(res.inst_to_entity["sp_s"]["position"], {"x": 20.5, "y": 1.0})
+        self.assertEqual(res.inst_to_entity["sp_s"]["direction"], def2bp.DIRECTION_WEST)
+        self.assertIn((20.5, 0.5), res.occupied_positions)
+        self.assertIn((20.5, 1.5), res.occupied_positions)
+
+        self.assertEqual(res.inst_to_entity["sp_n"]["position"], {"x": 30.5, "y": 1.0})
+        self.assertEqual(res.inst_to_entity["sp_n"]["direction"], def2bp.DIRECTION_EAST)
+        self.assertIn((30.5, 0.5), res.occupied_positions)
+        self.assertIn((30.5, 1.5), res.occupied_positions)
+
+        # Pumps
+        self.assertEqual(res.inst_to_entity["pm_w"]["position"], {"x": 1.0, "y": 10.5})
+        self.assertEqual(res.inst_to_entity["pm_w"]["direction"], def2bp.DIRECTION_WEST)
+        self.assertIn((0.5, 10.5), res.occupied_positions)
+        self.assertIn((1.5, 10.5), res.occupied_positions)
+
+        self.assertEqual(res.inst_to_entity["pm_e"]["position"], {"x": 11.0, "y": 10.5})
+        self.assertEqual(res.inst_to_entity["pm_e"]["direction"], def2bp.DIRECTION_EAST)
+
+        self.assertEqual(res.inst_to_entity["pm_s"]["position"], {"x": 20.5, "y": 11.0})
+        self.assertEqual(res.inst_to_entity["pm_s"]["direction"], def2bp.DIRECTION_SOUTH)
+        self.assertIn((20.5, 10.5), res.occupied_positions)
+        self.assertIn((20.5, 11.5), res.occupied_positions)
+
+        self.assertEqual(res.inst_to_entity["pm_n"]["position"], {"x": 30.5, "y": 11.0})
+        self.assertEqual(res.inst_to_entity["pm_n"]["direction"], def2bp.DIRECTION_NORTH)
+
+        # Display panel
+        self.assertEqual(res.inst_to_entity["dp_1"]["position"], {"x": 40.5, "y": 0.5})
+        self.assertEqual(
+            res.inst_to_entity["dp_1"]["custom_icon"], {"type": "item", "name": "iron-plate"}
+        )
+        self.assertIn((40.5, 0.5), res.occupied_positions)
+
+        # Arithmetic combinators
+        self.assertEqual(res.inst_to_entity["ac_fluid"]["position"], {"x": 50.5, "y": 1.0})
+        self.assertEqual(
+            res.inst_to_entity["ac_fluid"]["control_behavior"]["arithmetic_conditions"][
+                "first_signal"
+            ],
+            {"type": "fluid", "name": "water"},
+        )
+        self.assertIn((50.5, 0.5), res.occupied_positions)
+        self.assertIn((50.5, 1.5), res.occupied_positions)
+
+        self.assertEqual(
+            res.inst_to_entity["ac_default"]["control_behavior"]["arithmetic_conditions"][
+                "first_signal"
+            ],
+            {"type": "virtual", "name": "signal-each"},
+        )
+
+        # Decider combinator
+        self.assertEqual(res.inst_to_entity["dc_1"]["position"], {"x": 70.5, "y": 1.0})
+        self.assertIn((70.5, 0.5), res.occupied_positions)
+        self.assertIn((70.5, 1.5), res.occupied_positions)
+        self.assertTrue(all(x >= 0.0 and y >= 0.0 for x, y in res.occupied_positions))
+        self.assertNotIn((70.0, 0.5), res.occupied_positions)
+        self.assertNotIn((69.5, 0.5), res.occupied_positions)
+        self.assertNotIn((68.5, 0.5), res.occupied_positions)
+
+        # Constant combinator
+        self.assertEqual(res.inst_to_entity["cc_1"]["position"], {"x": 80.5, "y": 0.5})
+        self.assertIn((80.5, 0.5), res.occupied_positions)
+
+        # Power switch
+        ps_ent = res.inst_to_entity["ps_1"]
+        self.assertEqual(ps_ent["position"], {"x": 91.0, "y": 1.0})
+        self.assertIs(ps_ent["switch_state"], False)
+        self.assertEqual(ps_ent["control_behavior"]["circuit_condition"]["constant"], 30)
+        for tx in range(2):
+            for ty in range(2):
+                self.assertIn((90.5 + tx, 0.5 + ty), res.occupied_positions)
+
+        # Total occupied positions: 8*(2+1) + 1 + 2*(2+1) + 1*(2+1) + 1 + (4+1) = 40
+        self.assertEqual(len(res.occupied_positions), 40)
+
+    def test_place_components_inserter_selection_and_landing_pad(self) -> None:
+        from placement import place_components
+
+        tiers = [
+            {
+                "name": "inserter",
+                "max_stack": 3,
+                "rates_by_stack": {"1": 50.0, "2": 100.0, "3": 150.0},
+                "out_rates_by_stack": {"1": 60.0, "2": 120.0, "3": 180.0},
+            },
+            {
+                "name": "fast-inserter",
+                "max_stack": 3,
+                "rates_by_stack": {"1": 200.0, "2": 300.0, "3": 450.0},
+            },
+        ]
+        def_data = {
+            "units": 1000,
+            "components": [
+                {"name": "u_low_rate", "macro": "asm", "x": 0, "y": 0},
+                {"name": "u_zero_rate", "macro": "asm", "x": 20000, "y": 0},
+                {"name": "u_high_rate", "macro": "asm", "x": 40000, "y": 0},
+                {"name": "u_silo", "macro": "silo", "x": 60000, "y": 0},
+                {"name": "u_boiler", "macro": "boiler_cell", "x": 100000, "y": 0},
+            ],
+        }
+        netlist_data = {
+            "fluids": ["water"],
+            "cells": {
+                "asm_cell": {
+                    "machine": "assembling-machine-3",
+                    "width": 5,
+                    "height": 3,
+                    "machine_width": 3,
+                    "machine_height": 3,
+                    "inputs": ["iron-plate", "water"],
+                    "outputs": ["iron-gear-wheel"],
+                    "in_amounts": {"iron-plate": 2.0},
+                    "out_amounts": {"iron-gear-wheel": 3.0},
+                    "inserter_tiers": tiers,
+                    "internal_pipes": [{"x": 0.5, "y": 2.5, "fluid": "water"}],
+                    "unused_fluid_ports": [[1.5, 2.5]],
+                },
+                "silo_cell": {
+                    "machine": "rocket-silo",
+                    "width": 20,
+                    "height": 9,
+                    "machine_width": 9,
+                    "machine_height": 9,
+                    "inputs": ["rocket-part"],
+                    "outputs": ["space-science-pack"],
+                    "landing_pad": "cargo-landing-pad",
+                    "landing_pad_width": 8,
+                    "landing_pad_height": 8,
+                    "landing_pad_grid_size": 2,
+                    "inserter_tiers": tiers,
+                },
+                "boiler_cell": {
+                    "machine": "boiler",
+                    "width": 3,
+                    "height": 2,
+                    "machine_width": 3,
+                    "machine_height": 2,
+                    "inputs": ["coal"],
+                    "outputs": [],
+                    "unused_fluid_ports": [[0.5, 1.5]],
+                },
+            },
+            "instances": [
+                {
+                    "name": "u_low_rate",
+                    "cell": "asm_cell",
+                    "recipe": "iron-gear-wheel",
+                    "plan_rate_per_min": 30.0,
+                    "rated_per_min": 200.0,
+                },
+                {
+                    "name": "u_zero_rate",
+                    "cell": "asm_cell",
+                    "recipe": "iron-gear-wheel",
+                    "plan_rate_per_min": 0.0,
+                    "rated_per_min": 200.0,
+                },
+                {
+                    "name": "u_high_rate",
+                    "cell": "asm_cell",
+                    "recipe": "iron-gear-wheel",
+                    "plan_rate_per_min": 70.0,
+                    "rated_per_min": 200.0,
+                },
+                {
+                    "name": "u_silo",
+                    "cell": "silo_cell",
+                    "recipe": "rocket-part",
+                    "plan_rate_per_min": 10.0,
+                    "rated_per_min": 200.0,
+                },
+                {
+                    "name": "u_boiler",
+                    "cell": "boiler_cell",
+                    "recipe": "steam",
+                },
+            ],
+        }
+        res = place_components(def_data, netlist_data)
+
+        # Verify all occupied positions have non-negative x and y
+        self.assertTrue(all(x >= 0.0 and y >= 0.0 for x, y in res.occupied_positions))
+        self.assertNotIn((99.5, 1.5), res.occupied_positions)
+
+        # u_low_rate: plan_r=30 < 0.35*200=70.
+        # Input iron-plate req_rate = 1.4 * 30 * 2 = 84.0 -> inserter stack 2 (rate 100.0 < max_stack 3 -> override_stack_size=2)
+        in_ins_low = res.grid_entities[(0.5, 0.5)]
+        self.assertEqual(in_ins_low["name"], "inserter")
+        self.assertEqual(in_ins_low.get("override_stack_size"), 2)
+        self.assertIn((0.5, 0.5), res.occupied_positions)
+
+        # Output iron-gear-wheel req_rate = 1.4 * 30 * 3 = 126.0 -> inserter stack 3 (rate 180.0 == max_stack 3 -> no override_stack_size)
+        out_ins_low = res.grid_entities[(4.5, 1.5)]
+        self.assertEqual(out_ins_low["name"], "inserter")
+        self.assertNotIn("override_stack_size", out_ins_low)
+        self.assertIn((4.5, 1.5), res.occupied_positions)
+
+        # Internal pipe & unused fluid port on u_low_rate
+        pipe_ent = res.grid_entities[(0.5, 2.5)]
+        self.assertEqual(pipe_ent["name"], "pipe")
+        self.assertEqual(pipe_ent["fluid"], "water")
+        self.assertIn((1.5, 2.5), res.occupied_positions)
+
+        # u_zero_rate: plan_r=0.0 <= 0.0 -> default fast-inserter with no override
+        in_ins_zero = res.grid_entities[(20.5, 0.5)]
+        self.assertEqual(in_ins_zero["name"], "fast-inserter")
+        self.assertNotIn("override_stack_size", in_ins_zero)
+
+        # u_high_rate: plan_r=70.0 >= 0.35*200=70.0 -> default fast-inserter
+        in_ins_high = res.grid_entities[(40.5, 0.5)]
+        self.assertEqual(in_ins_high["name"], "fast-inserter")
+        self.assertNotIn("override_stack_size", in_ins_high)
+
+        # u_silo with landing pad:
+        # gx=60, in_offset=1, m_w=9 -> pad_left = 70 (even, 70+4=74 % 2 == 0), pad_w=8 -> pad_cx=74.0, pad_cy=4.0, pad_right=78
+        silo_ent = res.inst_to_entity["u_silo"]
+        self.assertTrue(silo_ent.get("launch_to_orbit_automatically"))
+        pad_ent = res.grid_entities[(74.0, 4.0)]
+        self.assertEqual(pad_ent["name"], "cargo-landing-pad")
+        # Output inserter at ins_x = pad_right + 0.5 = 78.5, out_x = 60 + 19.5 = 79.5, ins_y = 4.5
+        pad_ins = res.grid_entities[(78.5, 4.5)]
+        self.assertEqual(pad_ins["name"], "fast-inserter")
+        self.assertIn((78.5, 4.5), res.occupied_positions)
+        # Because ins_x (78.5) < out_x (79.5), place transport-belt at (79.5, 4.5)
+        pad_belt = res.grid_entities[(79.5, 4.5)]
+        self.assertEqual(pad_belt["name"], "transport-belt")
+        self.assertIn((79.5, 4.5), res.occupied_positions)
+
+        # u_boiler: boiler has power_domain="aon" on its input inserter and no recipe on boiler entity
+        boiler_ent = res.inst_to_entity["u_boiler"]
+        self.assertNotIn("recipe", boiler_ent)
+        boiler_ins = res.grid_entities[(100.5, 0.5)]
+        self.assertEqual(boiler_ins.get("power_domain"), "aon")
+        self.assertIn((100.5, 1.5), res.occupied_positions)
+
 
 if __name__ == "__main__":
     unittest.main()
