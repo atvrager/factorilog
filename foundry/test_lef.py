@@ -201,32 +201,36 @@ class LefTest(unittest.TestCase):
         )
 
         # Overflow branches for _input_pin_rect (total > height)
-        cell_small = {"width": 3, "height": 2, "inputs": ["i0", "i1", "i2"], "outputs": []}
+        cell_small = {"width": 3, "height": 2, "inputs": ["i0", "i1", "i2", "i3"], "outputs": []}
         self.assertEqual(
-            lef._input_pin_rect(cell_small, 0, 3, "i0"),
+            lef._input_pin_rect(cell_small, 0, 4, "i0"),
             ("M1", 0.0, 0.25, 0.5, 0.75),
         )
         self.assertEqual(
-            lef._input_pin_rect(cell_small, 2, 3, "i2"),
+            lef._input_pin_rect(cell_small, 2, 4, "i2"),
             ("M2", 1.25, 1.5, 1.75, 2.0),
+        )
+        self.assertEqual(
+            lef._input_pin_rect(cell_small, 3, 4, "i3"),
+            ("M2", 2.25, 1.5, 2.75, 2.0),
         )
 
         # Overflow branches for _output_pin_rect (total > height)
-        cell_out_over = {"width": 2, "height": 2, "inputs": [], "outputs": []}
+        cell_out_over = {"width": 3, "height": 2, "inputs": [], "outputs": []}
         self.assertEqual(
-            lef._output_pin_rect(cell_out_over, 0, 7, ""),
-            ("M1", 1.5, 0.25, 2.0, 0.75),
+            lef._output_pin_rect(cell_out_over, 0, 9, ""),
+            ("M1", 2.5, 0.25, 3.0, 0.75),
         )
         self.assertEqual(
-            lef._output_pin_rect(cell_out_over, 3, 7, ""),
+            lef._output_pin_rect(cell_out_over, 3, 9, ""),
             ("M2", 1.25, 0.0, 1.75, 0.5),
         )
         self.assertEqual(
-            lef._output_pin_rect(cell_out_over, 5, 7, ""),
+            lef._output_pin_rect(cell_out_over, 6, 9, ""),
             ("M1", 0.0, 1.25, 0.5, 1.75),
         )
         self.assertEqual(
-            lef._output_pin_rect(cell_out_over, 6, 7, ""),
+            lef._output_pin_rect(cell_out_over, 7, 9, ""),
             ("M2", 0.25, 1.5, 0.75, 2.0),
         )
 
@@ -288,16 +292,28 @@ class LefTest(unittest.TestCase):
         """Verify exact layer numbering and DEFAULT tags in tech_lines."""
         tech_lines = lef.tech_lines(self.pdk.tech_json())
         tech_text = "\n".join(tech_lines)
-        self.assertIn("LAYER VL2\n  TYPE CUT ;", tech_text)
+        self.assertIn(
+            "# transport-belt surface-to-underground transition cut layer.\nLAYER VL2\n  TYPE CUT ;",
+            tech_text,
+        )
         self.assertIn("LAYER M3\n  TYPE ROUTING ;", tech_text)
         self.assertIn("LAYER VL3\n  TYPE CUT ;", tech_text)
         self.assertIn("LAYER M4\n  TYPE ROUTING ;", tech_text)
+        self.assertIn("# Circuit drop cut layer.\nLAYER VL8\n  TYPE CUT ;", tech_text)
         self.assertIn(
             "VIA TRANSPORT_BELT_TURN_VIA\n  DEFAULT\n  LAYER M3 ;\n    RECT -0.25 -0.25 0.25 0.25 ;\n  LAYER VL3 ;\n    RECT -0.125 -0.125 0.125 0.125 ;\n  LAYER M4 ;",
             tech_text,
         )
         self.assertIn(
             "VIA FAST_TRANSPORT_BELT_VIA\n  LAYER M4 ;\n    RECT -0.75 -0.25 0.75 0.25 ;\n  LAYER VL4 ;\n    RECT -0.125 -0.125 0.125 0.125 ;\n  LAYER M5 ;",
+            tech_text,
+        )
+        self.assertIn(
+            "VIA CIRCUIT_DROP_VIA\n  DEFAULT\n  LAYER M8 ;\n    RECT -0.25 -0.25 0.25 0.25 ;\n  LAYER VL8 ;\n    RECT -0.125 -0.125 0.125 0.125 ;\n  LAYER M9 ;",
+            tech_text,
+        )
+        self.assertIn(
+            "VIA CIRCUIT_TURN_VIA\n  DEFAULT\n  LAYER M9 ;\n    RECT -0.25 -0.25 0.25 0.25 ;\n  LAYER VL9 ;\n    RECT -0.125 -0.125 0.125 0.125 ;\n  LAYER M10 ;",
             tech_text,
         )
 
