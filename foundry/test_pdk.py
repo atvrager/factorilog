@@ -276,6 +276,171 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertEqual(read_back[0]["recipe"], "electronic-circuit")
         self.assertTrue(string.startswith("0"))
 
+    def test_module_docstring_and_inserter_edge_cases(self) -> None:
+        self.assertIn("-- placement, routing, optimization --", pdk.__doc__ or "")
+        zero_spec = pdk.inserter_spec({"rotation_speed": 0.0, "extension_speed": 0.05})
+        self.assertEqual(zero_spec["turn_ticks"], 0.0)
+        self.assertEqual(zero_spec["swings_per_second"], 0.0)
+        pos_spec = pdk.inserter_spec({"rotation_speed": 0.02, "extension_speed": 0.05})
+        self.assertAlmostEqual(pos_spec["turn_ticks"], 25.0)
+
+    def test_circuit_macro_cells(self) -> None:
+        for fn, expected_cell, expected_watts in (
+            (pdk.display_panel_cell, pdk.DISPLAY_PANEL_CELL, 0.0),
+            (pdk.arithmetic_combinator_cell, pdk.ARITHMETIC_COMBINATOR_CELL, 1000.0),
+            (pdk.decider_combinator_cell, pdk.DECIDER_COMBINATOR_CELL, 1000.0),
+            (pdk.constant_combinator_cell, pdk.CONSTANT_COMBINATOR_CELL, 0.0),
+            (pdk.power_switch_cell, pdk.POWER_SWITCH_CELL, 0.0),
+        ):
+            rec = fn()
+            self.assertEqual(rec["cell"], expected_cell)
+            self.assertIs(rec["circuit_cell"], True)
+            self.assertEqual(rec["watts"], expected_watts)
+
+    def test_compound_cells(self) -> None:
+        self.assertIsNone(self.pdk.compound_cell("nonexistent-machine", "gear_belt_combo"))
+        self.assertIsNone(self.pdk.compound_cell("assembling-machine-2", "unknown_combo"))
+
+        belt_combo = self.pdk.cell("assembling-machine-2", "gear_belt_combo")
+        assert belt_combo is not None
+        self.assertEqual(belt_combo["cell"], "assembling-machine-2.gear_belt_combo")
+        self.assertEqual(belt_combo["recipe"], "gear_belt_combo")
+        self.assertIs(belt_combo["compound"], True)
+        self.assertEqual(belt_combo["inputs"], ["iron-plate"])
+        self.assertEqual(belt_combo["outputs"], ["transport-belt"])
+
+        ins_combo = self.pdk.cell("assembling-machine-2", "gear_inserter_combo")
+        assert ins_combo is not None
+        self.assertEqual(ins_combo["cell"], "assembling-machine-2.gear_inserter_combo")
+        self.assertEqual(ins_combo["recipe"], "gear_inserter_combo")
+        self.assertIs(ins_combo["compound"], False)
+        self.assertEqual(ins_combo["inputs"], ["iron-plate", "electronic-circuit"])
+        self.assertEqual(ins_combo["outputs"], ["inserter"])
+
+    def test_boiler_fluid_box_connection_offsets_and_fallback(self) -> None:
+        import copy
+
+        custom_data = copy.copy(self.data)
+        custom_data.prototypes = copy.deepcopy(self.data.prototypes)
+        custom_data.machines = copy.deepcopy(self.data.machines)
+        boiler_proto = custom_data.machines["boiler"]
+        boiler_proto["output_fluid_box"] = {
+            "pipe_connections": [{"position": [1.0, 0.0], "direction": 0}]
+        }
+        custom_pdk = pdk.Pdk(custom_data)
+        cell_with_offset = custom_pdk.cell("boiler", "boiler-steam")
+        assert cell_with_offset is not None
+        self.assertEqual(cell_with_offset["out_slots"], {"steam": 3})
+
+        boiler_proto["output_fluid_box"] = {"pipe_connections": []}
+        custom_pdk_no_conns = pdk.Pdk(custom_data)
+        cell_fallback = custom_pdk_no_conns.cell("boiler", "boiler-steam")
+        assert cell_fallback is not None
+        self.assertEqual(cell_fallback["out_slots"], {"steam": 2})
+
+    def test_layer_pairs_and_slot_helpers(self) -> None:
+        self.assertEqual(self.pdk.circuit_layers(), ("M9", "M10"))
+        stack = self.pdk.layer_stack()
+        self.assertIn("M3", stack)
+        self.assertIn("M4", stack)
+        self.assertEqual(stack["M3"]["direction"], "HORIZONTAL")
+        self.assertEqual(stack["M4"]["direction"], "VERTICAL")
+
+        silo_cell = self.pdk.cell("rocket-silo", "space-science-pack")
+        assert silo_cell is not None
+        self.assertEqual(
+            silo_cell["in_slots"],
+            {
+                "processing-unit": 1,
+                "low-density-structure": 3,
+                "rocket-fuel": 5,
+                "satellite": 7,
+            },
+        )
+        self.assertEqual(silo_cell["out_slots"], {"space-science-pack": 4})
+
+        lab_cell = self.pdk.cell("lab", "infinite-research")
+        assert lab_cell is not None
+        self.assertEqual(
+            lab_cell["in_slots"],
+            {
+                "automation-science-pack": 1,
+                "logistic-science-pack": 1,
+                "military-science-pack": 2,
+                "chemical-science-pack": 1,
+                "production-science-pack": 2,
+                "utility-science-pack": 3,
+                "space-science-pack": 3,
+            },
+        )
+
+    def test_fluidbox_orientation_and_port_mapping(self) -> None:
+        chem_cell = self.pdk.cell("chemical-plant", "sulfur")
+        assert chem_cell is not None
+        self.assertEqual(chem_cell["direction"], pdk.DIRECTION_WEST)
+        self.assertEqual(chem_cell["in_slots"], {"water": 3, "petroleum-gas": 1})
+        self.assertEqual(chem_cell["out_slots"], {"sulfur": 2})
+
+        ref_cell = self.pdk.cell("oil-refinery", "advanced-oil-processing")
+        assert ref_cell is not None
+        self.assertEqual(ref_cell["direction"], pdk.DIRECTION_EAST)
+        self.assertEqual(ref_cell["in_slots"], {"water": 2, "crude-oil": 4})
+        self.assertEqual(
+            ref_cell["out_slots"],
+            {"heavy-oil": 1, "light-oil": 3, "petroleum-gas": 5},
+        )
+
+        import copy
+
+        custom_data = copy.copy(self.data)
+        custom_data.prototypes = copy.deepcopy(self.data.prototypes)
+        custom_data.machines = copy.deepcopy(self.data.machines)
+        custom_data.recipes = copy.deepcopy(self.data.recipes)
+        chem_proto = custom_data.machines["chemical-plant"]
+
+        # Test tx > 0 -> DIRECTION_SOUTH and tx <= 0 -> DIRECTION_NORTH, plus > span item inputs
+        chem_proto["fluid_boxes"] = [
+            {"production_type": "input", "pipe_connections": [{"position": [1.0, 0.0]}]},
+            {"production_type": "input", "pipe_connections": [{"position": [0.0, -1.0]}]},
+            {"production_type": "input", "pipe_connections": [{"position": [0.0, 1.0]}]},
+        ]
+        custom_data.recipes["sulfur"]["ingredients"] = [
+            {"type": "fluid", "name": "water", "amount": 30, "fluidbox_index": 2},
+            {"type": "item", "name": "iron-plate", "amount": 1},
+            {"type": "item", "name": "copper-plate", "amount": 1},
+            {"type": "item", "name": "steel-plate", "amount": 1},
+            {"type": "item", "name": "coal", "amount": 1},
+        ]
+        custom_pdk_s = pdk.Pdk(custom_data)
+        south_cell = custom_pdk_s.cell("chemical-plant", "sulfur")
+        assert south_cell is not None
+        self.assertEqual(south_cell["direction"], pdk.DIRECTION_SOUTH)
+        self.assertEqual(south_cell["in_slots"]["water"], 3)
+
+        chem_proto["fluid_boxes"] = [
+            {"production_type": "input", "pipe_connections": [{"position": [-1.0, 0.0]}]},
+            {"production_type": "input", "pipe_connections": [{"position": [0.0, -1.0]}]},
+        ]
+        custom_pdk_n = pdk.Pdk(custom_data)
+        north_cell = custom_pdk_n.cell("chemical-plant", "sulfur")
+        assert north_cell is not None
+        self.assertEqual(north_cell["direction"], pdk.DIRECTION_NORTH)
+        self.assertEqual(north_cell["in_slots"]["water"], 1)
+
+        # Also test solid machine with more inputs than height (count > span in _center_slots)
+        custom_data.recipes["electronic-circuit"]["ingredients"] = [
+            {"type": "item", "name": "iron-plate", "amount": 1},
+            {"type": "item", "name": "copper-cable", "amount": 1},
+            {"type": "item", "name": "steel-plate", "amount": 1},
+            {"type": "item", "name": "coal", "amount": 1},
+        ]
+        overflow_cell = custom_pdk_n.cell("assembling-machine-3", "electronic-circuit")
+        assert overflow_cell is not None
+        self.assertEqual(
+            overflow_cell["in_slots"],
+            {"iron-plate": 0, "copper-cable": 1, "steel-plate": 2, "coal": 3},
+        )
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

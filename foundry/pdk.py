@@ -14,6 +14,7 @@ Everything else -- placement, routing, optimization -- belongs to OpenROAD.
 """
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 try:
@@ -38,6 +39,18 @@ except ImportError:
 # in the research notes.
 BELT_TILES_PER_ITEM = 8.0
 TICKS_PER_SECOND = 60.0
+SECONDS_PER_MINUTE = 60.0
+HALF_TURN_FRACTION = 0.5
+TILE_CENTER_OFFSET = 0.5
+DIRECTION_MODULO = 16
+SURFACE_LAYER_COUNT = 2
+VERTICAL_LAYER_OFFSET = 1
+DEFAULT_CIRCUIT_TIER_COUNT = 3
+COMBINATOR_ACTIVE_WATTS = 1000.0
+COMPOUND_CELL_WIDTH = 6
+COMPOUND_CELL_HEIGHT = 7
+FOUR_SIDED_INPUT_THRESHOLD = 6
+MIN_SPACED_PORT_WIDTH = 3
 
 # A belt tile carries two lanes. One lane is one item stream.
 LANES_PER_BELT = 2
@@ -50,17 +63,50 @@ INSERTER_TABLE = "inserter"
 POLE_TABLE = "electric-pole"
 PIPE_TO_GROUND_TABLE = "pipe-to-ground"
 
+DIRECTION_STEP_DX: dict[int, float] = {
+    DIRECTION_EAST: 1.0,
+    DIRECTION_WEST: -1.0,
+}
+DIRECTION_STEP_DY: dict[int, float] = {
+    DIRECTION_SOUTH: 1.0,
+    DIRECTION_NORTH: -1.0,
+}
+ROTATED_Y_FACTORS: dict[int, tuple[float, float]] = {
+    DIRECTION_NORTH: (0.0, 1.0),
+    DIRECTION_EAST: (1.0, 0.0),
+    DIRECTION_SOUTH: (0.0, -1.0),
+    DIRECTION_WEST: (-1.0, 0.0),
+}
+COMPOUND_SPECS: dict[str, tuple[str, list[str], list[str], bool]] = {
+    "gear_belt_combo": ("transport-belt", ["iron-plate"], ["transport-belt"], True),
+    "gear_inserter_combo": (
+        "inserter",
+        ["iron-plate", "electronic-circuit"],
+        ["inserter"],
+        False,
+    ),
+}
 
-def inserter_spec(proto: dict[str, Any]) -> dict[str, Any]:
+ProtoRecord = Mapping[str, object]
+
+
+def _box_tile_dims(box: list[list[float]]) -> tuple[int, int]:
+    """Compute integer tile width and height from a collision box."""
+    return math.ceil(box[1][0] - box[0][0]), math.ceil(box[1][1] - box[0][1])
+
+
+def inserter_spec(proto: ProtoRecord) -> dict[str, Any]:
     """Calculate inserter specifications from Factorio prototype data."""
-    pickup = proto.get("pickup_position", [0.0, -1.0])
-    insert = proto.get("insert_position", [0.0, 1.2])
+    pickup: Any = proto.get("pickup_position", (0.0, -1.0))
+    insert: Any = proto.get("insert_position", (0.0, 1.0))
     pickup_reach = round(math.hypot(float(pickup[0]), float(pickup[1])))
     insert_reach = round(math.hypot(float(insert[0]), float(insert[1])))
-    rot_speed = float(proto.get("rotation_speed", 0.014))
-    ext_speed = float(proto.get("extension_speed", 0.035))
+    rot_speed_raw: Any = proto.get("rotation_speed", 0.0)
+    ext_speed_raw: Any = proto.get("extension_speed", 0.0)
+    rot_speed = float(rot_speed_raw)
+    ext_speed = float(ext_speed_raw)
     swings_per_second = rot_speed * TICKS_PER_SECOND
-    turn_ticks = 0.5 / rot_speed if rot_speed > 0 else 0.0
+    turn_ticks = HALF_TURN_FRACTION / rot_speed if rot_speed > 0 else 0.0
     return {
         "reach": max(1, pickup_reach),
         "pickup_position": [float(pickup[0]), float(pickup[1])],
@@ -85,10 +131,15 @@ LAYER_CIRCUIT_RED = "M9"
 LAYER_CIRCUIT_GREEN = "M10"
 
 
-def circuit_layers(num_tiers: int = 3) -> tuple[str, str]:
+def _tier_layer_pair(tier_index: int) -> tuple[str, str]:
+    """Return horizontal and vertical metal layer names for a 0-based tier index."""
+    base = SURFACE_LAYER_COUNT + 2 * tier_index + 1
+    return f"M{base}", f"M{base + VERTICAL_LAYER_OFFSET}"
+
+
+def circuit_layers(num_tiers: int = DEFAULT_CIRCUIT_TIER_COUNT) -> tuple[str, str]:
     """Derive horizontal red and vertical green layers after all active underground tiers."""
-    t = max(1, num_tiers)
-    return f"M{2 * t + 3}", f"M{2 * t + 4}"
+    return _tier_layer_pair(max(1, num_tiers))
 
 
 DISPLAY_PANEL_CELL = "display_panel"
@@ -133,7 +184,7 @@ def arithmetic_combinator_cell() -> dict[str, Any]:
         "recipe": "accumulate",
         "width": 1,
         "height": 2,
-        "watts": 1000.0,
+        "watts": COMBINATOR_ACTIVE_WATTS,
         "crafts_per_minute": 0.0,
         "inputs": ["a"],
         "outputs": ["y"],
@@ -149,7 +200,7 @@ def decider_combinator_cell() -> dict[str, Any]:
         "recipe": "condition",
         "width": 1,
         "height": 2,
-        "watts": 1000.0,
+        "watts": COMBINATOR_ACTIVE_WATTS,
         "crafts_per_minute": 0.0,
         "inputs": ["a"],
         "outputs": ["y"],
@@ -224,6 +275,104 @@ CORE_MACHINES: frozenset[str] = frozenset(
 )
 
 
+def _center_slots(ports: list[str], span: int, base_offset: int = 0) -> dict[str, int]:
+    """Assign consecutive centered slot indices along a face of length span."""
+    count = len(ports)
+    start = base_offset + ((span - count) // 2 if count <= span else 0)
+    return {port: start + idx for idx, port in enumerate(ports)}
+
+
+def _spaced_or_centered_slots(ports: list[str], span: int, base_offset: int = 0) -> dict[str, int]:
+    """Assign 2-tile-spaced slots when span permits, otherwise centered consecutive slots."""
+    if ports and span >= 2 * len(ports):
+        return {port: 1 + 2 * idx for idx, port in enumerate(ports)}
+    return _center_slots(ports, span, base_offset)
+
+
+def _east_oriented_pipe_ext(
+    conn: ProtoRecord, cx: float, cy: float
+) -> tuple[int, float, float, float]:
+    """Project a pipe connection on an EAST-oriented machine to external tile coordinates."""
+    pos: Any = conn["position"]
+    bx, by = float(pos[0]), float(pos[1])
+    rx, ry = -by, bx
+    raw_dir: Any = conn.get("direction", 0)
+    cdir = (int(raw_dir) + DIRECTION_EAST) % DIRECTION_MODULO
+    ext_x = round(cx + rx + DIRECTION_STEP_DX.get(cdir, 0.0), 2)
+    ext_y = round(cy + ry + DIRECTION_STEP_DY.get(cdir, 0.0), 2)
+    return cdir, ry, ext_x, ext_y
+
+
+def _choose_fluid_orientation(in_fbs: list[ProtoRecord], out_fbs: list[ProtoRecord]) -> int:
+    """Select cardinal orientation so fluid inputs face West and fluid outputs face East."""
+    conns: Any = []
+    sign = 1.0
+    if in_fbs and in_fbs[0].get("pipe_connections"):
+        in_conns: Any = in_fbs[0]["pipe_connections"]
+        conns = in_conns
+    elif out_fbs and out_fbs[0].get("pipe_connections"):
+        out_conns: Any = out_fbs[0]["pipe_connections"]
+        conns = out_conns
+        sign = -1.0
+    if not conns:
+        return DIRECTION_NORTH
+    tpos = conns[0].get("position", (0.0, 0.0))
+    tx, ty = float(tpos[0]) * sign, float(tpos[1]) * sign
+    if ty < 0.0:
+        return DIRECTION_WEST
+    if ty > 0.0:
+        return DIRECTION_EAST
+    return DIRECTION_SOUTH if tx > 0.0 else DIRECTION_NORTH
+
+
+def _project_fluidbox_slots(
+    fluidboxes: list[ProtoRecord], direction: int, placed_h: int, y_offset: int
+) -> list[int]:
+    """Project fluidbox pipe connections onto 1-indexed vertical face slots."""
+    fx, fy = ROTATED_Y_FACTORS.get(direction, (0.0, 1.0))
+    slots: list[int] = []
+    for fb in fluidboxes:
+        conns: Any = fb.get("pipe_connections")
+        if conns:
+            pos = conns[0]["position"]
+            ry = float(pos[0]) * fx + float(pos[1]) * fy
+            slots.append(math.floor(ry + placed_h / 2.0) + y_offset)
+    return slots
+
+
+def _map_fluid_and_item_ports(
+    raw_entries: list[ProtoRecord],
+    fluid_table: ProtoRecord,
+    fb_slots: list[int],
+    placed_h: int,
+    y_offset: int,
+) -> dict[str, int]:
+    """Assign fluid ports to fluidbox slots and solid items to remaining face slots."""
+    slots: dict[str, int] = {}
+    fluid_entries = [e for e in raw_entries if solve.name_of(dict(e)) in fluid_table]
+    item_ports = [
+        solve.name_of(dict(e)) for e in raw_entries if solve.name_of(dict(e)) not in fluid_table
+    ]
+    if fb_slots:
+        for fluid_idx, entry in enumerate(fluid_entries):
+            fb_idx: Any = entry.get("fluidbox_index")
+            raw_idx = (int(fb_idx) - 1) if fb_idx is not None else fluid_idx
+            slots[solve.name_of(dict(entry))] = fb_slots[max(0, min(raw_idx, len(fb_slots) - 1))]
+
+    pipe_set = set(fb_slots)
+    used_fluid_slots = set(slots.values())
+    all_span_slots = range(y_offset, y_offset + placed_h)
+    avail = [s for s in all_span_slots if s not in pipe_set]
+    avail.extend(s for s in all_span_slots if s in pipe_set and s not in used_fluid_slots)
+    slots.update(
+        {
+            port: avail[idx] if idx < len(avail) else y_offset + (idx % placed_h)
+            for idx, port in enumerate(item_ports)
+        }
+    )
+    return slots
+
+
 class Pdk:
     """The tech layer, read from one prototype dump."""
 
@@ -267,397 +416,129 @@ class Pdk:
     def compound_cell(self, machine: str, combo_name: str) -> dict[str, Any] | None:
         """Composite PDK macro cell for coupled 1:1 producer-consumer pairs."""
         proto = self.machines.get(machine)
-        if proto is None:
+        spec = COMPOUND_SPECS.get(combo_name)
+        if proto is None or spec is None:
             return None
+        target_recipe_name, inputs, outputs, is_compound = spec
+        machine_w, machine_h = _box_tile_dims(proto["collision_box"])
         speed = float(proto.get("crafting_speed", 1.0))
         watts = watts_of(proto.get("energy_usage", 0)) * 2.0
-
-        if combo_name == "gear_belt_combo":
-            belt_recipe = self.data.recipes.get("transport-belt", {})
-            seconds = solve.Data.craft_seconds(belt_recipe) if belt_recipe else 0.5
-            cpm = 60.0 * speed / seconds
-            return {
-                "cell": f"{machine}.gear_belt_combo",
-                "machine": machine,
-                "recipe": "gear_belt_combo",
-                "width": 6,
-                "height": 7,
-                "machine_width": 3,
-                "machine_height": 3,
-                "watts": watts,
-                "crafts_per_minute": cpm,
-                "inputs": ["iron-plate"],
-                "outputs": ["transport-belt"],
-                "compound": True,
-            }
-        if combo_name == "gear_inserter_combo":
-            ins_recipe = self.data.recipes.get("inserter", {})
-            seconds = solve.Data.craft_seconds(ins_recipe) if ins_recipe else 0.5
-            cpm = 60.0 * speed / seconds
-            return {
-                "cell": f"{machine}.gear_inserter_combo",
-                "machine": machine,
-                "recipe": "gear_inserter_combo",
-                "width": 6,
-                "height": 7,
-                "machine_width": 3,
-                "machine_height": 3,
-                "watts": watts,
-                "crafts_per_minute": cpm,
-                "inputs": ["iron-plate", "electronic-circuit"],
-                "outputs": ["inserter"],
-                "compound": True,
-            }
-        return None
-
-    def cell(self, machine: str, recipe: str) -> dict[str, Any] | None:
-        """One MACRO: (building, recipe) with footprint, ports, power.
-
-        None when the building does not exist or cannot hold the recipe.
-        """
-        if recipe in ("gear_belt_combo", "gear_inserter_combo"):
-            return self.compound_cell(machine, recipe)
-        proto = self.machines.get(machine)
-        if proto is None:
-            return None
-        box = proto["collision_box"]
-        machine_width = math.ceil(box[1][0] - box[0][0])
-        machine_height = math.ceil(box[1][1] - box[0][1])
-        recipe_proto = self.data.recipes[recipe]
-        speed = float(proto.get("crafting_speed", 1.0))
+        recipe_proto = self.data.recipes.get(target_recipe_name, {})
         seconds = solve.Data.craft_seconds(recipe_proto)
-        inputs = [solve.name_of(e) for e in solve.Data.ingredients_of(recipe_proto)]
-        outputs = [solve.name_of(e) for e in solve.Data.results_of(recipe_proto)]
-        # Check for fluidboxes and compute port mapping
-        fluid_table = self.data.prototypes.get("fluid", {})
-        fluid_boxes = proto.get("fluid_boxes", [])
-        ingredients_raw = solve.Data.ingredients_of(recipe_proto)
-        results_raw = solve.Data.results_of(recipe_proto)
-        has_fluids = any(solve.name_of(e) in fluid_table for e in ingredients_raw) or any(
-            solve.name_of(e) in fluid_table for e in results_raw
-        )
+        return {
+            "cell": f"{machine}.{combo_name}",
+            "machine": machine,
+            "recipe": combo_name,
+            "width": COMPOUND_CELL_WIDTH,
+            "height": COMPOUND_CELL_HEIGHT,
+            "machine_width": machine_w,
+            "machine_height": machine_h,
+            "watts": watts,
+            "crafts_per_minute": SECONDS_PER_MINUTE * speed / seconds,
+            "inputs": list(inputs),
+            "outputs": list(outputs),
+            "compound": is_compound,
+        }
 
-        direction = DIRECTION_NORTH
-        in_slots: dict[str, int] = {}
-        out_slots: dict[str, int] = {}
-        port_faces: dict[str, str] | None = None
+    def _layout_power_fluid_cell(
+        self,
+        proto: ProtoRecord,
+        machine_w: int,
+        machine_h: int,
+        inputs: list[str],
+        outputs: list[str],
+        fluid_table: ProtoRecord,
+        in_match_dir: int,
+        record_internal_pipes: bool,
+    ) -> dict[str, Any]:
+        """Compute cell layout for EAST-oriented boiler or steam-engine fluid machines."""
+        placed_w, placed_h = machine_h, machine_w
+        cx, cy = 1.0 + placed_w / 2.0, 1.0 + placed_h / 2.0
+        mid_slot = 1 + placed_h // 2
+
+        out_fb: Any = proto.get("output_fluid_box", {})
+        out_conns = out_fb.get("pipe_connections", [])
+        out_slot = (
+            math.floor(cy + _east_oriented_pipe_ext(out_conns[0], cx, cy)[1])
+            if out_conns
+            else mid_slot
+        )
+        out_slots = {p: out_slot for p in outputs if p in fluid_table}
+
+        in_slots = {p: mid_slot for p in inputs if p not in fluid_table}
+        fluid_inputs = [p for p in inputs if p in fluid_table]
         unused_fluid_ports: list[tuple[float, float]] = []
         internal_pipes: list[dict[str, Any]] = []
+        in_fb: Any = proto.get("fluid_box", {})
+        for conn in in_fb.get("pipe_connections", []):
+            cdir, _ry, ext_x, ext_y = _east_oriented_pipe_ext(conn, cx, cy)
+            if cdir != in_match_dir:
+                unused_fluid_ports.append((ext_x, ext_y))
+                continue
+            in_slots.update(dict.fromkeys(fluid_inputs, math.floor(ext_y)))
+            if record_internal_pipes:
+                internal_pipes.extend({"x": ext_x, "y": ext_y, "fluid": p} for p in fluid_inputs)
 
-        if proto.get("type") == "boiler" and has_fluids:
-            direction = DIRECTION_EAST
-            placed_w = machine_height
-            placed_h = machine_width
-            width = placed_w + 2
-            height = placed_h + 2
-            cx, cy = 1.0 + placed_w / 2.0, 1.0 + placed_h / 2.0
-            out_fb = proto.get("output_fluid_box", {})
-            out_conns = out_fb.get("pipe_connections", [])
-            if out_conns:
-                bx, by = float(out_conns[0]["position"][0]), float(out_conns[0]["position"][1])
-                rx, ry = -by, bx
-                out_slot = math.floor(cy + ry)
-            else:
-                out_slot = 1 + placed_h // 2
-            for p in outputs:
-                if p in fluid_table:
-                    out_slots[p] = out_slot
-            in_fb = proto.get("fluid_box", {})
-            in_conns = in_fb.get("pipe_connections", [])
-            for conn in in_conns:
-                bx, by = float(conn["position"][0]), float(conn["position"][1])
-                rx, ry = -by, bx
-                cdir = (int(conn.get("direction", 0)) + DIRECTION_EAST) % 16
-                step_dx = (
-                    1.0 if cdir == DIRECTION_EAST else (-1.0 if cdir == DIRECTION_WEST else 0.0)
-                )
-                step_dy = (
-                    1.0 if cdir == DIRECTION_SOUTH else (-1.0 if cdir == DIRECTION_NORTH else 0.0)
-                )
-                ext_x = round(cx + rx + step_dx, 2)
-                ext_y = round(cy + ry + step_dy, 2)
-                if cdir == DIRECTION_NORTH:
-                    in_slot = math.floor(ext_y)
-                    for p in inputs:
-                        if p in fluid_table:
-                            in_slots[p] = in_slot
-                            internal_pipes.append({"x": ext_x, "y": ext_y, "fluid": p})
-                else:
-                    unused_fluid_ports.append((ext_x, ext_y))
-            mid_slot = 1 + placed_h // 2
-            for p in inputs:
-                if p not in fluid_table:
-                    in_slots[p] = mid_slot
-            port_faces = dict.fromkeys(inputs, "W")
-            port_faces.update(dict.fromkeys(outputs, "E"))
-        elif proto.get("type") == "generator" and has_fluids:
-            direction = DIRECTION_EAST
-            placed_w = machine_height
-            placed_h = machine_width
-            width = placed_w + 2
-            height = placed_h + 2
-            cx, cy = 1.0 + placed_w / 2.0, 1.0 + placed_h / 2.0
-            in_fb = proto.get("fluid_box", {})
-            in_conns = in_fb.get("pipe_connections", [])
-            for conn in in_conns:
-                bx, by = float(conn["position"][0]), float(conn["position"][1])
-                rx, ry = -by, bx
-                cdir = (int(conn.get("direction", 0)) + DIRECTION_EAST) % 16
-                step_dx = (
-                    1.0 if cdir == DIRECTION_EAST else (-1.0 if cdir == DIRECTION_WEST else 0.0)
-                )
-                step_dy = (
-                    1.0 if cdir == DIRECTION_SOUTH else (-1.0 if cdir == DIRECTION_NORTH else 0.0)
-                )
-                ext_x = round(cx + rx + step_dx, 2)
-                ext_y = round(cy + ry + step_dy, 2)
-                if cdir == DIRECTION_WEST:
-                    in_slot = math.floor(ext_y)
-                    for p in inputs:
-                        if p in fluid_table:
-                            in_slots[p] = in_slot
-                else:
-                    unused_fluid_ports.append((ext_x, ext_y))
-            port_faces = dict.fromkeys(inputs, "W")
-            port_faces.update(dict.fromkeys(outputs, "E"))
-        elif fluid_boxes and has_fluids:
-            in_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "input"]
-            out_fluidboxes = [fb for fb in fluid_boxes if fb.get("production_type") == "output"]
+        port_faces = dict.fromkeys(inputs, "W")
+        port_faces.update(dict.fromkeys(outputs, "E"))
+        return {
+            "width": placed_w + 2,
+            "height": placed_h + 2,
+            "machine_width": placed_w,
+            "machine_height": placed_h,
+            "direction": DIRECTION_EAST,
+            "in_slots": in_slots,
+            "out_slots": out_slots,
+            "port_faces": port_faces,
+            "unused_fluid_ports": unused_fluid_ports,
+            "internal_pipes": internal_pipes,
+        }
 
-            # Choose orientation to place fluid inputs on West (x < 0) and outputs on East (x > 0)
-            target_conns: list[dict[str, Any]] = []
-            target_is_input = True
-            if in_fluidboxes and in_fluidboxes[0].get("pipe_connections"):
-                target_conns = in_fluidboxes[0]["pipe_connections"]
-                target_is_input = True
-            elif out_fluidboxes and out_fluidboxes[0].get("pipe_connections"):
-                target_conns = out_fluidboxes[0]["pipe_connections"]
-                target_is_input = False
+    def _layout_fluidbox_cell(
+        self,
+        fluid_boxes: list[ProtoRecord],
+        machine_w: int,
+        machine_h: int,
+        inputs: list[str],
+        outputs: list[str],
+        ingredients_raw: list[ProtoRecord],
+        results_raw: list[ProtoRecord],
+        fluid_table: ProtoRecord,
+    ) -> dict[str, Any]:
+        """Compute cell layout for assembling or chemical machines with fluid_boxes."""
+        in_fbs = [fb for fb in fluid_boxes if fb.get("production_type") == "input"]
+        out_fbs = [fb for fb in fluid_boxes if fb.get("production_type") == "output"]
+        direction = _choose_fluid_orientation(in_fbs, out_fbs)
+        placed_w, placed_h = (
+            (machine_h, machine_w)
+            if direction in (DIRECTION_EAST, DIRECTION_WEST)
+            else (machine_w, machine_h)
+        )
+        y_offset = 1
+        width, height = placed_w + 2, placed_h + 2
+        in_fb_slots = _project_fluidbox_slots(in_fbs, direction, placed_h, y_offset)
+        out_fb_slots = _project_fluidbox_slots(out_fbs, direction, placed_h, y_offset)
 
-            if target_conns:
-                tpos = target_conns[0].get("position", [0, 0])
-                tx, ty = float(tpos[0]), float(tpos[1])
-                if target_is_input:
-                    if ty < 0:
-                        direction = DIRECTION_WEST
-                    elif ty > 0:
-                        direction = DIRECTION_EAST
-                    elif tx > 0:
-                        direction = DIRECTION_SOUTH
-                    else:
-                        direction = DIRECTION_NORTH
-                else:
-                    if ty > 0:
-                        direction = DIRECTION_WEST
-                    elif ty < 0:
-                        direction = DIRECTION_EAST
-                    elif tx < 0:
-                        direction = DIRECTION_SOUTH
-                    else:
-                        direction = DIRECTION_NORTH
-
-            if direction in (DIRECTION_EAST, DIRECTION_WEST):
-                placed_w = machine_height
-                placed_h = machine_width
-            else:
-                placed_w = machine_width
-                placed_h = machine_height
-
-            def _rotate_and_slot(bx: float, by: float) -> int:
-                if direction == DIRECTION_NORTH:
-                    ry = by
-                elif direction == DIRECTION_EAST:
-                    ry = bx
-                elif direction == DIRECTION_SOUTH:
-                    ry = -by
-                elif direction == DIRECTION_WEST:
-                    ry = -bx
-                else:
-                    ry = by
-                return math.floor(ry + placed_h / 2.0)
-
-            y_offset = 1
-            width = placed_w + 2
-            height = placed_h + 2
-
-            in_fb_slots = [
-                _rotate_and_slot(
-                    fb["pipe_connections"][0]["position"][0],
-                    fb["pipe_connections"][0]["position"][1],
-                )
-                + y_offset
-                for fb in in_fluidboxes
-                if fb.get("pipe_connections")
-            ]
-            out_fb_slots = [
-                _rotate_and_slot(
-                    fb["pipe_connections"][0]["position"][0],
-                    fb["pipe_connections"][0]["position"][1],
-                )
-                + y_offset
-                for fb in out_fluidboxes
-                if fb.get("pipe_connections")
-            ]
-
-            # Map input fluid ingredients
-            fluid_in_count = 0
-            item_inputs = []
-            for ing in ingredients_raw:
-                p = solve.name_of(ing)
-                if p in fluid_table:
-                    fb_idx = ing.get("fluidbox_index")
-                    slot_idx = (fb_idx - 1) if fb_idx is not None else fluid_in_count
-                    fluid_in_count += 1
-                    if 0 <= slot_idx < len(in_fb_slots):
-                        in_slots[p] = in_fb_slots[slot_idx]
-                    elif in_fb_slots:
-                        in_slots[p] = in_fb_slots[min(slot_idx, len(in_fb_slots) - 1)]
-                else:
-                    item_inputs.append(p)
-
-            # Map input item ingredients to non-pipe slots on West face (within machine span: y_offset to y_offset + placed_h - 1)
-            all_in_pipes = set(in_fb_slots)
-            avail_item_in = [
-                s for s in range(y_offset, y_offset + placed_h) if s not in all_in_pipes
-            ]
-            for s in range(y_offset, y_offset + placed_h):
-                if s not in in_slots.values() and s not in avail_item_in:
-                    avail_item_in.append(s)
-            for idx, p in enumerate(item_inputs):
-                if idx < len(avail_item_in):
-                    in_slots[p] = avail_item_in[idx]
-                else:
-                    in_slots[p] = y_offset + (idx % placed_h)
-
-            # Map output fluid results
-            fluid_out_count = 0
-            item_outputs = []
-            for res in results_raw:
-                p = solve.name_of(res)
-                if p in fluid_table:
-                    fb_idx = res.get("fluidbox_index")
-                    slot_idx = (fb_idx - 1) if fb_idx is not None else fluid_out_count
-                    fluid_out_count += 1
-                    if 0 <= slot_idx < len(out_fb_slots):
-                        out_slots[p] = out_fb_slots[slot_idx]
-                    elif out_fb_slots:
-                        out_slots[p] = out_fb_slots[min(slot_idx, len(out_fb_slots) - 1)]
-                else:
-                    item_outputs.append(p)
-
-            # Map output item results to non-pipe slots on East face (within machine span: y_offset to y_offset + placed_h - 1)
-            all_out_pipes = set(out_fb_slots)
-            avail_item_out = [
-                s for s in range(y_offset, y_offset + placed_h) if s not in all_out_pipes
-            ]
-            for s in range(y_offset, y_offset + placed_h):
-                if s not in out_slots.values() and s not in avail_item_out:
-                    avail_item_out.append(s)
-            for idx, p in enumerate(item_outputs):
-                if idx < len(avail_item_out):
-                    out_slots[p] = avail_item_out[idx]
-                else:
-                    out_slots[p] = y_offset + (idx % placed_h)
-
-            used_in_slots = set(in_slots.values())
-            used_out_slots = set(out_slots.values())
-            unused_fluid_ports = [
-                (0.5, float(s) + 0.5) for s in sorted(set(in_fb_slots) - used_in_slots)
-            ] + [
-                (float(width) - 0.5, float(s) + 0.5)
-                for s in sorted(set(out_fb_slots) - used_out_slots)
-            ]
-
-            port_faces = dict.fromkeys(inputs, "W")
-            port_faces.update(dict.fromkeys(outputs, "E"))
-        elif proto.get("fixed_recipe") and proto.get("fixed_recipe") == recipe_proto.get(
-            "fixed_recipe"
-        ):
-            pad_proto = next(iter(self.data.prototypes.get("cargo-landing-pad", {}).values()), None)
-            placed_w = machine_width
-            placed_h = machine_height
-            if pad_proto is not None:
-                pad_box = pad_proto["collision_box"]
-                pad_w = math.ceil(pad_box[1][0] - pad_box[0][0])
-                pad_h = math.ceil(pad_box[1][1] - pad_box[0][1])
-                pad_grid = int(pad_proto.get("build_grid_size", 2))
-                width = (
-                    (1 if inputs else 0)
-                    + machine_width
-                    + (pad_grid - 1)
-                    + pad_w
-                    + (1 if outputs else 0)
-                )
-                height = max(machine_height, pad_h + (pad_grid - 1))
-            else:
-                width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
-                height = machine_height
-            if len(inputs) > 0 and height >= 2 * len(inputs):
-                for idx, p in enumerate(inputs):
-                    in_slots[p] = 1 + 2 * idx
-            else:
-                offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
-                for idx, p in enumerate(inputs):
-                    in_slots[p] = offset_in + idx
-            offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
-            for idx, p in enumerate(outputs):
-                out_slots[p] = offset_out + idx
-        else:
-            placed_w = machine_width
-            placed_h = machine_height
-            if not outputs and len(inputs) > 6:
-                width = machine_width + 2
-                height = machine_height + 2
-                faces_order = ["W", "N", "S", "E"]
-                port_faces = {
-                    p: faces_order[idx % len(faces_order)] for idx, p in enumerate(inputs)
-                }
-                for face_dir in ("W", "E"):
-                    f_inps = [p for p in inputs if port_faces.get(p) == face_dir]
-                    offset_y = 1 + (placed_h - len(f_inps)) // 2 if len(f_inps) <= placed_h else 1
-                    for idx, p in enumerate(f_inps):
-                        in_slots[p] = offset_y + idx
-                for face_dir in ("N", "S"):
-                    f_inps = [p for p in inputs if port_faces.get(p) == face_dir]
-                    if len(f_inps) == 2 and placed_w >= 3:
-                        for idx, p in enumerate(f_inps):
-                            in_slots[p] = 1 + 2 * idx
-                    else:
-                        offset_x = (
-                            1 + (placed_w - len(f_inps)) // 2 if len(f_inps) <= placed_w else 1
-                        )
-                        for idx, p in enumerate(f_inps):
-                            in_slots[p] = offset_x + idx
-            else:
-                width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
-                height = machine_height
-                offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
-                for idx, p in enumerate(inputs):
-                    in_slots[p] = offset_in + idx
-                offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
-                for idx, p in enumerate(outputs):
-                    out_slots[p] = offset_out + idx
-
-        raw_cpm = 60.0 * speed / seconds
-        in_amounts = {solve.name_of(e): solve.amount_of(e) for e in ingredients_raw}
-        out_amounts = {solve.name_of(e): solve.amount_of(e) for e in results_raw}
-        solid_port_amounts = [
-            amt for p, amt in (*in_amounts.items(), *out_amounts.items()) if p not in fluid_table
-        ]
-        max_solid_amt = max(solid_port_amounts, default=0.0)
-        port_cap = self.port_item_capacity_per_min()
-        eff_cpm = (
-            min(raw_cpm, port_cap / max_solid_amt)
-            if (max_solid_amt > 0.0 and port_cap > 0.0)
-            else raw_cpm
+        in_slots = _map_fluid_and_item_ports(
+            ingredients_raw, fluid_table, in_fb_slots, placed_h, y_offset
+        )
+        out_slots = _map_fluid_and_item_ports(
+            results_raw, fluid_table, out_fb_slots, placed_h, y_offset
         )
 
-        # One machine crafts speed * 60 / craft_seconds per minute. The
-        # solver's count formula is the inverse of this number.
-        res_cell: dict[str, Any] = {
-            "cell": f"{machine}.{recipe}",
-            "machine": machine,
-            "recipe": recipe,
+        used_in = set(in_slots.values())
+        used_out = set(out_slots.values())
+        unused_in = [
+            (TILE_CENTER_OFFSET, float(s) + TILE_CENTER_OFFSET)
+            for s in sorted(set(in_fb_slots) - used_in)
+        ]
+        unused_out = [
+            (float(width) - TILE_CENTER_OFFSET, float(s) + TILE_CENTER_OFFSET)
+            for s in sorted(set(out_fb_slots) - used_out)
+        ]
+        port_faces = dict.fromkeys(inputs, "W")
+        port_faces.update(dict.fromkeys(outputs, "E"))
+        return {
             "width": width,
             "height": height,
             "machine_width": placed_w,
@@ -665,6 +546,203 @@ class Pdk:
             "direction": direction,
             "in_slots": in_slots,
             "out_slots": out_slots,
+            "port_faces": port_faces,
+            "unused_fluid_ports": unused_in + unused_out,
+            "internal_pipes": [],
+        }
+
+    def _layout_fixed_recipe_cell(
+        self,
+        proto: ProtoRecord,
+        machine_w: int,
+        machine_h: int,
+        inputs: list[str],
+        outputs: list[str],
+    ) -> dict[str, Any]:
+        """Compute cell layout for fixed-recipe machines such as rocket-silo with landing pad."""
+        pad_proto = next(iter(self.data.prototypes.get("cargo-landing-pad", {}).values()), None)
+        extra: dict[str, Any] = {"fixed_recipe": proto["fixed_recipe"]}
+        if pad_proto is not None:
+            pad_w, pad_h = _box_tile_dims(pad_proto["collision_box"])
+            pad_grid = int(pad_proto.get("build_grid_size", 2))
+            width = bool(inputs) + machine_w + (pad_grid - 1) + pad_w + bool(outputs)
+            height = max(machine_h, pad_h + (pad_grid - 1))
+            extra.update(
+                {
+                    "landing_pad": pad_proto["name"],
+                    "landing_pad_width": pad_w,
+                    "landing_pad_height": pad_h,
+                    "landing_pad_grid_size": pad_grid,
+                }
+            )
+        else:
+            width = machine_w + bool(inputs) + bool(outputs)
+            height = machine_h
+
+        return {
+            "width": width,
+            "height": height,
+            "machine_width": machine_w,
+            "machine_height": machine_h,
+            "direction": DIRECTION_NORTH,
+            "in_slots": _spaced_or_centered_slots(inputs, height),
+            "out_slots": _center_slots(outputs, height),
+            "port_faces": None,
+            "unused_fluid_ports": [],
+            "internal_pipes": [],
+            "extra": extra,
+        }
+
+    def _layout_standard_cell(
+        self,
+        machine_w: int,
+        machine_h: int,
+        inputs: list[str],
+        outputs: list[str],
+    ) -> dict[str, Any]:
+        """Compute cell layout for standard solid-item machines and 4-sided GAA labs."""
+        if not outputs and len(inputs) > FOUR_SIDED_INPUT_THRESHOLD:
+            faces_order = ("W", "N", "S", "E")
+            port_faces = {p: faces_order[idx % len(faces_order)] for idx, p in enumerate(inputs)}
+            in_slots: dict[str, int] = {}
+            for face_dir in ("W", "E"):
+                f_inps = [p for p in inputs if port_faces[p] == face_dir]
+                in_slots.update(_center_slots(f_inps, machine_h, base_offset=1))
+            for face_dir in ("N", "S"):
+                f_inps = [p for p in inputs if port_faces[p] == face_dir]
+                if len(f_inps) == 2 and machine_w >= MIN_SPACED_PORT_WIDTH:
+                    in_slots.update({p: 1 + 2 * idx for idx, p in enumerate(f_inps)})
+                else:
+                    in_slots.update(_center_slots(f_inps, machine_w, base_offset=1))
+            return {
+                "width": machine_w + 2,
+                "height": machine_h + 2,
+                "machine_width": machine_w,
+                "machine_height": machine_h,
+                "direction": DIRECTION_NORTH,
+                "in_slots": in_slots,
+                "out_slots": {},
+                "port_faces": port_faces,
+                "unused_fluid_ports": [],
+                "internal_pipes": [],
+            }
+
+        height = machine_h
+        return {
+            "width": machine_w + bool(inputs) + bool(outputs),
+            "height": height,
+            "machine_width": machine_w,
+            "machine_height": machine_h,
+            "direction": DIRECTION_NORTH,
+            "in_slots": _center_slots(inputs, height),
+            "out_slots": _center_slots(outputs, height),
+            "port_faces": None,
+            "unused_fluid_ports": [],
+            "internal_pipes": [],
+        }
+
+    def _select_cell_layout(
+        self,
+        proto: ProtoRecord,
+        recipe_proto: ProtoRecord,
+        machine_w: int,
+        machine_h: int,
+        inputs: list[str],
+        outputs: list[str],
+        ingredients_raw: list[ProtoRecord],
+        results_raw: list[ProtoRecord],
+        fluid_table: ProtoRecord,
+        has_fluids: bool,
+    ) -> dict[str, Any]:
+        """Dispatch to the appropriate cell geometry layout strategy."""
+        ptype = proto.get("type")
+        if ptype in ("boiler", "generator") and has_fluids:
+            is_boiler = ptype == "boiler"
+            return self._layout_power_fluid_cell(
+                proto,
+                machine_w,
+                machine_h,
+                inputs,
+                outputs,
+                fluid_table,
+                DIRECTION_NORTH if is_boiler else DIRECTION_WEST,
+                is_boiler,
+            )
+        fluid_boxes: Any = proto.get("fluid_boxes", [])
+        if fluid_boxes and has_fluids:
+            return self._layout_fluidbox_cell(
+                fluid_boxes,
+                machine_w,
+                machine_h,
+                inputs,
+                outputs,
+                ingredients_raw,
+                results_raw,
+                fluid_table,
+            )
+        fixed_rec = proto.get("fixed_recipe")
+        if fixed_rec and fixed_rec == recipe_proto.get("fixed_recipe"):
+            return self._layout_fixed_recipe_cell(proto, machine_w, machine_h, inputs, outputs)
+        return self._layout_standard_cell(machine_w, machine_h, inputs, outputs)
+
+    def cell(self, machine: str, recipe: str) -> dict[str, Any] | None:
+        """One MACRO: (building, recipe) with footprint, ports, power.
+
+        None when the building does not exist or cannot hold the recipe.
+        """
+        if recipe in COMPOUND_SPECS:
+            return self.compound_cell(machine, recipe)
+        proto = self.machines.get(machine)
+        if proto is None:
+            return None
+        machine_w, machine_h = _box_tile_dims(proto["collision_box"])
+        recipe_proto = self.data.recipes[recipe]
+        ingredients_raw = solve.Data.ingredients_of(recipe_proto)
+        results_raw = solve.Data.results_of(recipe_proto)
+        inputs = [solve.name_of(e) for e in ingredients_raw]
+        outputs = [solve.name_of(e) for e in results_raw]
+
+        fluid_table = self.data.prototypes.get("fluid", {})
+        has_fluids = any(p in fluid_table for p in (*inputs, *outputs))
+        layout = self._select_cell_layout(
+            proto,
+            recipe_proto,
+            machine_w,
+            machine_h,
+            inputs,
+            outputs,
+            ingredients_raw,
+            results_raw,
+            fluid_table,
+            has_fluids,
+        )
+
+        speed = float(proto.get("crafting_speed", 1.0))
+        raw_cpm = SECONDS_PER_MINUTE * speed / solve.Data.craft_seconds(recipe_proto)
+        in_amounts = {solve.name_of(e): solve.amount_of(e) for e in ingredients_raw}
+        out_amounts = {solve.name_of(e): solve.amount_of(e) for e in results_raw}
+        solid_amounts = [
+            amt for p, amt in (*in_amounts.items(), *out_amounts.items()) if p not in fluid_table
+        ]
+        max_solid_amt = max(solid_amounts, default=0.0)
+        port_cap = self.port_item_capacity_per_min()
+        eff_cpm = (
+            min(raw_cpm, port_cap / max_solid_amt)
+            if (max_solid_amt > 0.0 and port_cap > 0.0)
+            else raw_cpm
+        )
+
+        res_cell: dict[str, Any] = {
+            "cell": f"{machine}.{recipe}",
+            "machine": machine,
+            "recipe": recipe,
+            "width": layout["width"],
+            "height": layout["height"],
+            "machine_width": layout["machine_width"],
+            "machine_height": layout["machine_height"],
+            "direction": layout["direction"],
+            "in_slots": layout["in_slots"],
+            "out_slots": layout["out_slots"],
             "has_fluids": has_fluids,
             "watts": watts_of(proto.get("active_energy_usage") or proto.get("energy_usage", 0)),
             "crafts_per_minute": raw_cpm,
@@ -675,57 +753,54 @@ class Pdk:
             "inputs": inputs,
             "outputs": outputs,
         }
-        if proto.get("fixed_recipe") and proto.get("fixed_recipe") == recipe_proto.get(
-            "fixed_recipe"
-        ):
-            res_cell["fixed_recipe"] = proto["fixed_recipe"]
-            pad_proto = next(iter(self.data.prototypes.get("cargo-landing-pad", {}).values()), None)
-            if pad_proto is not None:
-                pad_box = pad_proto["collision_box"]
-                res_cell["landing_pad"] = pad_proto["name"]
-                res_cell["landing_pad_width"] = math.ceil(pad_box[1][0] - pad_box[0][0])
-                res_cell["landing_pad_height"] = math.ceil(pad_box[1][1] - pad_box[0][1])
-                res_cell["landing_pad_grid_size"] = int(pad_proto.get("build_grid_size", 2))
-        if port_faces is not None:
-            res_cell["port_faces"] = port_faces
-        if unused_fluid_ports:
-            res_cell["unused_fluid_ports"] = unused_fluid_ports
-        if internal_pipes:
-            res_cell["internal_pipes"] = internal_pipes
+        res_cell.update(layout.get("extra", {}))
+        for opt_key in ("port_faces", "unused_fluid_ports", "internal_pipes"):
+            if layout[opt_key]:
+                res_cell[opt_key] = layout[opt_key]
         return res_cell
 
     def inserter_stack_size(self) -> int:
         """Compute non-bulk electric inserter hand stack size from technology prototypes."""
-        bonus = 0.0
-        for tech in self.data.techs.values():
-            for eff in tech.get("effects", []):
-                if eff.get("type") == "inserter-stack-size-bonus":
-                    bonus += float(eff.get("modifier", 0.0))
+        effects = (
+            eff
+            for tech in self.data.techs.values()
+            for eff in tech.get("effects", [])
+            if eff.get("type") == "inserter-stack-size-bonus"
+        )
+        bonus = sum(float(eff.get("modifier", 0.0)) for eff in effects)
         return max(1, round(1.0 + bonus))
+
+    def _is_standard_electric_inserter(self, proto: ProtoRecord, spec: ProtoRecord) -> bool:
+        """Check whether an inserter prototype is a 1-tile-reach non-bulk electric inserter."""
+        energy_source: Any = proto.get("energy_source", {})
+        rot_speed: Any = spec.get("rotation_speed", 0.0)
+        return (
+            energy_source.get("type") == "electric"
+            and not proto.get("bulk", False)
+            and spec["pickup_reach"] == 1
+            and spec["insert_reach"] == 1
+            and float(rot_speed) > 0.0
+        )
 
     def inserter_tiers(self) -> list[dict[str, Any]]:
         """Return 1-tile-reach non-bulk electric inserters sorted slowest to fastest."""
         belt_tiers = self.belt_tiers()
-        v_lane = float(belt_tiers[0]["items_per_lane"]) if belt_tiers else 7.5
+        v_lane = float(belt_tiers[0]["items_per_lane"]) if belt_tiers else 0.0
         v_belt = v_lane * LANES_PER_BELT
         max_stack = self.inserter_stack_size()
         tiers: list[dict[str, Any]] = []
         for name, proto in self.inserters.items():
-            if proto.get("energy_source", {}).get("type") != "electric":
-                continue
-            if proto.get("bulk", False):
-                continue
             spec = inserter_spec(proto)
-            if spec["pickup_reach"] != 1 or spec["insert_reach"] != 1:
+            if not self._is_standard_electric_inserter(proto, spec):
                 continue
             rot_speed = float(spec["rotation_speed"])
-            if rot_speed <= 0:
-                continue
             t_rot = 1.0 / (rot_speed * TICKS_PER_SECOND)
-            rates_by_stack: dict[int, float] = {}
-            for s in range(1, max_stack + 1):
-                t_cycle = t_rot + (float(s - 1) / v_belt if v_belt > 0 else 0.0)
-                rates_by_stack[s] = 60.0 * float(s) / t_cycle if t_cycle > 0 else 0.0
+            rates_by_stack = {
+                s: SECONDS_PER_MINUTE
+                * float(s)
+                / (t_rot + (float(s - 1) / v_belt if v_belt > 0.0 else 0.0))
+                for s in range(1, max_stack + 1)
+            }
             tiers.append(
                 {
                     "name": name,
@@ -788,10 +863,9 @@ class Pdk:
             },
         }
         for idx, tier in enumerate(tiers):
-            h_layer = f"M{2 * idx + 3}"
-            v_layer = f"M{2 * idx + 4}"
+            h_layer, v_layer = _tier_layer_pair(idx)
             ug_name = tier.get("underground", "underground-belt")
-            span = int(tier.get("span", 5))
+            span = int(tier.get("span", 0))
             belt_name = tier.get("belt", "transport-belt")
             layers[h_layer] = {
                 "direction": "HORIZONTAL",
@@ -827,13 +901,13 @@ class Pdk:
             LAYER_SURFACE: {"via": "none"},
             LAYER_SURFACE_V: {"via": "surface-turn"},
         }
-        for idx, tier in enumerate(self.belt_tiers()):
-            h_layer = f"M{2 * idx + 3}"
-            v_layer = f"M{2 * idx + 4}"
+        tiers = self.belt_tiers()
+        for idx, tier in enumerate(tiers):
+            h_layer, v_layer = _tier_layer_pair(idx)
             layers_dict[h_layer] = {
                 "via": "tunnel-pair",
-                "tiers": self.belt_tiers(),
-                "span": self.pipe_span() if idx == 0 else tier.get("span", 5),
+                "tiers": tiers,
+                "span": self.pipe_span() if idx == 0 else int(tier.get("span", 0)),
             }
             layers_dict[v_layer] = {"via": "tunnel-turn"}
         red_layer, green_layer = self.circuit_layers()
