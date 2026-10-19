@@ -221,6 +221,264 @@ class NetlistTest(unittest.TestCase):
             errors = [d for d in all_diags if d.isError if hasattr(d, "isError")]
             self.assertEqual(errors, [], _report(compilation.sourceManager, errors))
 
+    def test_stage_rank_of_and_assign_gaa_pin_faces(self) -> None:
+        """Verify stage_rank_of depth calculation and assign_gaa_pin_faces boundary rules."""
+        self.assertEqual(netlist.stage_rank_of("iron-plate"), 0)
+        depths = {"iron-plate": 1, "copper-plate": 2}
+        self.assertEqual(netlist.stage_rank_of("iron-plate", material_depths=depths), 1)
+        self.assertEqual(
+            netlist.stage_rank_of(
+                "electronic-circuit",
+                inputs=["iron-plate", "copper-plate"],
+                material_depths=depths,
+            ),
+            3,
+        )
+
+        # Default allow_east=False uses only W, N, S faces (3 faces).
+        inputs_4 = ["p1", "p2", "p3", "p4"]
+        faces_no_east = netlist.assign_gaa_pin_faces(
+            inputs_4, depths={"p1": 0, "p2": 0, "p3": 0, "p4": 0}
+        )
+        self.assertNotIn("E", faces_no_east.values())
+        self.assertEqual(faces_no_east["p4"], "W")
+
+        # allow_east=True includes E face on the 4th input.
+        faces_with_east = netlist.assign_gaa_pin_faces(
+            inputs_4, depths={"p1": 0, "p2": 0, "p3": 0, "p4": 0}, allow_east=True
+        )
+        self.assertEqual(faces_with_east["p4"], "E")
+
+        # Feeder coordinates boundary checks around mach_y +/- 1.0.
+        feeder = {
+            "north_port": (0.0, 10.5),
+            "north_boundary": (0.0, 10.0),
+            "south_port": (0.0, 7.5),
+            "south_boundary": (0.0, 8.0),
+            "west_port": (0.0, 9.0),
+        }
+        coord_faces = netlist.assign_gaa_pin_faces(
+            list(feeder.keys()), feeder_coords=feeder, mach_y=9.0
+        )
+        self.assertEqual(coord_faces["north_port"], "N")
+        self.assertEqual(coord_faces["north_boundary"], "W")
+        self.assertEqual(coord_faces["south_port"], "S")
+        self.assertEqual(coord_faces["south_boundary"], "W")
+        self.assertEqual(coord_faces["west_port"], "W")
+
+    def test_scaling_modes_and_fluid_headroom(self) -> None:
+        """Verify single-pack, multi-pack, and 6-pack scaling and fluid multi-output headroom."""
+        # Single pack vs 2-pack vs 5-pack vs 6-pack scaling modes.
+        # In 2-pack or 5-pack demand, scale_for_throughput is False (uses crafts_per_minute).
+        # In 1-pack or 6-pack demand, scale_for_throughput is True (uses effective_crafts_per_minute).
+        # Use a cloned Data where copper-cable requires 20 copper-plate per craft so it is inserter-port-limited
+        # (effective_crafts_per_minute < crafts_per_minute).
+        import copy
+
+        lim_data = copy.copy(self.data)
+        lim_data.recipes = dict(self.data.recipes)
+        lim_data.recipes["copper-cable"] = dict(self.data.recipes["copper-cable"])
+        lim_data.recipes["copper-cable"]["ingredients"] = [
+            {"type": "item", "name": "copper-plate", "amount": 20}
+        ]
+        nl_two_packs = netlist.build(
+            lim_data,
+            {"automation-science-pack": 60.0, "logistic-science-pack": 60.0},
+            self.allowed,
+        )
+        nl_five_packs = netlist.build(
+            lim_data,
+            {
+                "automation-science-pack": 60.0,
+                "logistic-science-pack": 60.0,
+                "military-science-pack": 60.0,
+                "chemical-science-pack": 60.0,
+                "production-science-pack": 60.0,
+            },
+            self.allowed,
+        )
+        nl_six = netlist.build(
+            lim_data,
+            {
+                "automation-science-pack": 60.0,
+                "logistic-science-pack": 60.0,
+                "military-science-pack": 60.0,
+                "chemical-science-pack": 60.0,
+                "production-science-pack": 60.0,
+                "utility-science-pack": 60.0,
+            },
+            self.allowed,
+        )
+        cc_one = [
+            i
+            for i in netlist.build(
+                lim_data, {"logistic-science-pack": 60.0}, self.allowed
+            ).instances
+            if i.recipe == "copper-cable"
+        ]
+        cc_two = [i for i in nl_two_packs.instances if i.recipe == "copper-cable"]
+        cc_five = [i for i in nl_five_packs.instances if i.recipe == "copper-cable"]
+        cc_six = [i for i in nl_six.instances if i.recipe == "copper-cable"]
+        self.assertEqual(cc_two[0].rated, cc_five[0].rated)
+        self.assertLess(cc_six[0].rated, cc_five[0].rated)
+        # Verify count also scales with effective_crafts_per_minute when scale_for_throughput is True.
+        self.assertGreater(len(cc_one), len(cc_two))
+
+        # Test machine_override as dict and str.
+        nl_ovr_str = netlist.build(
+            self.data,
+            {"iron-gear-wheel": 30.0},
+            {"iron-gear-wheel", "iron-plate"},
+            machine_override="assembling-machine-2",
+        )
+        gear_insts = [i for i in nl_ovr_str.instances if i.recipe == "iron-gear-wheel"]
+        self.assertTrue(all("assembling-machine-2" in i.cell_key for i in gear_insts))
+
+        nl_ovr_dict = netlist.build(
+            self.data,
+            {"iron-gear-wheel": 30.0},
+            {"iron-gear-wheel", "iron-plate"},
+            machine_override={"iron-gear-wheel": "assembling-machine-1"},
+        )
+        gear_insts_dict = [i for i in nl_ovr_dict.instances if i.recipe == "iron-gear-wheel"]
+        self.assertTrue(all("assembling-machine-1" in i.cell_key for i in gear_insts_dict))
+
+        # Single-pack fluid multi-output recipe (advanced-oil-processing has fluids and >1 outputs).
+        nl_chem_high = netlist.build(self.data, {"chemical-science-pack": 60.0}, self.allowed)
+        aop_high = [i for i in nl_chem_high.instances if i.recipe == "advanced-oil-processing"]
+        nl_chem_low = netlist.build(self.data, {"chemical-science-pack": 5.0}, self.allowed)
+        aop_low = [i for i in nl_chem_low.instances if i.recipe == "advanced-oil-processing"]
+        # Verify 2-pack demand does not apply single-pack fluid headroom bump even at high load.
+        nl_two_chem = netlist.build(
+            self.data,
+            {"chemical-science-pack": 60.0, "automation-science-pack": 1.0},
+            self.allowed,
+        )
+        aop_two = [i for i in nl_two_chem.instances if i.recipe == "advanced-oil-processing"]
+        # At 60/min chemical science, single-pack adds +1 fluid headroom machine over 2-pack plan count.
+        self.assertEqual(len(aop_high), len(aop_two) + 1)
+        self.assertEqual(len(aop_low), 1)
+
+    def test_high_throughput_driver_partition_and_pow2_promotion(self) -> None:
+        """Verify driver count bump for multi-consumer sub-bus partitioning and power-of-2 promotion."""
+        import copy
+        import math
+
+        import pdk
+
+        tech = pdk.Pdk(self.data)
+        belt_tiers = tech.belt_tiers()
+        belt_cap = (
+            float(belt_tiers[0]["items_per_lane"]) * pdk.LANES_PER_BELT * pdk.TICKS_PER_SECOND
+        )
+        # Find copper-plate furnace effective crafts per minute dynamically from prototype data.
+        cp_proto = self.data.recipes["copper-plate"]
+        cp_machine, _ = self.data.machine_for(cp_proto)
+        cp_cell = tech.cell(cp_machine, "copper-plate")
+        assert cp_cell is not None
+        drv_cap = float(cp_cell.get("effective_crafts_per_minute", cp_cell["crafts_per_minute"]))
+        max_drvs_bus = max(1, int((0.90 * belt_cap) // drv_cap))
+
+        # Construct a single-pack demand where copper-plate has two consumers:
+        # 1) whole_d in [0.50 * b_max_cap, b_max_cap] with fractional drivers
+        # 2) split_ds[0] > b_max_cap with k_split >= 2 and fractional drivers
+        custom_data = copy.copy(self.data)
+        custom_data.recipes = dict(self.data.recipes)
+        whole_target_cp = (max_drvs_bus - 0.75) * drv_cap
+        split_target_cp = (max_drvs_bus + 0.50) * drv_cap
+        custom_data.recipes["automation-science-pack"] = dict(
+            self.data.recipes["automation-science-pack"]
+        )
+        custom_data.recipes["automation-science-pack"]["ingredients"] = [
+            {"type": "item", "name": "low-density-structure", "amount": 1},
+            {"type": "item", "name": "copper-cable", "amount": 2},
+        ]
+        custom_data.recipes["low-density-structure"] = dict(
+            self.data.recipes["low-density-structure"]
+        )
+        custom_data.recipes["low-density-structure"]["ingredients"] = [
+            {"type": "item", "name": "copper-plate", "amount": whole_target_cp / 10.0}
+        ]
+        custom_data.recipes["copper-cable"] = dict(self.data.recipes["copper-cable"])
+        custom_data.recipes["copper-cable"]["ingredients"] = [
+            {"type": "item", "name": "copper-plate", "amount": split_target_cp / 10.0}
+        ]
+        nl_part = netlist.build(custom_data, {"automation-science-pack": 10.0}, self.allowed)
+        cp_part_insts = [i for i in nl_part.instances if i.recipe == "copper-plate"]
+        unpartitioned_count = math.ceil((whole_target_cp + split_target_cp) / drv_cap - 1e-9)
+        partitioned_count = math.ceil(whole_target_cp / drv_cap - 1e-9) + math.ceil(
+            split_target_cp / drv_cap - 1e-9
+        )
+        self.assertEqual(partitioned_count, unpartitioned_count + 1)
+        self.assertEqual(len(cp_part_insts), partitioned_count)
+
+        # Verify exact integer multiple of drv_cap in split_ds[0] does not over-allocate drivers.
+        exact_drv_data = copy.copy(self.data)
+        exact_drv_data.recipes = dict(self.data.recipes)
+        exact_whole = (max_drvs_bus - 0.5) * drv_cap
+        exact_split = (max_drvs_bus + 1.0) * drv_cap
+        exact_drv_data.recipes["automation-science-pack"] = dict(
+            self.data.recipes["automation-science-pack"]
+        )
+        exact_drv_data.recipes["automation-science-pack"]["ingredients"] = [
+            {"type": "item", "name": "low-density-structure", "amount": 1},
+            {"type": "item", "name": "copper-cable", "amount": 2},
+        ]
+        exact_drv_data.recipes["low-density-structure"] = dict(
+            self.data.recipes["low-density-structure"]
+        )
+        exact_drv_data.recipes["low-density-structure"]["ingredients"] = [
+            {"type": "item", "name": "copper-plate", "amount": exact_whole / 10.0}
+        ]
+        exact_drv_data.recipes["copper-cable"] = dict(self.data.recipes["copper-cable"])
+        exact_drv_data.recipes["copper-cable"]["ingredients"] = [
+            {"type": "item", "name": "copper-plate", "amount": exact_split / 10.0}
+        ]
+        nl_exact_drv = netlist.build(
+            exact_drv_data, {"automation-science-pack": 10.0}, self.allowed
+        )
+        cp_exact_drv_insts = [i for i in nl_exact_drv.instances if i.recipe == "copper-plate"]
+        self.assertEqual(len(cp_exact_drv_insts), 2 * max_drvs_bus + 1)
+
+        # At low rate (automation-science-pack: 0.3), total copper-plate rate is below belt_capacity, so no partition bump.
+        nl_part_low = netlist.build(custom_data, {"automation-science-pack": 0.3}, self.allowed)
+        cp_low_insts = [i for i in nl_part_low.instances if i.recipe == "copper-plate"]
+        low_unpart = math.ceil(0.03 * (whole_target_cp + split_target_cp) / drv_cap - 1e-9)
+        self.assertEqual(len(cp_low_insts), low_unpart)
+
+        # Power-of-two promotion check: in military-science-pack at 60/min, netlist.build
+        # promotes piercing-rounds-magazine count to a power of two for balanced splitter trees.
+        nl_mil = netlist.build(self.data, {"military-science-pack": 60.0}, self.allowed)
+        prm_insts = [i for i in nl_mil.instances if i.recipe == "piercing-rounds-magazine"]
+        self.assertEqual(len(prm_insts) & (len(prm_insts) - 1), 0)
+
+    def test_insert_telemetry_and_cell_helpers(self) -> None:
+        """Verify cell record helpers and telemetry insertion scopes."""
+        self.assertEqual(netlist.balancer_cell()["cell"], netlist.BALANCER_CELL)
+        self.assertEqual(netlist.split_cell()["cell"], netlist.SPLIT_CELL)
+        self.assertEqual(netlist.merge_cell()["cell"], netlist.MERGE_CELL)
+        self.assertEqual(netlist.pump_cell()["cell"], netlist.PUMP_CELL)
+
+        nl_tel = netlist.build(self.data, {"automation-science-pack": 60.0}, self.allowed)
+        merges = netlist.merge_plans_of(nl_tel)
+        self.assertEqual(netlist.insert_telemetry(nl_tel, tap_scope="none"), [])
+        self.assertEqual(
+            netlist.insert_telemetry(nl_tel, enable_display=False, enable_circuit=False), []
+        )
+        recs = netlist.insert_telemetry(
+            nl_tel,
+            tap_scope="io,merges,iron_gear_wheel",
+            enable_display=True,
+            enable_circuit=True,
+            merge_plans=merges,
+        )
+        tapped_mats = {r["material"] for r in recs}
+        self.assertIn("iron-ore", tapped_mats)
+        self.assertIn("iron-gear-wheel", tapped_mats)
+        v_out = netlist.emit_verilog(nl_tel, merges)
+        self.assertIn("u_disp_iron_ore", v_out)
+        self.assertIn("u_acc_iron_ore", v_out)
+
 
 def _report(manager: Any, diags: list) -> str:
     if not diags:
