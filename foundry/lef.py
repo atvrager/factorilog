@@ -129,15 +129,26 @@ def get_macro_port_geometry(
     in_slots, out_slots = get_macro_port_slots(cell)
 
     if face == "E":
-        cy = out_slots.get(port, int(h) // 2) + 0.5
+        if is_output:
+            cy = out_slots.get(port, int(h) // 2) + 0.5
+            return {
+                "face": "E",
+                "layer": h_layer,
+                "rect": (w - 0.5, cy - 0.25, w, cy + 0.25),
+                "inserter_pos": (w - 0.5, cy),
+                "inserter_dir": DIRECTION_WEST,
+                "approach_pos": (w + 0.5, cy),
+                "approach_dir": DIRECTION_EAST,
+            }
+        cy = in_slots.get(port, int(h) // 2) + 0.5
         return {
             "face": "E",
             "layer": h_layer,
             "rect": (w - 0.5, cy - 0.25, w, cy + 0.25),
             "inserter_pos": (w - 0.5, cy),
-            "inserter_dir": DIRECTION_WEST,
+            "inserter_dir": DIRECTION_EAST,
             "approach_pos": (w + 0.5, cy),
-            "approach_dir": DIRECTION_EAST,
+            "approach_dir": DIRECTION_WEST,
         }
     if face == "N":
         cx = in_slots[port] + 0.5 if port in in_slots else w / 2.0

@@ -119,6 +119,25 @@ class SolveTest(unittest.TestCase):
         )
         self.assertGreater(rates_chassis["steam-power"], rates_base["steam-power"] + 3.5)
 
+    def test_infinite_research_full_science_demand(self) -> None:
+        self.assertIn("infinite-research", self.data.recipes)
+        recipe = self.data.recipes["infinite-research"]
+        self.assertEqual(self.data.machine_for(recipe), ("lab", 3.5))
+        self.assertAlmostEqual(solve.Data.craft_seconds(recipe), 60.0)
+        packs = [solve.name_of(e) for e in solve.Data.ingredients_of(recipe)]
+        self.assertEqual(len(packs), 7)
+        full_demand = dict.fromkeys(packs, 60.0)
+        self.assertTrue(self.data.is_full_science_demand(full_demand))
+        self.assertFalse(self.data.is_full_science_demand({"automation-science-pack": 60.0}))
+        rates, _raw, _surplus = solve.solve_rates(self.data, full_demand, self.allowed)
+        self.assertIn("infinite-research", rates)
+        self.assertAlmostEqual(rates["infinite-research"], 60.0, places=4)
+        lines, _power = solve.machine_counts(self.data, rates)
+        lab_line = next(line for line in lines if line[0] == "infinite-research")
+        self.assertEqual(lab_line[2], "lab")
+        self.assertAlmostEqual(lab_line[3], 60.0 / 3.5, places=4)
+        self.assertEqual(self.balance_gaps({}, rates, _raw), [])
+
     def balance_gaps(
         self,
         demand: dict[str, float],

@@ -814,8 +814,11 @@ class AnalyticalPlacer:
             d = max([base_d] + [depth[p] + 1 for p in preds if p in depth])
             depth[u] = d
 
-        has_block_assignments = use_chassis and any(
-            nd.assigned_block != (0, 0) for nd in nodes.values()
+        active_gw = getattr(self, "_active_grid_w", 1)
+        has_block_assignments = (
+            use_chassis
+            and active_gw != 7
+            and any(nd.assigned_block != (0, 0) for nd in nodes.values())
         )
         mach_group_of: dict[str, list[str]] = {}
         if has_block_assignments:
@@ -1011,11 +1014,15 @@ class AnalyticalPlacer:
         power_only_fuels = boiler_inputs - non_power_inputs
         total_demand = 0.0
         num_boilers = 0
+        num_labs = 0
         for nd in nodes.values():
             if nd.recipe == "boiler-steam":
                 num_boilers += 1
                 continue
             if nd.recipe == "steam-power":
+                continue
+            if nd.recipe == "infinite-research":
+                num_labs += 1
                 continue
             if nd.recipe in power_only_fuels:
                 continue
@@ -1027,8 +1034,14 @@ class AnalyticalPlacer:
         target_cap_per_block = single_core_capacity * 0.63
         req_blocks = max(1, math.ceil(total_demand / max(1.0, target_cap_per_block)))
         base_side = max(1, math.ceil(math.sqrt(req_blocks)))
-        power_blocks = math.ceil(num_boilers / 10.0) if len(getattr(nl, "outputs", [])) >= 6 else 0
-        side = base_side + round(power_blocks / float(base_side)) if power_blocks else base_side
+        power_blocks = (
+            math.ceil(num_boilers / 10.0)
+            if (len(getattr(nl, "outputs", [])) >= 5 or num_labs > 0)
+            else 0
+        )
+        lab_blocks = math.ceil(num_labs / 6.0) * 2 if num_labs > 0 else 0
+        extra_blocks = power_blocks + lab_blocks
+        side = base_side + round(extra_blocks / float(base_side)) if extra_blocks else base_side
         return side, side
 
     def _find_tarjan_sccs(
@@ -1140,24 +1153,36 @@ class AnalyticalPlacer:
             elif len(b_outs[i]) == 1 and b_outs[i] == b_outs[i + 1]:
                 b_contig[i][i + 1] = b_contig[i + 1][i] = 1.0
 
+        has_lab_buckets = any("infinite-research" in r for r in b_recipes)
+
         # Step 1: 1D Harmonic X-coordinate relaxation
         max_x = float(max(1, grid_w - 1))
+        penult_x = max(0.0, max_x - 1.0)
         x_val = [
             0.0
             if (b_west[i] > 0 and b_east[i] == 0 and b_avg_rank[i] <= 3.0)
             else max_x
-            if b_east[i] > 0
-            else (b_avg_rank[i] / float(max(1, max_rank))) * max_x
+            if (b_east[i] > 0 and (not has_lab_buckets or "infinite-research" in b_recipes[i]))
+            else penult_x
+            if (b_east[i] > 0 and has_lab_buckets)
+            else (b_avg_rank[i] / float(max(1, max_rank)))
+            * (penult_x if has_lab_buckets else max_x)
             if buckets[i]
-            else max_x * 0.55
+            else (max_x if has_lab_buckets else max_x * 0.55)
             for i in range(num_b)
         ]
         for _it in range(40):
             for i in range(k_bins):
+                east_target_x = (
+                    max_x
+                    if (not has_lab_buckets or "infinite-research" in b_recipes[i])
+                    else penult_x
+                )
+                rank_span_x = penult_x if has_lab_buckets else max_x
                 num_x = (
                     b_west[i] * 2.2 * 0.0
-                    + b_east[i] * 4.5 * max_x
-                    + 0.8 * ((b_avg_rank[i] / float(max(1, max_rank))) * max_x)
+                    + b_east[i] * 4.5 * east_target_x
+                    + 0.8 * ((b_avg_rank[i] / float(max(1, max_rank))) * rank_span_x)
                 )
                 den_x = b_west[i] * 2.2 + b_east[i] * 4.5 + 0.8
                 for j in range(k_bins):
@@ -1174,7 +1199,12 @@ class AnalyticalPlacer:
         sorted_b = sorted(
             range(num_b),
             key=lambda i: (
-                1 if b_east[i] > 0 else 0,
+                (
+                    2 if ("infinite-research" in b_recipes[i]) else (1 if not buckets[i] else 0),
+                    round(b_east[i], 2),
+                )
+                if has_lab_buckets
+                else (1 if b_east[i] > 0 else 0,),
                 round(x_val[i], 3),
                 -round(b_west[i], 2),
                 round(b_avg_rank[i], 2),
@@ -1191,8 +1221,26 @@ class AnalyticalPlacer:
         def _anchor_cost(i: int, blk: tuple[int, int]) -> float:
             bx, by = blk
             if not buckets[i]:
+                if has_lab_buckets:
+                    edge_pen = 10.0 if bx == 0 else 0.0
+                    return edge_pen + 0.2 * abs(float(bx) - max_x)
                 edge_pen = 10.0 if bx in (0, grid_w - 1) else 0.0
                 return edge_pen + 0.6 * float(by) + 0.4 * abs(float(bx) - max_x * 0.5)
+            if has_lab_buckets:
+                if "infinite-research" in b_recipes[i]:
+                    return b_east[i] * 5.5 * float((grid_w - 1) - bx) + 0.75 * abs(
+                        float(by) - max_x * 0.5
+                    )
+                lab_col_pen = 22.0 if bx == grid_w - 1 else 0.0
+                east_pen = (
+                    b_east[i] * 4.5 * abs(float(max(0, grid_w - 2) - bx)) if b_east[i] > 0 else 0.0
+                )
+                return (
+                    b_west[i] * 1.8 * float(bx)
+                    + east_pen
+                    + lab_col_pen
+                    + 0.45 * abs(float(bx) - x_val[i])
+                )
             return (
                 b_west[i] * 1.8 * float(bx)
                 + b_east[i] * 4.5 * float((grid_w - 1) - bx)
@@ -1226,6 +1274,13 @@ class AnalyticalPlacer:
             w_c = b_contig[i][j]
             if w_c > 0:
                 cost += w_c * float(abs(bx_i - bx_j) + abs(by_i - by_j))
+            if (
+                "infinite-research" in b_recipes[i]
+                and "infinite-research" in b_recipes[j]
+                and bx_i == bx_j
+                and abs(by_i - by_j) < 2
+            ):
+                cost += 18.0 * float(2 - abs(by_i - by_j))
             return cost
 
         def _node_contrib(i: int, blk_i: tuple[int, int], cur_perm: list[tuple[int, int]]) -> float:
@@ -1374,6 +1429,18 @@ class AnalyticalPlacer:
                     rev_adj[u_name].append(hub)
 
         machine_set = set(machine_names)
+        lab_machine_names = [u for u in machine_names if nodes[u].recipe == "infinite-research"]
+        lab_set = set(lab_machine_names)
+        lab_feed_nodes: dict[str, str] = {}
+        if lab_set:
+            for u_name, nd in nodes.items():
+                if (
+                    u_name not in lab_set
+                    and nd.recipe
+                    and any(nxt in lab_set for nxt in fwd_adj.get(u_name, []))
+                ):
+                    lab_feed_nodes[u_name] = f"PIN_OUT:{_sanitize(nd.recipe)}"
+
         mach_adj: dict[str, dict[str, float]] = collections.defaultdict(
             lambda: collections.defaultdict(float)
         )
@@ -1381,9 +1448,12 @@ class AnalyticalPlacer:
         east_out_weight: dict[str, float] = collections.defaultdict(float)
 
         for u in machine_names:
+            if u in lab_set:
+                east_out_weight[u] += 3.5
             down_machs: list[str] = []
             seen_m: set[str] = {u}
             stack_m = list(fwd_adj.get(u, []))
+            feeds_lab = False
             while stack_m:
                 cur = stack_m.pop()
                 if cur in seen_m:
@@ -1392,11 +1462,15 @@ class AnalyticalPlacer:
                 if cur.startswith("PIN_OUT:"):
                     east_out_weight[u] += 2.5
                 elif cur in machine_set:
+                    if cur in lab_set:
+                        feeds_lab = True
                     down_machs.append(cur)
                 elif cur.startswith("MAT_HUB:") or (
                     cur in nodes and nodes[cur].node_type in ("split", "merge", "balancer")
                 ):
                     stack_m.extend(fwd_adj.get(cur, []))
+            if feeds_lab:
+                east_out_weight[u] += 2.5
             if down_machs:
                 wt = 1.0 / max(1.0, math.sqrt(float(len(down_machs))))
                 for v in down_machs:
@@ -1411,7 +1485,7 @@ class AnalyticalPlacer:
                     continue
                 seen_up.add(cur)
                 if cur.startswith("PIN_IN:"):
-                    if is_power_u and grid_w < 8:
+                    if is_power_u and grid_w < 7:
                         west_in_weight[u] = 4.5
                         continue
                     west_in_weight[u] += 6.0 if u in fluid_machines else 2.0
@@ -1437,7 +1511,12 @@ class AnalyticalPlacer:
         # Find reachable PIN_OUT targets for each node to identify dedicated science domains
         reachable_outs: dict[str, set[str]] = {}
         for u in machine_names:
+            if u in lab_set:
+                reachable_outs[u] = {"PIN_OUT:infinite_research"}
+                continue
             outs: set[str] = set()
+            if u in lab_feed_nodes:
+                outs.add(lab_feed_nodes[u])
             seen_u: set[str] = {u}
             stack_u = list(fwd_adj.get(u, []))
             while stack_u:
@@ -1447,8 +1526,11 @@ class AnalyticalPlacer:
                 seen_u.add(cur)
                 if cur.startswith("PIN_OUT:"):
                     outs.add(cur)
-                elif cur.startswith("MAT_HUB:") or (
-                    cur in nodes and nodes[cur].node_type not in ("combinator", "display")
+                elif cur in lab_feed_nodes:
+                    outs.add(lab_feed_nodes[cur])
+                elif cur not in lab_set and (
+                    cur.startswith("MAT_HUB:")
+                    or (cur in nodes and nodes[cur].node_type not in ("combinator", "display"))
                 ):
                     stack_u.extend(fwd_adj.get(cur, []))
             reachable_outs[u] = outs
@@ -1458,14 +1540,18 @@ class AnalyticalPlacer:
             u for u in acyclic_machines if nodes[u].recipe in ("boiler-steam", "steam-power")
         ]
         power_set = set(power_machine_names)
-        non_power_acyclic = [u for u in acyclic_machines if u not in power_set]
+        lab_acyclic = [u for u in acyclic_machines if u in lab_set]
+        non_power_acyclic = [u for u in acyclic_machines if u not in power_set and u not in lab_set]
         solid_machine_names = [u for u in non_power_acyclic if u not in fluid_machines]
         fluid_machine_names = [u for u in non_power_acyclic if u in fluid_machines]
 
+        furnace_prefixes = (
+            ("assembling_machine", "assembling-machine") if lab_set else ("assembling_machine",)
+        )
         furnace_names = [
             u
             for u in solid_machine_names
-            if ("furnace" in nodes[u].macro and not nodes[u].macro.startswith("assembling_machine"))
+            if ("furnace" in nodes[u].macro and not nodes[u].macro.startswith(furnace_prefixes))
             or nodes[u].rank <= 1
         ]
         furnace_set = set(furnace_names)
@@ -1511,10 +1597,11 @@ class AnalyticalPlacer:
                         by_rec_only[rec_k],
                         key=lambda u: (nodes[u].rank, _natural_key(u)),
                     )
-                    if len(rg) <= chunk_sz:
+                    eff_chunk = max(chunk_sz, 16) if (grid_w >= 12 and len(rg) > 160) else chunk_sz
+                    if len(rg) <= eff_chunk:
                         res_grps.append(rg)
                     else:
-                        n_chunks = max(1, math.ceil(len(rg) / float(chunk_sz)))
+                        n_chunks = max(1, math.ceil(len(rg) / float(eff_chunk)))
                         step = math.ceil(len(rg) / float(n_chunks))
                         res_grps.extend(rg[i : i + step] for i in range(0, len(rg), step))
                 return res_grps
@@ -1533,42 +1620,59 @@ class AnalyticalPlacer:
             return res_grps
 
         groups: list[list[str]] = []
+        grp_domains: list[str] = []
         atomic_domain_first_nodes: set[str] = set()
 
+        def _extend_domain_groups(new_grps: list[list[str]], dom_tag: str) -> None:
+            for g in new_grps:
+                if g:
+                    groups.append(g)
+                    grp_domains.append(dom_tag)
+
         # 0. Cyclic feedback SCC groups (if any exist in recipe graph)
-        for scc in sccs:
+        for scc_idx, scc in enumerate(sccs):
             if len(scc) > 1:
                 sorted_scc = _sort_mach_list(scc)
                 scc_area = sum(_node_area(nodes[u]) for u in sorted_scc)
                 if scc_area <= single_core_capacity * 0.55:
-                    groups.append(sorted_scc)
+                    _extend_domain_groups([sorted_scc], f"scc:{scc_idx}")
                     atomic_domain_first_nodes.add(sorted_scc[0])
                 else:
-                    groups.extend(
-                        sorted_scc[i : i + max_grp_len]
-                        for i in range(0, len(sorted_scc), max_grp_len)
+                    _extend_domain_groups(
+                        [
+                            sorted_scc[i : i + max_grp_len]
+                            for i in range(0, len(sorted_scc), max_grp_len)
+                        ],
+                        f"scc:{scc_idx}",
                     )
 
         # 1. Smelting domain groups
-        groups.extend(_chunk_by_recipe(furnace_names, max_grp_len))
+        _extend_domain_groups(_chunk_by_recipe(furnace_names, max_grp_len), "furnace")
 
-        # 2. Fluid & chemical domain groups (fed by West PIN_IN crude-oil, water, coal)
+        # 2. Fluid & chemical domain groups (separate West PIN_IN chemical plants from inner fluid machines)
         if fluid_machine_names:
             fluid_area = sum(_node_area(nodes[u]) for u in fluid_machine_names)
             if fluid_area <= single_core_capacity * 0.55:
-                groups.append(fluid_machine_names)
+                _extend_domain_groups([fluid_machine_names], "fluid")
                 atomic_domain_first_nodes.add(fluid_machine_names[0])
+            elif lab_set:
+                fluid_west = [u for u in fluid_machine_names if west_in_weight.get(u, 0.0) > 0.0]
+                fluid_inner = [u for u in fluid_machine_names if west_in_weight.get(u, 0.0) <= 0.0]
+                if fluid_west:
+                    _extend_domain_groups(_chunk_by_recipe(fluid_west, 10), "fluid_west")
+                if fluid_inner:
+                    _extend_domain_groups(_chunk_by_recipe(fluid_inner, 10), "fluid_inner")
             else:
-                groups.extend(_chunk_by_recipe(fluid_machine_names, 10))
+                _extend_domain_groups(_chunk_by_recipe(fluid_machine_names, 10), "fluid")
 
         # 3. Shared intermediate component domain groups
         if shared_solid:
             shared_area = sum(_node_area(nodes[u]) for u in shared_solid)
             if shared_area <= single_core_capacity * 0.45:
-                groups.append(shared_solid)
+                _extend_domain_groups([shared_solid], "shared")
                 atomic_domain_first_nodes.add(shared_solid[0])
             else:
-                groups.extend(_chunk_by_recipe(shared_solid, max_grp_len))
+                _extend_domain_groups(_chunk_by_recipe(shared_solid, max_grp_len), "shared")
 
         # 4. Dedicated science pack assembly domains
         sorted_out_keys = sorted(
@@ -1582,11 +1686,23 @@ class AnalyticalPlacer:
         for out_k in sorted_out_keys:
             dom_machs = _sort_mach_list(dedicated_by_out[out_k])
             dom_area = sum(_node_area(nodes[u]) for u in dom_machs)
-            if dom_area <= single_core_capacity * 0.48:
-                groups.append(dom_machs)
+            if dom_area <= single_core_capacity * 0.48 and (
+                not lab_set or grid_w < 5 or len(dom_machs) <= 10
+            ):
+                _extend_domain_groups([dom_machs], f"ded:{out_k}")
                 atomic_domain_first_nodes.add(dom_machs[0])
             else:
-                groups.extend(_chunk_by_recipe(dom_machs, max_grp_len))
+                _extend_domain_groups(_chunk_by_recipe(dom_machs, max_grp_len), f"ded:{out_k}")
+
+        # 4b. Lab research domain groups (infinite-research)
+        lab_groups: list[list[str]] = []
+        if lab_acyclic:
+            lab_sorted = _sort_mach_list(lab_acyclic)
+            if grid_w < 5 and len(lab_sorted) <= 8:
+                _extend_domain_groups([lab_sorted], "lab")
+                atomic_domain_first_nodes.add(lab_sorted[0])
+            else:
+                lab_groups.extend(_chunk_by_recipe(lab_sorted, 6))
 
         # 5. Power plant domain groups (boiler-steam and steam-power)
         first_power_grp_idx = len(groups)
@@ -1594,13 +1710,14 @@ class AnalyticalPlacer:
         if power_machine_names:
             power_area = sum(_node_area(nodes[u]) for u in power_machine_names)
             if power_area <= single_core_capacity * 0.55:
-                groups.append(power_machine_names)
+                _extend_domain_groups([power_machine_names], "power")
                 atomic_domain_first_nodes.add(power_machine_names[0])
-            elif grid_w < 8:
-                groups.extend(_chunk_by_recipe(power_machine_names, 10))
+            elif 5 <= grid_w < 7:
+                _extend_domain_groups(_chunk_by_recipe(power_machine_names, 10), "power")
             else:
                 boilers = [u for u in power_machine_names if nodes[u].recipe == "boiler-steam"]
                 engines = [u for u in power_machine_names if nodes[u].recipe == "steam-power"]
+                triad_groups: list[list[str]] = []
                 if boilers and engines:
                     used_eng: set[str] = set()
                     triads: list[list[str]] = []
@@ -1626,19 +1743,20 @@ class AnalyticalPlacer:
                     rem_engs = [e_u for e_u in engines if e_u not in used_eng]
                     if rem_engs and triads:
                         triads[-1].extend(rem_engs)
-                    triad_chunk = 10
+                    triad_chunk = 8 if grid_w < 5 else 10
                     n_p_chunks = max(1, math.ceil(len(triads) / float(triad_chunk)))
                     p_step = math.ceil(len(triads) / float(n_p_chunks))
                     for i in range(0, len(triads), p_step):
                         sub_t = triads[i : i + p_step]
                         b_part = [t[0] for t in sub_t]
                         e_part = [e_u for t in sub_t for e_u in t[1:]]
-                        power_groups.append(b_part + e_part)
+                        triad_groups.append(b_part + e_part)
                 else:
-                    power_groups.extend(_chunk_by_recipe(power_machine_names, 10))
-                if first_power_grp_idx == 0:
-                    groups.extend(power_groups)
-                    power_groups = []
+                    triad_groups.extend(_chunk_by_recipe(power_machine_names, 10))
+                if grid_w < 5 or (first_power_grp_idx == 0 and not lab_groups):
+                    _extend_domain_groups(triad_groups, "power")
+                else:
+                    power_groups.extend(triad_groups)
 
         def _cluster_weight(nd: PlacerNode) -> float:
             return _node_area(nd) + 45.0 * float(len(nd.inputs)) + 40.0 * float(len(nd.outputs))
@@ -1654,23 +1772,28 @@ class AnalyticalPlacer:
             pref.append(pref[-1] + gw)
 
         total_cluster_w = pref[-1]
+        total_lab_w = sum(_cluster_weight(nodes[u]) for lg in lab_groups for u in lg)
         total_power_w = sum(_cluster_weight(nodes[u]) for pg in power_groups for u in pg)
         num_groups = len(groups)
-        n_power_bins = min(len(power_groups), max(0, num_blocks - 1)) if power_groups else 0
-        avail_prod_blocks = max(1, num_blocks - n_power_bins)
+        n_lab_bins = min(len(lab_groups), max(0, num_blocks - 1)) if lab_groups else 0
+        n_power_bins = (
+            min(len(power_groups), max(0, num_blocks - 1 - n_lab_bins)) if power_groups else 0
+        )
+        avail_prod_blocks = max(1, num_blocks - n_lab_bins - n_power_bins)
         if distribute_across_blocks:
             k_bins = min(num_groups, avail_prod_blocks)
         else:
             k_bins = min(
                 num_groups,
                 avail_prod_blocks,
-                max(1, math.ceil((total_cluster_w + total_power_w) / 1400.0)),
+                max(1, math.ceil((total_cluster_w + total_lab_w + total_power_w) / 1400.0)),
             )
 
         assigned: set[str] = set()
         blk_to_seq_idx = {b: idx for idx, b in enumerate(active_blocks)}
 
-        if k_bins <= 1 and not power_groups:
+        grp_recipes = [nodes[grp[0]].recipe if grp else "" for grp in groups]
+        if k_bins <= 1 and not lab_groups and not power_groups:
             blk = active_blocks[0]
             for grp in groups:
                 for u in grp:
@@ -1684,8 +1807,23 @@ class AnalyticalPlacer:
             dp: list[list[tuple[float, float, int]]] = [
                 [inf_tuple] * (num_groups + 1) for _ in range(k_bins + 1)
             ]
+
+            def _seg_penalty(p_idx: int, i_idx: int) -> float:
+                if not lab_set or grid_w < 5 or i_idx <= p_idx + 1:
+                    return 0.0
+                if grp_domains[p_idx] != grp_domains[i_idx - 1]:
+                    return 6000.0
+                n_recs = len(set(grp_recipes[p_idx:i_idx]))
+                if n_recs <= 1:
+                    return 0.0
+                if grp_domains[p_idx] == "furnace":
+                    return 3000.0 * float(n_recs - 1)
+                total_machs = sum(len(groups[g_idx]) for g_idx in range(p_idx, i_idx))
+                rec_pen = 600.0 if total_machs <= 8 else 3000.0
+                return rec_pen * float(n_recs - 1)
+
             for i in range(1, num_groups - k_bins + 2):
-                w = pref[i]
+                w = pref[i] + _seg_penalty(0, i)
                 dp[1][i] = (w, w * w, 0)
             for b_idx in range(2, k_bins + 1):
                 max_i = num_groups - (k_bins - b_idx)
@@ -1695,12 +1833,15 @@ class AnalyticalPlacer:
                         prev_max, prev_sq, _ = dp[b_idx - 1][p]
                         if prev_max == float("inf"):
                             continue
-                        seg_w = pref[i] - pref[p]
+                        seg_w = (pref[i] - pref[p]) + _seg_penalty(p, i)
                         cand_max = prev_max if prev_max >= seg_w else seg_w
                         cand_sq = prev_sq + seg_w * seg_w
-                        if (round(cand_max, 2), round(cand_sq, 2)) < (
-                            round(best_val[0], 2),
-                            round(best_val[1], 2),
+                        if (
+                            (round(cand_max, 2), round(cand_sq, 2))
+                            <= (round(best_val[0], 2), round(best_val[1], 2))
+                            if lab_set
+                            else (round(cand_max, 2), round(cand_sq, 2))
+                            < (round(best_val[0], 2), round(best_val[1], 2))
                         ):
                             best_val = (cand_max, cand_sq, p)
                     dp[b_idx][i] = best_val
@@ -1716,6 +1857,14 @@ class AnalyticalPlacer:
             dp_buckets = [
                 [u for grp in groups[g_start:g_end] for u in grp] for g_start, g_end in seg_bounds
             ]
+            if lab_groups:
+                if len(lab_groups) <= n_lab_bins:
+                    dp_buckets.extend(lab_groups)
+                else:
+                    l_merged: list[list[str]] = [[] for _ in range(n_lab_bins)]
+                    for idx_lg, lg in enumerate(lab_groups):
+                        l_merged[min(n_lab_bins - 1, idx_lg)].extend(lg)
+                    dp_buckets.extend(l_merged)
             if power_groups:
                 if len(power_groups) <= n_power_bins:
                     dp_buckets.extend(power_groups)
@@ -2000,12 +2149,19 @@ class AnalyticalPlacer:
                             + (0.35 * bay_counts[b] if is_mat else 0.0)
                             + (
                                 0.5 * float(b[0])
-                                if (grid_w >= 5 and is_bal and s_name in pin_in_nodes)
+                                if (
+                                    grid_w >= 5
+                                    and grid_w != 7
+                                    and is_bal
+                                    and s_name in pin_in_nodes
+                                )
                                 else 0.0
                             ),
                             3,
                         ),
-                        b[0] if (grid_w >= 5 and is_bal and s_name in pin_in_nodes) else 0,
+                        b[0]
+                        if (grid_w >= 5 and grid_w != 7 and is_bal and s_name in pin_in_nodes)
+                        else 0,
                         -counts[b],
                         bay_counts[b] if is_mat else block_area[b],
                         blk_to_seq_idx[b],
@@ -2988,17 +3144,27 @@ class AnalyticalPlacer:
                 gap_w = 4 if paired_power_cols else 2
                 return sum(max(nd.width for nd in col) for col in cols) + gap_w * (len(cols) - 1)
 
+            fold_trees = getattr(self, "_active_grid_w", 1) == 7
             for allow_cross in (False, True):
                 while (
                     len(expanded_cols) > 1
                     and (
-                        _total_hard_w(expanded_cols) if allow_cross else _total_min_w(expanded_cols)
+                        (
+                            _total_min_w(expanded_cols)
+                            if fold_trees
+                            else _total_hard_w(expanded_cols)
+                        )
+                        if allow_cross
+                        else _total_min_w(expanded_cols)
                     )
                     > avail_w
                 ):
                     best_idx = -1
                     best_key: tuple[int, int] | None = None
+                    need_hard = _total_hard_w(expanded_cols) > avail_w
                     for idx in range(len(expanded_cols) - 1):
+                        types_a = {nd.node_type for nd in expanded_cols[idx]}
+                        types_b = {nd.node_type for nd in expanded_cols[idx + 1]}
                         if not allow_cross:
                             names_a = {nd.name for nd in expanded_cols[idx]}
                             names_b = {nd.name for nd in expanded_cols[idx + 1]}
@@ -3013,6 +3179,13 @@ class AnalyticalPlacer:
                             )
                             if has_cross:
                                 continue
+                        elif fold_trees and not need_hard:
+                            is_tree_pair = (
+                                types_a <= {"split", "balancer"}
+                                and types_b <= {"split", "balancer"}
+                            ) or (types_a == {"merge"} and types_b == {"merge"})
+                            if not is_tree_pair:
+                                continue
                         merged_cand = sorted(
                             expanded_cols[idx] + expanded_cols[idx + 1],
                             key=lambda nd: (round(nd.cont_y, 2), _natural_key(nd.name)),
@@ -3020,8 +3193,6 @@ class AnalyticalPlacer:
                         comb_h = _col_req_h(merged_cand)
                         if comb_h > usable_h:
                             continue
-                        types_a = {nd.node_type for nd in expanded_cols[idx]}
-                        types_b = {nd.node_type for nd in expanded_cols[idx + 1]}
                         cand_key = (0 if types_a == types_b else 1, comb_h)
                         if best_key is None or cand_key < best_key:
                             best_key = cand_key
@@ -3256,7 +3427,7 @@ class AnalyticalPlacer:
                         ]
                         snk_ys = [
                             node_map[s_name].y + s_dy - src_dy
-                            for s_name, src_dy, s_dy in sinks_of.get(nd.name, [])
+                            for s_name, src_dy, s_dy in sinks_of[nd.name]
                             if s_name in node_map
                         ]
                         if drv_ys and snk_ys:
@@ -3319,6 +3490,7 @@ class AnalyticalPlacer:
         distribute_across_blocks: bool = False,
     ) -> AnalyticalPlacementResult:
         """Run analytical placement on a synthesized Netlist object."""
+        self._active_grid_w = max(1, grid_w) if use_chassis else 1
         nodes, edges, _ins, _outs = self.build_graph_from_netlist(
             nl, merge_plans, split_plans, balancer_plans
         )
@@ -3347,6 +3519,7 @@ class AnalyticalPlacer:
         distribute_across_blocks: bool = False,
     ) -> AnalyticalPlacementResult:
         """Run analytical placement on netlist_data and optional def_data dictionaries."""
+        self._active_grid_w = max(1, grid_w) if use_chassis else 1
         nodes, edges, _ins, _outs = self.build_graph_from_data(netlist_data, def_data)
         return self._place_graph(
             nodes,
@@ -3373,6 +3546,7 @@ class AnalyticalPlacer:
         distribute_across_blocks: bool = False,
     ) -> AnalyticalPlacementResult:
         """Execute the 4-stage analytical placement and directed legalization pipeline."""
+        self._active_grid_w = max(1, grid_w) if use_chassis else 1
         self._compute_flow_depths_and_columns(nodes, edges, use_chassis=use_chassis)
 
         if use_chassis:
@@ -3395,7 +3569,9 @@ class AnalyticalPlacer:
             )
 
             if getattr(self, "_last_rewired_ports", None):
-                self._compute_flow_depths_and_columns(nodes, edges, use_chassis=use_chassis)
+                self._compute_flow_depths_and_columns(
+                    nodes, edges, use_chassis=(use_chassis and gw != 7)
+                )
 
             for (bx, by), inst_names in block_bins.items():
                 blk_nodes = [nodes[name] for name in inst_names]
@@ -3730,7 +3906,8 @@ class AnalyticalPlacer:
             grids = [(1, 1), (2, 2), (3, 3)]
 
         chassis_results: dict[tuple[int, int], AnalyticalPlacementResult] = {}
-        if extra_chassis_grids and len(getattr(nl, "outputs", [])) >= 3:
+        has_labs = any(c.get("machine") == "lab" for c in getattr(nl, "cells", {}).values())
+        if extra_chassis_grids and (len(getattr(nl, "outputs", [])) >= 3 or has_labs):
             gw0, gh0 = grids[0]
             first_ch = self.place_netlist(
                 nl,

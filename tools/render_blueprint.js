@@ -21,11 +21,22 @@ if (fs.existsSync(bpInput)) {
     bpStr = fs.readFileSync(bpInput, 'utf8').trim();
 }
 
+let receivedPngBuffer = null;
 const server = http.createServer({ maxHeaderSize: 32 * 1024 * 1024 }, (req, res) => {
     const parsedUrl = new URL(req.url, 'http://127.0.0.1');
     if (parsedUrl.pathname === '/corsproxy') {
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end(bpStr);
+        return;
+    }
+    if (parsedUrl.pathname === '/upload' && req.method === 'POST') {
+        const chunks = [];
+        req.on('data', chunk => chunks.push(chunk));
+        req.on('end', () => {
+            receivedPngBuffer = Buffer.concat(chunks);
+            res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+            res.end('ok');
+        });
         return;
     }
     let filePath = path.join(distDir, parsedUrl.pathname === '/' ? 'index.html' : parsedUrl.pathname);
@@ -67,6 +78,7 @@ const browser = await puppeteer.launch({
 try {
     const page = await browser.newPage();
     await page.evaluateOnNewDocument(() => {
+        console.log = () => {};
         const origError = console.error;
         console.error = (...args) => {
             window.__lastError = args.map(a => {
@@ -102,7 +114,7 @@ try {
         throw new Error(`FBE page error: ${status.error}`);
     }
 
-    const dataUrl = await page.evaluate(async () => {
+    const exported = await page.evaluate(async (uploadUrl) => {
         const bpc = window.__BPC;
         if (bpc) {
             const stack = [bpc];
@@ -119,21 +131,17 @@ try {
             }
         }
         const blob = await window.editor.getPicture();
-        if (!blob) return null;
-        return new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.readAsDataURL(blob);
-        });
-    });
+        if (!blob) return false;
+        const resp = await fetch(uploadUrl, { method: 'POST', body: blob });
+        return resp.ok;
+    }, `http://127.0.0.1:${port}/upload`);
 
-    if (!dataUrl) {
+    if (!exported || !receivedPngBuffer) {
         throw new Error('Failed to export blueprint picture: editor.getPicture() returned null');
     }
 
-    const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
     fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-    fs.writeFileSync(outPath, Buffer.from(base64Data, 'base64'));
+    fs.writeFileSync(outPath, receivedPngBuffer);
     console.log(`Rendered blueprint saved to ${outPath} (${fs.statSync(outPath).size} bytes)`);
 } finally {
     await browser.close();

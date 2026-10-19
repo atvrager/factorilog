@@ -307,13 +307,204 @@ def _compress_straight_pipes(
         placement.entities[:] = [e for e in placement.entities if id(e) not in to_remove_ids]
 
 
+def _shrink_underground_pipe_spans(
+    placement: PlacementResult,
+    protected_tiles: set[tuple[int, int]],
+    max_segment_extent: int,
+) -> None:
+    """Unroll unobstructed sections of underground pipe-to-ground spans in overextended components."""
+    adj, tile_map, _pipe_entities = build_conduit_graph(placement.entities)
+    components = find_fluid_components(adj)
+    overextended_nodes: set[Any] = set()
+    for comp in components:
+        ext, _, _, _, _ = component_extent(comp)
+        if ext > float(max_segment_extent):
+            overextended_nodes.update(comp)
+    if not overextended_nodes:
+        return
+
+    max_span = get_underground_span("pipe-to-ground", 10)
+    p2gs = [e for e in placement.entities if e.get("name") == "pipe-to-ground"]
+    matched: set[int] = set()
+    pairs: list[
+        tuple[
+            dict[str, Any],
+            dict[str, Any],
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            set[tuple[int, int]],
+        ]
+    ] = []
+    for p in p2gs:
+        if id(p) in matched:
+            continue
+        pos = p.get("position", {})
+        ux = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
+        uy = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
+        d = int(p.get("direction", DIRECTION_NORTH))
+        ug_d = OPPOSITE_DIR.get(d, d)
+        dx, dy = DIR_STEPS.get(ug_d, (0, 0))
+        for span in range(1, max_span + 1):
+            chk_pos = (ux + dx * span, uy + dy * span)
+            found = next(
+                (
+                    c
+                    for c in tile_map.get(chk_pos, [])
+                    if c.get("name") == "pipe-to-ground"
+                    and int(c.get("direction", DIRECTION_NORTH)) == ug_d
+                    and id(c) not in matched
+                ),
+                None,
+            )
+            if found is not None:
+                matched.add(id(p))
+                matched.add(id(found))
+                span_set = {(ux + dx * s, uy + dy * s) for s in range(1, span)}
+                pairs.append((p, found, ux, uy, d, ug_d, dx, dy, span, span_set))
+                break
+
+    def _has_perp_fluid(tx: int, ty: int, step_dx: int, step_dy: int) -> bool:
+        for nbx, nby in ((tx + step_dy, ty + step_dx), (tx - step_dy, ty - step_dx)):
+            if (nbx, nby) in protected_tiles:
+                return True
+            if any(
+                e.get("name") in ("pipe", "pipe-to-ground", "pump")
+                for e in tile_map.get((nbx, nby), [])
+            ):
+                return True
+        return False
+
+    for idx, (ent_u, ent_v, ux, uy, _d, _ug_d, dx, dy, span, _span_set) in enumerate(pairs):
+        if span < 2 or ("pipe-to-ground", ux, uy) not in overextended_nodes:
+            continue
+        other_ug_tiles: set[tuple[int, int]] = set()
+        for j, item_j in enumerate(pairs):
+            if j != idx:
+                other_ug_tiles.update(item_j[9])
+                other_ug_tiles.add((item_j[2], item_j[3]))
+                other_ug_tiles.add(
+                    (
+                        item_j[2] + item_j[6] * item_j[8],
+                        item_j[3] + item_j[7] * item_j[8],
+                    )
+                )
+
+        can_be_pipe: list[bool] = []
+        can_be_hood: list[bool] = []
+        for s in range(span + 1):
+            tx, ty = ux + dx * s, uy + dy * s
+            pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
+            if s in (0, span):
+                can_be_hood.append(True)
+                can_be_pipe.append(
+                    (tx, ty) not in protected_tiles and not _has_perp_fluid(tx, ty, dx, dy)
+                )
+            else:
+                is_free = (
+                    pkey not in placement.occupied_positions
+                    and (tx, ty) not in tile_map
+                    and (tx, ty) not in protected_tiles
+                )
+                can_be_hood.append(is_free and (tx, ty) not in other_ug_tiles)
+                can_be_pipe.append(is_free and not _has_perp_fluid(tx, ty, dx, dy))
+
+        if all(can_be_pipe):
+            ent_u["name"] = "pipe"
+            ent_u.pop("direction", None)
+            ent_v["name"] = "pipe"
+            ent_v.pop("direction", None)
+            for s in range(1, span):
+                tx, ty = ux + dx * s, uy + dy * s
+                pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
+                new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
+                placement.entities.append(new_p)
+                placement.occupied_positions.add(pkey)
+                placement.grid_entities[pkey] = new_p
+                tile_map.setdefault((tx, ty), []).append(new_p)
+            pairs[idx] = (ent_u, ent_v, ux, uy, _d, _ug_d, dx, dy, 0, set())
+            continue
+
+        s_u = 0
+        for s in range(1, span):
+            if all(can_be_pipe[k] for k in range(s)) and can_be_hood[s]:
+                s_u = s
+            else:
+                break
+
+        s_v = span
+        for s in range(span - 1, s_u, -1):
+            if all(can_be_pipe[k] for k in range(s + 1, span + 1)) and can_be_hood[s]:
+                s_v = s
+            else:
+                break
+
+        if s_u > 0 or s_v < span:
+            old_u_pos = (ux, uy)
+            old_v_pos = (ux + dx * span, uy + dy * span)
+            new_u_pos = (ux + dx * s_u, uy + dy * s_u)
+            new_v_pos = (ux + dx * s_v, uy + dy * s_v)
+
+            if s_u > 0:
+                new_uk = (round(new_u_pos[0] + 0.5, 2), round(new_u_pos[1] + 0.5, 2))
+                if old_u_pos in tile_map and ent_u in tile_map[old_u_pos]:
+                    tile_map[old_u_pos].remove(ent_u)
+                ent_u["position"] = {"x": new_uk[0], "y": new_uk[1]}
+                placement.occupied_positions.add(new_uk)
+                placement.grid_entities[new_uk] = ent_u
+                tile_map.setdefault(new_u_pos, []).append(ent_u)
+                for s in range(s_u):
+                    tx, ty = ux + dx * s, uy + dy * s
+                    pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
+                    new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
+                    placement.entities.append(new_p)
+                    placement.occupied_positions.add(pkey)
+                    placement.grid_entities[pkey] = new_p
+                    tile_map.setdefault((tx, ty), []).append(new_p)
+
+            if s_v < span:
+                new_vk = (round(new_v_pos[0] + 0.5, 2), round(new_v_pos[1] + 0.5, 2))
+                if old_v_pos in tile_map and ent_v in tile_map[old_v_pos]:
+                    tile_map[old_v_pos].remove(ent_v)
+                ent_v["position"] = {"x": new_vk[0], "y": new_vk[1]}
+                placement.occupied_positions.add(new_vk)
+                placement.grid_entities[new_vk] = ent_v
+                tile_map.setdefault(new_v_pos, []).append(ent_v)
+                for s in range(s_v + 1, span + 1):
+                    tx, ty = ux + dx * s, uy + dy * s
+                    pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
+                    new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
+                    placement.entities.append(new_p)
+                    placement.occupied_positions.add(pkey)
+                    placement.grid_entities[pkey] = new_p
+                    tile_map.setdefault((tx, ty), []).append(new_p)
+
+            new_span_set = {(ux + dx * s, uy + dy * s) for s in range(s_u + 1, s_v)}
+            pairs[idx] = (
+                ent_u,
+                ent_v,
+                new_u_pos[0],
+                new_u_pos[1],
+                _d,
+                _ug_d,
+                dx,
+                dy,
+                s_v - s_u,
+                new_span_set,
+            )
+
+
 def insert_pipeline_pumps(
     placement: PlacementResult,
     routes: RouteResult,
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
     max_segment_extent: int = 300,
-    max_pumps: int = 50,
+    max_pumps: int = 200,
 ) -> int:
     """Insert powered inline pumps to split pipelines exceeding max_segment_extent.
 
@@ -345,6 +536,7 @@ def insert_pipeline_pumps(
             elif pin.get("direction") == "OUTPUT":
                 fluid_sink_tiles.add((px, py))
 
+    unused_passthrough_tiles: set[tuple[int, int]] = set()
     for comp in def_data.get("components", []):
         cname = comp["name"]
         inst = inst_map.get(cname, {})
@@ -352,6 +544,11 @@ def insert_pipeline_pumps(
         cell = cell_map.get(cell_id, {})
         gx = comp["x"] * scale
         gy = comp["y"] * scale
+        machine_type = cell.get("machine", "")
+        if machine_type == "boiler":
+            unused_passthrough_tiles.add((math.floor(gx + 1), math.floor(gy + 4)))
+        elif machine_type == "steam-engine":
+            unused_passthrough_tiles.add((math.floor(gx + 2), math.floor(gy + 6)))
 
         for port in cell.get("outputs", []):
             if port in fluids or any(f in port for f in fluids):
@@ -365,7 +562,9 @@ def insert_pipeline_pumps(
                 ax, ay = geom["inserter_pos"]
                 fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
 
-    protected_tiles: set[tuple[int, int]] = set(fluid_source_tiles) | set(fluid_sink_tiles)
+    protected_tiles: set[tuple[int, int]] = (
+        set(fluid_source_tiles) | set(fluid_sink_tiles) | unused_passthrough_tiles
+    )
     for px_f, py_f in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
         protected_tiles.add((math.floor(px_f), math.floor(py_f)))
     macro_fp = def_data.get("_macro_floorplan")
@@ -373,6 +572,8 @@ def insert_pipeline_pumps(
         for bport in getattr(macro_fp, "block_ports", []):
             protected_tiles.add((int(bport.core_pos[0]), int(bport.core_pos[1])))
             protected_tiles.add((int(bport.channel_pos[0]), int(bport.channel_pos[1])))
+
+    _shrink_underground_pipe_spans(placement, protected_tiles, max_segment_extent)
 
     for _iteration in range(max_pumps):
         adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)

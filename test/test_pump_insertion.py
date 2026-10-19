@@ -216,6 +216,66 @@ class TestPumpInsertion(unittest.TestCase):
         self.assertEqual(len(pumps), 1)
         self.assertEqual(pumps[0]["direction"], DIRECTION_SOUTH)
 
+    def test_underground_pipe_chain_pump_insertion(self) -> None:
+        """Overextended pipeline of pipe-to-ground hops unrolls unobstructed spans and inserts a pump."""
+        entities: list[dict[str, object]] = [
+            {"name": "pipe", "position": {"x": 10.5, "y": 0.5}},
+        ]
+        for hop in range(38):
+            y_start = 1 + hop * 10
+            y_end = y_start + 9
+            entities.append(
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": 10.5, "y": float(y_start) + 0.5},
+                    "direction": DIRECTION_NORTH,
+                }
+            )
+            entities.append(
+                {
+                    "name": "pipe-to-ground",
+                    "position": {"x": 10.5, "y": float(y_end) + 0.5},
+                    "direction": DIRECTION_SOUTH,
+                }
+            )
+        occ = {
+            (10.5, round(float(e["position"]["y"]), 2))  # type: ignore[index]
+            for e in entities
+        }
+        grid = {
+            (10.5, round(float(e["position"]["y"]), 2)): e  # type: ignore[index]
+            for e in entities
+        }
+        placement = PlacementResult(
+            entities=entities,  # type: ignore[arg-type]
+            occupied_positions=occ,
+            grid_entities=grid,  # type: ignore[arg-type]
+            inst_to_entity={},
+            fluids={"water"},
+            has_fluid_metadata=True,
+        )
+        routes = RouteResult(
+            net_surface_tiles={"water": {pos: DIRECTION_SOUTH for pos in occ}},
+            tile_to_nets={pos: {"water"} for pos in occ},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles=set(),
+            valid_input_pins=set(),
+            valid_output_pins=set(),
+        )
+        def_data = {
+            "units": 1000,
+            "pins": [{"name": "water", "direction": "INPUT", "x": 10500, "y": 500}],
+        }
+        netlist_data = {"fluids": ["water"]}
+
+        count = insert_pipeline_pumps(
+            placement, routes, def_data, netlist_data, max_segment_extent=250
+        )
+        self.assertGreaterEqual(count, 1)
+        checker = BeltDrcChecker()
+        violations = checker.check_entities(placement.entities)
+        self.assertEqual([v for v in violations if v.code == "DRC-16"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

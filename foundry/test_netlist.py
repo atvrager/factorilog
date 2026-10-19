@@ -182,6 +182,45 @@ class NetlistTest(unittest.TestCase):
             errors = [d for d in all_diags if d.isError if hasattr(d, "isError")]
             self.assertEqual(errors, [], _report(compilation.sourceManager, errors))
 
+    def test_seven_pack_lab_netlist(self) -> None:
+        """Full 7-pack science demand feeds 18 labs and emits 0 module outputs."""
+        packs = [
+            solve.name_of(e)
+            for e in solve.Data.ingredients_of(self.data.recipes["infinite-research"])
+        ]
+        full_demand = dict.fromkeys(packs, 60.0)
+        nl_full = netlist.build(self.data, full_demand, self.allowed)
+        self.assertEqual(nl_full.outputs, [])
+        labs = [i for i in nl_full.instances if i.recipe == "infinite-research"]
+        self.assertEqual(len(labs), 18)
+        merge_plans = netlist.merge_plans_of(nl_full)
+        split_plans = netlist.split_plans_of(nl_full)
+        bal_plans = netlist.balancer_plans_of(nl_full)
+        for pack in packs:
+            self.assertIn(pack, split_plans)
+            self.assertEqual(len(split_plans[pack]), 17)
+        ranks_tcl = netlist.emit_ranks_tcl(nl_full, merge_plans, split_plans, bal_plans)
+        self.assertIn("u_infinite_research_18", ranks_tcl)
+        from analytical_placer import AnalyticalPlacer
+
+        placer = AnalyticalPlacer()
+        auto_w, auto_h = placer.compute_auto_chassis_grid(
+            nl_full,
+            merge_plans=merge_plans,
+            split_plans=split_plans,
+            balancer_plans=bal_plans,
+        )
+        self.assertEqual((auto_w, auto_h), (12, 12))
+        if HAVE_PYSLANG:
+            v_text = netlist.emit_verilog(nl_full, merge_plans, split_plans, bal_plans)
+            c_text = netlist.emit_cells_v(nl_full)
+            compilation = Compilation()
+            compilation.addSyntaxTree(SyntaxTree.fromText(c_text))
+            compilation.addSyntaxTree(SyntaxTree.fromText(v_text))
+            all_diags = list(compilation.getAllDiagnostics())
+            errors = [d for d in all_diags if d.isError if hasattr(d, "isError")]
+            self.assertEqual(errors, [], _report(compilation.sourceManager, errors))
+
 
 def _report(manager: Any, diags: list) -> str:
     if not diags:

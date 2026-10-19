@@ -1349,10 +1349,26 @@ def build_entities(
                 unreached_nums -= reached
 
     # 8. Physical Design Rule Check (DRC)
+    def _net_fluid_comm(n: str) -> str | None:
+        c = n.split("__")[0]
+        if c in placement.fluids:
+            return c
+        c_dash = c.replace("_", "-")
+        if c_dash in placement.fluids:
+            return c_dash
+        return None
+
     remaining_conflicts = [
         pos
         for pos, nets in routes.tile_to_nets.items()
-        if len(nets) > 1 or pos in routes.adjacent_fluid_conflicts
+        if (
+            len(nets) > 1
+            and not (
+                all(_net_fluid_comm(n) is not None for n in nets)
+                and len({_net_fluid_comm(n) for n in nets}) == 1
+            )
+        )
+        or pos in routes.adjacent_fluid_conflicts
     ]
     drc_in_pins = [
         (pin["x"] * scale, pin["y"] * scale)

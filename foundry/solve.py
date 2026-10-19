@@ -44,6 +44,7 @@ MACHINE_PREFERENCE = [
     "rocket-silo",
     "boiler",
     "steam-engine",
+    "lab",
 ]
 
 # Items that the ground of one planet supplies without a recipe.
@@ -145,7 +146,14 @@ class Data:
         # Every prototype type, for the tools that place entities.
         self.prototypes = raw
         self.machines = {}
-        for proto_type in ("assembling-machine", "furnace", "rocket-silo", "boiler", "generator"):
+        for proto_type in (
+            "assembling-machine",
+            "furnace",
+            "rocket-silo",
+            "boiler",
+            "generator",
+            "lab",
+        ):
             for m_name, m_proto in raw.get(proto_type, {}).items():
                 self.machines[m_name] = dict(m_proto)
         self.drills = raw.get("mining-drill", {})
@@ -267,6 +275,48 @@ class Data:
                 if fixed in self.unlocked_by:
                     self.unlocked_by[name] = self.unlocked_by[fixed]
 
+        # Synthesize infinite-research recipe dynamically from lab and technology prototypes.
+        lab_proto = raw.get("lab", {}).get("lab")
+        if lab_proto:
+            base_lab_speed = float(lab_proto.get("researching_speed", 1.0))
+            self.machines["lab"]["crafting_categories"] = ["lab-research"]
+            self.machines["lab"]["crafting_speed"] = base_lab_speed * (
+                1.0 + self.lab_speed_modifier()
+            )
+            nauvis_allowed = self.allowed_recipes(["nauvis"])
+            nauvis_producible = set(PLANET_RAW["nauvis"])
+            for r_name in nauvis_allowed:
+                for entry in self.results_of(self.recipes[r_name]):
+                    nauvis_producible.add(name_of(entry))
+            lab_inputs = set(lab_proto.get("inputs", [])) & nauvis_producible
+            best_inf_ings = []
+            max_inf_time = 0.0
+            for tech in self.techs.values():
+                if tech.get("max_level") != "infinite":
+                    continue
+                unit = tech.get("unit")
+                if not unit:
+                    continue
+                ings = unit.get("ingredients", [])
+                if not all(name_of(e) in lab_inputs for e in ings):
+                    continue
+                unit_time = float(unit.get("time", 60.0))
+                if unit_time > max_inf_time:
+                    max_inf_time = unit_time
+                if len(ings) > len(best_inf_ings):
+                    best_inf_ings = [
+                        {"type": "item", "name": name_of(e), "amount": amount_of(e)} for e in ings
+                    ]
+            if best_inf_ings and max_inf_time > 0.0:
+                self.recipes["infinite-research"] = {
+                    "type": "recipe",
+                    "name": "infinite-research",
+                    "categories": ["lab-research"],
+                    "energy_required": max_inf_time,
+                    "ingredients": best_inf_ings,
+                    "results": [],
+                }
+
     @staticmethod
     def ingredients_of(recipe):
         return recipe.get("ingredients", [])
@@ -308,6 +358,33 @@ class Data:
 
         walk(target)
         return order
+
+    def lab_speed_modifier(self, unlocked_by=None):
+        """Sum laboratory-speed technology modifiers unlocked within closure."""
+        if unlocked_by is not None:
+            tech_names = self.tech_order(unlocked_by)
+        else:
+            tech_names = [
+                name for name, tech in self.techs.items() if tech.get("max_level") != "infinite"
+            ]
+        bonus = 0.0
+        for name in tech_names:
+            tech = self.techs.get(name, {})
+            for effect in tech.get("effects", []):
+                if effect.get("type") == "laboratory-speed":
+                    bonus += float(effect.get("modifier", 0.0))
+        return bonus
+
+    def is_full_science_demand(self, demand):
+        """Return True when demand includes all science packs of infinite-research."""
+        inf_recipe = self.recipes.get("infinite-research")
+        if not inf_recipe:
+            return False
+        inf_packs = {name_of(e) for e in self.ingredients_of(inf_recipe)}
+        if not inf_packs:
+            return False
+        positive_demands = {k for k, v in demand.items() if v > 0}
+        return inf_packs.issubset(positive_demands)
 
     def allowed_recipes(self, planets, unlocked_by=None):
         """Recipes the plan may use.
@@ -358,6 +435,12 @@ def closure(data, demand, allowed):
         chosen["steam-power"] = data.recipes["steam-power"]
         chosen["boiler-steam"] = data.recipes["boiler-steam"]
         items.update(["steam", "water", "coal"])
+    if (
+        "infinite-research" in allowed
+        and "infinite-research" in data.recipes
+        and data.is_full_science_demand(demand)
+    ):
+        chosen["infinite-research"] = data.recipes["infinite-research"]
     changed = True
     while changed:
         changed = False
@@ -495,8 +578,20 @@ def solve_rates(data, demand, allowed, extra_power_watts=0.0):
     # net @ x - surplus = demand, x >= 0, surplus >= 0
     rows = len(item_list)
     cols = len(names) + len(raw_names)
+    effective_demand = dict(demand)
+    bounds: list[tuple[float, float | None]] = [(0.0, None)] * (cols + rows)
+    if "infinite-research" in recipes and data.is_full_science_demand(demand):
+        inf_recipe = recipes["infinite-research"]
+        inf_ings = {name_of(e): amount_of(e) for e in data.ingredients_of(inf_recipe)}
+        if inf_ings:
+            research_rate = min(effective_demand[p] / amt for p, amt in inf_ings.items())
+            col_inf = names.index("infinite-research")
+            bounds[col_inf] = (research_rate, research_rate)
+            for p, amt in inf_ings.items():
+                effective_demand[p] = max(0.0, effective_demand[p] - research_rate * amt)
+
     a_eq = np.hstack([net, -np.eye(rows)])
-    b_eq = np.array([demand.get(item, 0.0) for item in item_list])
+    b_eq = np.array([effective_demand.get(item, 0.0) for item in item_list])
 
     a_ub = None
     b_ub = None
@@ -535,7 +630,7 @@ def solve_rates(data, demand, allowed, extra_power_watts=0.0):
         b_ub=b_ub,
         A_eq=a_eq,
         b_eq=b_eq,
-        bounds=(0, None),
+        bounds=bounds,
         method="highs",
     )
     if not result.success:
@@ -653,11 +748,18 @@ def check_balance(data, demand, rates, raw):
             prod[name_of(entry)] += amount_of(entry) * rate
         for entry in data.ingredients_of(recipe):
             cons[name_of(entry)] += amount_of(entry) * rate
+    effective_demand = dict(demand)
+    if "infinite-research" in rates and "infinite-research" in data.recipes:
+        r_inf = rates["infinite-research"]
+        for entry in data.ingredients_of(data.recipes["infinite-research"]):
+            p = name_of(entry)
+            if p in effective_demand:
+                effective_demand[p] = max(0.0, effective_demand[p] - r_inf * amount_of(entry))
     bad = []
     for item in set(prod) | set(cons):
         if item in raw:
             continue
-        gap = prod[item] - cons[item] - demand.get(item, 0.0)
+        gap = prod[item] - cons[item] - effective_demand.get(item, 0.0)
         if abs(gap) > 1e-6:
             bad.append((item, prod[item], cons[item], gap))
     print(f"balance check: {len(bad)} items off; {len(raw)} raw items extracted")

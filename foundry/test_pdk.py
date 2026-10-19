@@ -184,6 +184,56 @@ class PdkSmokeTest(unittest.TestCase):
         self.assertEqual(by_name["steam-engine"]["position"], {"x": 13.5, "y": 2.5})
         self.assertEqual(by_name["pipe"]["position"], {"x": 1.5, "y": 0.5})
 
+    def test_lab_four_sided_gaa_cell(self) -> None:
+        import lef
+        import placement
+
+        cell = self.pdk.cell("lab", "infinite-research")
+        assert cell is not None
+        self.assertEqual(cell["width"], 5)
+        self.assertEqual(cell["height"], 5)
+        self.assertEqual(cell["machine_width"], 3)
+        self.assertEqual(cell["machine_height"], 3)
+        self.assertEqual(len(cell["inputs"]), 7)
+        self.assertEqual(cell["outputs"], [])
+        self.assertEqual(set(cell["port_faces"].values()), {"W", "N", "S", "E"})
+        inserter_coords = set()
+        approach_coords = set()
+        for port in cell["inputs"]:
+            geom = lef.get_macro_port_geometry(cell, port, is_output=False)
+            inserter_coords.add(geom["inserter_pos"])
+            approach_coords.add(geom["approach_pos"])
+        self.assertEqual(len(inserter_coords), 7)
+        self.assertEqual(len(approach_coords), 7)
+        res = placement.place_components(
+            {
+                "units": 1000,
+                "components": [
+                    {
+                        "name": "u_lab_1",
+                        "macro": "lab_infinite_research",
+                        "x": 0,
+                        "y": 0,
+                        "orient": "N",
+                    }
+                ],
+            },
+            {
+                "cells": {"lab.infinite-research": cell},
+                "instances": [
+                    {
+                        "name": "u_lab_1",
+                        "cell": "lab.infinite-research",
+                        "recipe": "infinite-research",
+                    }
+                ],
+            },
+        )
+        by_name = {e["name"]: e for e in res.entities}
+        self.assertIn("lab", by_name)
+        self.assertNotIn("recipe", by_name["lab"])
+        self.assertEqual(by_name["lab"]["position"], {"x": 2.5, "y": 2.5})
+
     def test_belt_tiers(self) -> None:
         tiers = self.pdk.belt_tiers()
         self.assertEqual(len(tiers), 3)

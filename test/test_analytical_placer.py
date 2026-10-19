@@ -349,7 +349,7 @@ class TestAnalyticalPlacer(unittest.TestCase):
                     "chemical-science-pack": 60.0,
                     "production-science-pack": 60.0,
                 },
-                (6, 6),
+                (7, 7),
             ),
         ]
         for demand, exp_grid in expected:

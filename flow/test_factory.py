@@ -269,10 +269,39 @@ local function get_machine_recipe(m, force)
     return nil, m.name
 end
 
+local function ensure_infinite_research_queued(surface, force)
+    if not (surface and force and force.valid) then return end
+    if surface.count_entities_filtered{{type = "lab"}} == 0 then return end
+    if force.current_research then return end
+    local best_tech = nil
+    local best_count = -1
+    for name, tech in pairs(force.technologies) do
+        local proto = tech.prototype
+        if proto and proto.max_level and proto.max_level >= 4000000000 then
+            local ings = proto.research_unit_ingredients or {{}}
+            if #ings > best_count or (#ings == best_count and (not best_tech or name < best_tech)) then
+                best_count = #ings
+                best_tech = name
+            end
+        end
+    end
+    if best_tech then
+        force.technologies[best_tech].researched = false
+        force.add_research(best_tech)
+    end
+end
+
 local function check_all_pass_criteria(surface, stats)
     for _, it in ipairs(expected_items) do
         if stats.get_input_count(it) < min_produced then
             return false
+        end
+    end
+    if surface.count_entities_filtered{{type = "lab"}} > 0 then
+        for _, it in ipairs(expected_items) do
+            if stats.get_output_count(it) == 0 then
+                return false
+            end
         end
     end
     if not machine_cache then
@@ -303,7 +332,7 @@ local function check_all_pass_criteria(surface, stats)
     if ratio < min_active_ratio then
         return false
     end
-    local check_types = {{"assembling-machine", "furnace", "rocket-silo", "inserter", "lamp", "radar", "pump"}}
+    local check_types = {{"assembling-machine", "furnace", "rocket-silo", "lab", "inserter", "lamp", "radar", "pump"}}
     for _, t in ipairs(check_types) do
         for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
             if ent.electric_buffer_size and ent.electric_buffer_size > 0 then
@@ -327,6 +356,7 @@ script.on_event(defines.events.on_tick, function(event)
     local early_pass = false
     if event.tick > 0 and event.tick % 600 == 0 then
         local surface = game.surfaces[1]
+        ensure_infinite_research_queued(surface, game.forces.player)
         local stats = game.forces.player.get_item_production_statistics(surface)
         for iname, icount in pairs(stats.input_counts) do
             if icount > 0 and not first_output_tick[iname] then
@@ -507,6 +537,7 @@ script.on_event(defines.events.on_tick, function(event)
         local tot_mins = cur_tick / 3600.0
         out_log(string.format("FORCE_BONUSES: inserter_stack=%d bulk_inserter=%d",
             force.inserter_stack_size_bonus, force.bulk_inserter_capacity_bonus))
+        out_log(string.format("LAB_COUNT: %d", surface.count_entities_filtered{{type = "lab"}}))
         for iname, icount in pairs(stats.input_counts) do
             local wcount = warmup_input_counts[iname] or 0
             local delta = icount - wcount
@@ -597,6 +628,7 @@ script.on_event(defines.events.on_tick, function(event)
                 cur_tick, "{expected_item}", produced, active_m, total_m, act_ratio, total_m, total_m
             ))
             out_log(string.format("FACTORY_TEST_EARLY_PASS: tick=%d", cur_tick))
+            for _ = 1, 128 do print(string.rep(" ", 80)) end
             return
         end
 
@@ -1013,7 +1045,7 @@ script.on_event(defines.events.on_tick, function(event)
         local productive_machines = productive_asms + productive_furnaces + productive_silos
         local active_ratio = total_machines > 0 and (active_machines / total_machines) or 0.0
 
-        local check_types = {{"assembling-machine", "furnace", "rocket-silo", "inserter", "lamp", "radar", "pump"}}
+        local check_types = {{"assembling-machine", "furnace", "rocket-silo", "lab", "inserter", "lamp", "radar", "pump"}}
         local unpowered = 0
         for _, t in ipairs(check_types) do
             for _, ent in ipairs(surface.find_entities_filtered{{type = t}}) do
@@ -1190,7 +1222,7 @@ end)
                     if m_ep:
                         completed_tick = int(m_ep.group(1))
                     early_pass = True
-                    proc.terminate()
+                    proc.kill()
                     break
         returncode = proc.wait()
 
@@ -1209,13 +1241,21 @@ end)
         raise FileNotFoundError(f"Simulation log not written at {log_file}")
 
     log_text = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
-    source_lines = stdout_lines if early_pass else log_text.splitlines()
+    source_lines = (log_text.splitlines() + stdout_lines) if log_text else stdout_lines
     production_stats: dict[str, int] = {}
+    consumption_stats: dict[str, int] = {}
+    lab_count = 0
     result_line = ""
     for line in source_lines:
         m_pstat = re.search(r"PRODUCTION_STAT:\s*(\S+)\s*=\s*(\d+)", line)
         if m_pstat:
             production_stats[m_pstat.group(1)] = int(m_pstat.group(2))
+        m_cstat = re.search(r"CONSUMPTION_STAT:\s*(\S+)\s*=\s*(\d+)", line)
+        if m_cstat:
+            consumption_stats[m_cstat.group(1)] = int(m_cstat.group(2))
+        m_lcnt = re.search(r"LAB_COUNT:\s*(\d+)", line)
+        if m_lcnt:
+            lab_count = int(m_lcnt.group(1))
         if (
             "ASM_INFO:" in line
             or "SILO_INFO:" in line
@@ -1231,6 +1271,7 @@ end)
             or "TRACE step" in line
             or "UPSTREAM_" in line
             or "FORCE_BONUSES:" in line
+            or "LAB_COUNT:" in line
             or "PRODUCTION_STAT:" in line
             or "STEADY_PRODUCTION:" in line
             or "CONSUMPTION_STAT:" in line
@@ -1270,6 +1311,8 @@ end)
         "completed_tick": completed_tick,
         "produced": int(m_prod.group(1)) if m_prod else 0,
         "production_stats": production_stats,
+        "consumption_stats": consumption_stats,
+        "lab_count": lab_count,
         "active_machines": int(m_active.group(1)) if m_active else 0,
         "total_machines": int(m_active.group(2)) if m_active else 0,
         "active_ratio": float(m_ratio.group(1)) if m_ratio else 0.0,
@@ -1367,6 +1410,8 @@ def main() -> None:
     completed_tick = metrics.get("completed_tick", args.ticks)
     produced = metrics["produced"]
     production_stats = metrics.get("production_stats", {})
+    consumption_stats = metrics.get("consumption_stats", {})
+    lab_count = metrics.get("lab_count", 0)
     active_ratio = metrics["active_ratio"]
     active_cnt = metrics["active_machines"]
     total_cnt = metrics["total_machines"]
@@ -1396,6 +1441,8 @@ def main() -> None:
             failures.append(
                 f"Production below target: {it_prod} {it} < minimum {args.min_produced}"
             )
+        if lab_count > 0 and consumption_stats.get(it, 0) == 0:
+            failures.append(f"Lab consumption is zero for science pack: {it}")
     if productive_cnt < total_cnt:
         failures.append(
             f"Machine productivity below 100%: {productive_cnt}/{total_cnt} machines produced items. "

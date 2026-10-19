@@ -61,6 +61,8 @@ puts "verify: die $die_w x $die_h tiles, [llength $insts] blocks placed,\
 # Virtual clock anchors the raw inputs and science pack outputs.
 create_clock -name virtual_clk -period 1000
 set_input_delay -clock virtual_clk 0 [all_inputs]
-set_output_delay -clock virtual_clk 0 [all_outputs]
+if {[llength [all_outputs]] > 0} {
+    set_output_delay -clock virtual_clk 0 [all_outputs]
+}
 report_checks -path_delay max -fields {input_pins slew capacitance} -digits 4
 report_worst_slack -max

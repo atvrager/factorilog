@@ -266,7 +266,7 @@ def place_components(def_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
             machine = cell.get("machine", "assembling-machine-3")
             recipe = cell.get("fixed_recipe") or inst.get("recipe", cell.get("recipe", ""))
             extra: dict[str, Any] = {}
-            if recipe and machine not in ("boiler", "steam-engine"):
+            if recipe and machine not in ("boiler", "steam-engine", "lab"):
                 extra["recipe"] = recipe
             if machine == "steam-engine":
                 extra["power_domain"] = "aon"

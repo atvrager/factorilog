@@ -129,6 +129,27 @@ local function setup_player(player)
     player.insert{{name = "firearm-magazine", count = 200}}
 end
 
+local function queue_infinite_research(force)
+    if not (force and force.valid) then return end
+    if force.current_research then return end
+    local best_tech = nil
+    local best_count = -1
+    for name, tech in pairs(force.technologies) do
+        local proto = tech.prototype
+        if proto and proto.max_level and proto.max_level >= 4000000000 then
+            local ings = proto.research_unit_ingredients or {{}}
+            if #ings > best_count or (#ings == best_count and (not best_tech or name < best_tech)) then
+                best_count = #ings
+                best_tech = name
+            end
+        end
+    end
+    if best_tech then
+        force.technologies[best_tech].researched = false
+        force.add_research(best_tech)
+    end
+end
+
 script.on_init(function()
     game.forces.player.research_all_technologies()
 
@@ -571,8 +592,21 @@ script.on_init(function()
         end
     end
 
+    if surface.count_entities_filtered{{type = "lab"}} > 0 then
+        queue_infinite_research(game.forces.player)
+    end
+
     for _, p in pairs(game.players) do
         setup_player(p)
+    end
+end)
+
+script.on_event(defines.events.on_research_finished, function(event)
+    if event.research and event.research.force then
+        local surface = game.surfaces[1]
+        if surface and surface.count_entities_filtered{{type = "lab"}} > 0 then
+            queue_infinite_research(event.research.force)
+        end
     end
 end)
 

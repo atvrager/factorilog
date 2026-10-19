@@ -198,8 +198,9 @@ def assign_gaa_pin_faces(
     feeder_coords: dict[str, tuple[float, float]] | None = None,
     mach_y: float = 0.0,
     depths: dict[str, int] | None = None,
+    allow_east: bool = False,
 ) -> dict[str, str]:
-    """Assign input ports to West, North, or South faces based on driver direction."""
+    """Assign input ports to West, North, South, or East faces based on driver direction."""
     face_map: dict[str, str] = {}
     if feeder_coords:
         for p in inputs:
@@ -212,7 +213,7 @@ def assign_gaa_pin_faces(
                 face_map[p] = "W"
         return face_map
 
-    faces_order = ["W", "N", "S"]
+    faces_order = ["W", "N", "S", "E"] if allow_east else ["W", "N", "S"]
     sorted_inputs = sorted(inputs, key=lambda p: (depths.get(p, 0) if depths else 0, p))
     for idx, p in enumerate(sorted_inputs):
         face_map[p] = faces_order[idx % len(faces_order)]
@@ -498,9 +499,13 @@ def build(
             and not cell.get("has_fluids")
             and not cell.get("landing_pad")
         ):
-            faces = assign_gaa_pin_faces(inps, depths=depths)
+            faces = assign_gaa_pin_faces(
+                inps,
+                depths=depths,
+                allow_east=(not cell.get("outputs") and len(inps) > 6),
+            )
             cell["port_faces"] = faces
-            if any(f in ("N", "S") for f in faces.values()):
+            if any(f in ("N", "S", "E") for f in faces.values()):
                 m_w = int(cell.get("machine_width", cell.get("width", 3)))
                 m_h = int(cell.get("machine_height", cell.get("height", 3)))
                 cell["width"] = m_w + 2
@@ -519,6 +524,11 @@ def build(
                                 cell["in_slots"][p] = 1 + 2 * idx
                             else:
                                 cell["in_slots"][p] = offset_x + idx
+                e_inps = [p for p in inps if faces.get(p) == "E"]
+                if e_inps:
+                    offset_e = 1 + (m_h - len(e_inps)) // 2 if len(e_inps) <= m_h else 1
+                    for idx, p in enumerate(e_inps):
+                        cell["in_slots"][p] = offset_e + idx
                 outs = cell.get("outputs", [])
                 offset_out = 1 + (m_h - len(outs)) // 2 if len(outs) <= m_h else 1
                 for idx, p in enumerate(outs):
@@ -526,11 +536,15 @@ def build(
     nl.material_depths = depths
     instances_by_depth: dict[int, list[Instance]] = collections.defaultdict(list)
     power_plant_insts: list[Instance] = []
+    lab_insts: list[Instance] = []
     for inst in nl.instances:
         if inst.recipe in ("boiler-steam", "steam-power"):
             power_plant_insts.append(inst)
             continue
         c = nl.cells.get(inst.cell_key, {})
+        if c.get("machine") == "lab":
+            lab_insts.append(inst)
+            continue
         d = min((depths.get(p, 0) for p in c.get("outputs", [])), default=0)
         if d == 0:
             d = max((depths.get(p, 0) for p in c.get("inputs", [])), default=0)
@@ -570,6 +584,8 @@ def build(
                 _assign_recipe_chunk_ranks(non_term_at_d, sort_recipes=True)
     if higher_term:
         _assign_recipe_chunk_ranks(higher_term, sort_recipes=False)
+    if lab_insts:
+        _assign_recipe_chunk_ranks(lab_insts, sort_recipes=True)
     if power_plant_insts:
         _assign_recipe_chunk_ranks(power_plant_insts, sort_recipes=True)
     return nl
@@ -917,7 +933,10 @@ def split_net(
     def _sink_weight(w: str) -> float:
         return max(1e-6, wire_weight.get(w, 1.0))
 
-    is_single_pack = len(nl.outputs) <= 1 and "space-science-pack" not in nl.outputs
+    has_labs = any(c.get("machine") == "lab" for c in nl.cells.values())
+    is_single_pack = (
+        len(nl.outputs) <= 1 and "space-science-pack" not in nl.outputs and not has_labs
+    )
 
     def _build_tree(
         in_wire: str,
@@ -1070,7 +1089,7 @@ def split_net(
     )
     sink_recipes = {inst_by_name[s].recipe for s in net.sinks if s in inst_by_name}
     has_multi_recipe_sinks = len(orig_drivers) >= 3 and len(sink_recipes) >= 2
-    is_full_chassis = len(nl.outputs) >= 6 or "space-science-pack" in nl.outputs
+    is_full_chassis = len(nl.outputs) >= 6 or "space-science-pack" in nl.outputs or has_labs
     can_multibus_base = (
         (
             is_single_pack
@@ -1860,7 +1879,12 @@ def emit_ranks_tcl(
                 reverse_deps[sink].add(driver)
 
     terminal_order: dict[str, int] = {}
-    for idx, out_mat in enumerate(nl.outputs):
+    terminal_mats = list(nl.outputs)
+    if not terminal_mats:
+        for c in nl.cells.values():
+            if c.get("machine") == "lab":
+                terminal_mats.extend(c.get("inputs", []))
+    for idx, out_mat in enumerate(terminal_mats):
         for inst in nl.instances:
             if inst.recipe == out_mat:
                 terminal_order[inst.name] = idx

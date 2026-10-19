@@ -43,7 +43,7 @@ TICKS_PER_SECOND = 60.0
 LANES_PER_BELT = 2
 
 # Prototype tables that hold placeable buildings.
-MACHINE_TABLES = ("assembling-machine", "furnace", "rocket-silo", "boiler", "generator")
+MACHINE_TABLES = ("assembling-machine", "furnace", "rocket-silo", "boiler", "generator", "lab")
 BELT_TABLE = "transport-belt"
 UNDERGROUND_TABLE = "underground-belt"
 INSERTER_TABLE = "inserter"
@@ -219,6 +219,7 @@ CORE_MACHINES: frozenset[str] = frozenset(
         "rocket-silo",
         "boiler",
         "steam-engine",
+        "lab",
     }
 )
 
@@ -237,7 +238,7 @@ class Pdk:
         for table in MACHINE_TABLES:
             for name, proto in data.prototypes.get(table, {}).items():
                 if not core_only or name in CORE_MACHINES:
-                    self.machines[name] = proto
+                    self.machines[name] = data.machines.get(name, proto)
         try:
             from foundry.entity_helpers import register_prototype_boxes
         except ImportError:
@@ -604,14 +605,38 @@ class Pdk:
         else:
             placed_w = machine_width
             placed_h = machine_height
-            width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
-            height = machine_height
-            offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
-            for idx, p in enumerate(inputs):
-                in_slots[p] = offset_in + idx
-            offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
-            for idx, p in enumerate(outputs):
-                out_slots[p] = offset_out + idx
+            if not outputs and len(inputs) > 6:
+                width = machine_width + 2
+                height = machine_height + 2
+                faces_order = ["W", "N", "S", "E"]
+                port_faces = {
+                    p: faces_order[idx % len(faces_order)] for idx, p in enumerate(inputs)
+                }
+                for face_dir in ("W", "E"):
+                    f_inps = [p for p in inputs if port_faces.get(p) == face_dir]
+                    offset_y = 1 + (placed_h - len(f_inps)) // 2 if len(f_inps) <= placed_h else 1
+                    for idx, p in enumerate(f_inps):
+                        in_slots[p] = offset_y + idx
+                for face_dir in ("N", "S"):
+                    f_inps = [p for p in inputs if port_faces.get(p) == face_dir]
+                    if len(f_inps) == 2 and placed_w >= 3:
+                        for idx, p in enumerate(f_inps):
+                            in_slots[p] = 1 + 2 * idx
+                    else:
+                        offset_x = (
+                            1 + (placed_w - len(f_inps)) // 2 if len(f_inps) <= placed_w else 1
+                        )
+                        for idx, p in enumerate(f_inps):
+                            in_slots[p] = offset_x + idx
+            else:
+                width = machine_width + (1 if inputs else 0) + (1 if outputs else 0)
+                height = machine_height
+                offset_in = (height - len(inputs)) // 2 if len(inputs) <= height else 0
+                for idx, p in enumerate(inputs):
+                    in_slots[p] = offset_in + idx
+                offset_out = (height - len(outputs)) // 2 if len(outputs) <= height else 0
+                for idx, p in enumerate(outputs):
+                    out_slots[p] = offset_out + idx
 
         raw_cpm = 60.0 * speed / seconds
         in_amounts = {solve.name_of(e): solve.amount_of(e) for e in ingredients_raw}

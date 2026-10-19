@@ -37,6 +37,7 @@ TABLES = [
     "assembling-machine",
     "furnace",
     "rocket-silo",
+    "lab",
     "mining-drill",
     "resource",
     "technology",
@@ -57,7 +58,7 @@ TABLES = [
     "arithmetic-combinator",
     "decider-combinator",
 ]
-TRANSPORT_TABLES = frozenset(TABLES[9:])
+TRANSPORT_TABLES = frozenset(TABLES[TABLES.index("transport-belt") :])
 
 
 def main() -> int:

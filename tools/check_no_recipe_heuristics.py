@@ -90,6 +90,8 @@ HARDWARE_CATEGORIES = frozenset(
         "pump",
         "combinator",
         "lab",
+        "lab-research",
+        "infinite-research",
         "radar",
         "lamp",
         "boiler",
