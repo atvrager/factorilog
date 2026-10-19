@@ -96,6 +96,7 @@ class TestDef2Bp(unittest.TestCase):
         mach = next(e for e in entities if e["name"] == "assembling-machine-3")
         self.assertEqual(mach["position"], {"x": 11.5, "y": 21.5})
         self.assertEqual(mach["recipe"], "electronic-circuit")
+        self.assertNotIn("power_domain", mach)
 
         # Check splitter coordinates (origin 30, 40 + 0.5, 1.0 -> 30.5, 41.0)
         spl = next(e for e in entities if e["name"] == "splitter")
@@ -339,7 +340,9 @@ class TestDef2Bp(unittest.TestCase):
         )
 
         # Decider combinator
-        self.assertEqual(res.inst_to_entity["dc_1"]["position"], {"x": 70.5, "y": 1.0})
+        dc_ent = res.inst_to_entity["dc_1"]
+        self.assertEqual(dc_ent["position"], {"x": 70.5, "y": 1.0})
+        self.assertEqual(dc_ent["control_behavior"]["decider_conditions"]["comparator"], ">")
         self.assertIn((70.5, 0.5), res.occupied_positions)
         self.assertIn((70.5, 1.5), res.occupied_positions)
         self.assertTrue(all(x >= 0.0 and y >= 0.0 for x, y in res.occupied_positions))
@@ -355,6 +358,7 @@ class TestDef2Bp(unittest.TestCase):
         ps_ent = res.inst_to_entity["ps_1"]
         self.assertEqual(ps_ent["position"], {"x": 91.0, "y": 1.0})
         self.assertIs(ps_ent["switch_state"], False)
+        self.assertIs(ps_ent["control_behavior"]["circuit_enabled"], True)
         self.assertEqual(ps_ent["control_behavior"]["circuit_condition"]["constant"], 30)
         for tx in range(2):
             for ty in range(2):
@@ -364,7 +368,7 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(len(res.occupied_positions), 40)
 
     def test_place_components_inserter_selection_and_landing_pad(self) -> None:
-        from placement import place_components
+        from placement import PlacementConfig, place_components
 
         tiers = [
             {
@@ -473,6 +477,9 @@ class TestDef2Bp(unittest.TestCase):
         self.assertTrue(all(x >= 0.0 and y >= 0.0 for x, y in res.occupied_positions))
         self.assertNotIn((99.5, 1.5), res.occupied_positions)
 
+        # u_low_rate: machine position is gx(0) + in_offset(1.0) + m_w(3)/2.0 = 2.5, gy(0) + 1.5
+        self.assertEqual(res.inst_to_entity["u_low_rate"]["position"], {"x": 2.5, "y": 1.5})
+
         # u_low_rate: plan_r=30 < 0.35*200=70.
         # Input iron-plate req_rate = 1.4 * 30 * 2 = 84.0 -> inserter stack 2 (rate 100.0 < max_stack 3 -> override_stack_size=2)
         in_ins_low = res.grid_entities[(0.5, 0.5)]
@@ -505,6 +512,7 @@ class TestDef2Bp(unittest.TestCase):
         # u_silo with landing pad:
         # gx=60, in_offset=1, m_w=9 -> pad_left = 70 (even, 70+4=74 % 2 == 0), pad_w=8 -> pad_cx=74.0, pad_cy=4.0, pad_right=78
         silo_ent = res.inst_to_entity["u_silo"]
+        self.assertEqual(silo_ent["position"], {"x": 65.5, "y": 4.5})
         self.assertTrue(silo_ent.get("launch_to_orbit_automatically"))
         pad_ent = res.grid_entities[(74.0, 4.0)]
         self.assertEqual(pad_ent["name"], "cargo-landing-pad")
@@ -523,6 +531,18 @@ class TestDef2Bp(unittest.TestCase):
         boiler_ins = res.grid_entities[(100.5, 0.5)]
         self.assertEqual(boiler_ins.get("power_domain"), "aon")
         self.assertIn((100.5, 1.5), res.occupied_positions)
+
+        # Verify custom PlacementConfig overrides
+        custom_cfg = PlacementConfig(default_power_switch_threshold=75)
+        ps_custom = place_components(
+            {"components": [{"name": "ps_c", "macro": "power_switch", "x": 0, "y": 0}]},
+            {},
+            config=custom_cfg,
+        )
+        self.assertEqual(
+            ps_custom.inst_to_entity["ps_c"]["control_behavior"]["circuit_condition"]["constant"],
+            75,
+        )
 
 
 if __name__ == "__main__":
