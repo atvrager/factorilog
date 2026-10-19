@@ -403,19 +403,17 @@ def macro_lines(cell: CellRecord) -> list[str]:
         f'  PROPERTY RECIPE "{cell["recipe"]}" ;',
     ]
     sorted_inputs = _as_str_list(cell.get("inputs"))
-    input_pins = [
-        _input_pin_rect(cell, idx, len(sorted_inputs), port)
-        for idx, port in enumerate(sorted_inputs)
-    ]
-    for port, geom in zip(sorted_inputs, input_pins, strict=True):
+    input_pins: list[PinGeometry] = []
+    for idx, port in enumerate(sorted_inputs):
+        geom = _input_pin_rect(cell, idx, len(sorted_inputs), port)
+        input_pins.append(geom)
         lines.extend(_format_pin_block(port, "INPUT", geom))
 
     sorted_outputs = sorted(_as_str_list(cell.get("outputs")))
-    output_pins = [
-        _output_pin_rect(cell, idx, len(sorted_outputs), port)
-        for idx, port in enumerate(sorted_outputs)
-    ]
-    for port, geom in zip(sorted_outputs, output_pins, strict=True):
+    output_pins: list[PinGeometry] = []
+    for idx, port in enumerate(sorted_outputs):
+        geom = _output_pin_rect(cell, idx, len(sorted_outputs), port)
+        output_pins.append(geom)
         lines.extend(_format_pin_block(port, "OUTPUT", geom))
 
     full_rect: list[RectBounds] = [(0.0, 0.0, w, h)]
@@ -553,7 +551,7 @@ def tech_lines(tech: TechRecord) -> list[str]:
     )
 
     # 1. Surface turn layer connection (M1 -> VL1 -> M2)
-    lines.extend(_turn_via_block("SURFACE_TURN_VIA", "M1", "VL1", "M2", is_default=True))
+    lines.extend(_turn_via_block("SURFACE_TURN_VIA", "M1", "VL1", "M2"))
 
     # 2. Underground belt entrance/exit connection
     for idx, tier in enumerate(tiers):
@@ -605,12 +603,8 @@ def tech_lines(tech: TechRecord) -> list[str]:
         )
 
     # 5. Circuit drop connection & 6. Circuit turn connection
-    lines.extend(
-        _turn_via_block("CIRCUIT_DROP_VIA", last_v_layer, vl_drop, red_layer, is_default=True)
-    )
-    lines.extend(
-        _turn_via_block("CIRCUIT_TURN_VIA", red_layer, vl_circ_turn, green_layer, is_default=True)
-    )
+    lines.extend(_turn_via_block("CIRCUIT_DROP_VIA", last_v_layer, vl_drop, red_layer))
+    lines.extend(_turn_via_block("CIRCUIT_TURN_VIA", red_layer, vl_circ_turn, green_layer))
     lines.extend(
         [
             "SITE tile",
