@@ -663,7 +663,7 @@ class TestDef2Bp(unittest.TestCase):
         # check_power across bucket boundaries (bucket size 16)
         consumer_near = {
             "name": "assembling-machine-3",
-            "position": {"x": 14.5, "y": 14.5},
+            "position": {"x": 12.0, "y": 12.0},
             "direction": eh.DIRECTION_NORTH,
         }
         consumer_far = {
@@ -671,10 +671,10 @@ class TestDef2Bp(unittest.TestCase):
             "position": {"x": 50.0, "y": 50.0},
             "direction": eh.DIRECTION_NORTH,
         }
-        # Place pole at (19.0, 19.0) in the next bucket so box edge distance is 3.3 <= 3.5.
+        # Place pole at (16.5, 16.5) in the next bucket so box edge distance is 3.3 <= 3.5.
         pole = {
             "name": "medium-electric-pole",
-            "position": {"x": 19.0, "y": 19.0},
+            "position": {"x": 16.5, "y": 16.5},
         }
         self.assertEqual(
             eh.check_power([consumer_near, consumer_far]), [consumer_near, consumer_far]
@@ -781,7 +781,7 @@ class TestDef2Bp(unittest.TestCase):
                 "direction": eh.DIRECTION_NORTH,
                 "position": {"x": 5.5, "y": 7.5},
             },
-            # Pipe-to-ground pair
+            # Pipe-to-ground pair at max span 10
             {
                 "name": "pipe-to-ground",
                 "direction": eh.DIRECTION_WEST,
@@ -790,7 +790,7 @@ class TestDef2Bp(unittest.TestCase):
             {
                 "name": "pipe-to-ground",
                 "direction": eh.DIRECTION_EAST,
-                "position": {"x": 25.5, "y": 1.5},
+                "position": {"x": 30.5, "y": 1.5},
             },
         ]
         self.assertEqual(eh.check_underground_pairing(ug_ents), [])
@@ -899,7 +899,12 @@ class TestDef2Bp(unittest.TestCase):
                 "position": {"x": 61.5, "y": 5.5},
                 "direction": eh.DIRECTION_WEST,
             },
-            # Belt at macro output inserter position (73.5, 1.5) for component at (70, 0) with w=3, h=3 and 1 output -> slot=1
+            # Belts at macro input (69.5, 1.5) and output (73.5, 1.5) for component at (70, 0) with w=3, h=3
+            {
+                "name": "transport-belt",
+                "position": {"x": 69.5, "y": 1.5},
+                "direction": eh.DIRECTION_EAST,
+            },
             {
                 "name": "transport-belt",
                 "position": {"x": 73.5, "y": 1.5},
@@ -916,7 +921,7 @@ class TestDef2Bp(unittest.TestCase):
                 "custom_mac": {
                     "width": 3,
                     "height": 3,
-                    "inputs": [],
+                    "inputs": ["in1"],
                     "outputs": ["out1"],
                     "in_slots": {},
                     "out_slots": {},
@@ -940,6 +945,7 @@ class TestDef2Bp(unittest.TestCase):
         self.assertIn((40.5, 4.5), pruned_belt_positions)
         self.assertIn((51.5, 5.5), pruned_belt_positions)
         self.assertIn((51.5, 6.5), pruned_belt_positions)
+        self.assertIn((69.5, 1.5), pruned_belt_positions)
         self.assertIn((73.5, 1.5), pruned_belt_positions)
         self.assertNotIn((60.5, 5.5), pruned_belt_positions)
         self.assertNotIn((61.5, 5.5), pruned_belt_positions)
