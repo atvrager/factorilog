@@ -200,6 +200,28 @@ class LefTest(unittest.TestCase):
             ("M1", 2.5, 1.25, 3.0, 1.75),
         )
 
+        # With explicit in_slots / out_slots and port name (slot < height vs slot >= height)
+        cell_slotted = {
+            "width": 3,
+            "height": 3,
+            "inputs": ["a"],
+            "outputs": ["x"],
+            "in_slots": {"a": 2, "over": 5},
+            "out_slots": {"x": 0},
+        }
+        self.assertEqual(
+            lef._input_pin_rect(cell_slotted, 0, 1, "a"),
+            ("M1", 0.0, 2.25, 0.5, 2.75),
+        )
+        self.assertEqual(
+            lef._input_pin_rect(cell_slotted, 0, 1, "over"),
+            ("M1", 0.0, 1.25, 0.5, 1.75),
+        )
+        self.assertEqual(
+            lef._output_pin_rect(cell_slotted, 0, 1, "x"),
+            ("M1", 2.5, 0.25, 3.0, 0.75),
+        )
+
         # Overflow branches for _input_pin_rect (total > height)
         cell_small = {"width": 3, "height": 2, "inputs": ["i0", "i1", "i2", "i3"], "outputs": []}
         self.assertEqual(
@@ -267,6 +289,20 @@ class LefTest(unittest.TestCase):
         self.assertIn("MACRO decider_combinator__logic", circ_lines)
         self.assertIn("LAYER VL3 ;\n      RECT 0.000 0.000 1.000 2.000 ;", circ_lines)
 
+        unit_cell = {
+            "cell": "tiny.unit",
+            "machine": "tiny",
+            "recipe": "unit",
+            "width": 1,
+            "height": 1,
+            "crafts_per_minute": 10.0,
+            "watts": 100.0,
+            "inputs": ["in_a"],
+            "outputs": ["out_a"],
+        }
+        unit_lines = "\n".join(lef.macro_lines(unit_cell))
+        self.assertNotIn("  OBS", unit_lines)
+
         multi_layer_cell = {
             "cell": "custom-machine.multi",
             "machine": "custom-machine",
@@ -290,7 +326,8 @@ class LefTest(unittest.TestCase):
 
     def test_tech_lines_layers_and_vias(self) -> None:
         """Verify exact layer numbering and DEFAULT tags in tech_lines."""
-        tech_lines = lef.tech_lines(self.pdk.tech_json())
+        tech_dict = dict(self.pdk.tech_json())
+        tech_lines = lef.tech_lines(tech_dict)
         tech_text = "\n".join(tech_lines)
         self.assertIn(
             "# transport-belt surface-to-underground transition cut layer.\nLAYER VL2\n  TYPE CUT ;",
@@ -316,6 +353,19 @@ class LefTest(unittest.TestCase):
             "VIA CIRCUIT_TURN_VIA\n  DEFAULT\n  LAYER M9 ;\n    RECT -0.25 -0.25 0.25 0.25 ;\n  LAYER VL9 ;\n    RECT -0.125 -0.125 0.125 0.125 ;\n  LAYER M10 ;",
             tech_text,
         )
+
+        # Custom circuit_layers override vs fallback when omitted
+        custom_tech = dict(tech_dict)
+        custom_tech["circuit_layers"] = ("M11", "M12")
+        custom_text = "\n".join(lef.tech_lines(custom_tech))
+        self.assertIn("LAYER M11\n  TYPE ROUTING ;", custom_text)
+        self.assertIn("LAYER M12\n  TYPE ROUTING ;", custom_text)
+
+        no_circ_tech = dict(tech_dict)
+        no_circ_tech.pop("circuit_layers", None)
+        no_circ_text = "\n".join(lef.tech_lines(no_circ_tech))
+        self.assertIn("LAYER M9\n  TYPE ROUTING ;", no_circ_text)
+        self.assertIn("LAYER M10\n  TYPE ROUTING ;", no_circ_text)
 
     def test_check_lef_detects_violations(self) -> None:
         """Verify check_lef catches missing macros, missing pins, out-of-bounds rects, and size mismatches."""
