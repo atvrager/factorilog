@@ -3,5 +3,5 @@
 exclude = ["reference"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["numpy", "numpy.**", "scipy", "scipy.**"]
+allowed-unresolved-imports = ["numpy", "numpy.**", "PIL", "PIL.**", "scipy", "scipy.**"]
 replace-imports-with-any = ["pyslang", "pyslang.**"]

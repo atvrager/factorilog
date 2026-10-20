@@ -93,6 +93,7 @@ py_library(
     imports = ["."],
     deps = [
         "@pip//numpy",
+        "@pip//pillow",
         "@pip//pyslang",
         "@pip//scipy",
     ],
@@ -129,7 +130,7 @@ py_binary(
 py_binary(
     name = "render_bp",
     srcs = ["render_bp.py"],
-    data = ["//tools:render_blueprint.js"],
+    data = ["//test:fixture"],
     main = "render_bp.py",
     deps = [":pdk_lib"],
 )
@@ -197,5 +198,14 @@ py_test(
     size = "small",
     srcs = ["test_bp2save.py"],
     main = "test_bp2save.py",
+    deps = [":pdk_lib"],
+)
+
+py_test(
+    name = "render_bp_test",
+    size = "small",
+    srcs = ["test_render_bp.py"],
+    data = ["//test:fixture"],
+    main = "test_render_bp.py",
     deps = [":pdk_lib"],
 )
