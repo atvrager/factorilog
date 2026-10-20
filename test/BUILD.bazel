@@ -338,3 +338,33 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "placement_test",
+    size = "small",
+    srcs = ["test_placement.py"],
+    main = "test_placement.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "entity_helpers_test",
+    size = "small",
+    srcs = ["test_entity_helpers.py"],
+    main = "test_entity_helpers.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "pdn_test",
+    size = "small",
+    srcs = ["test_pdn.py"],
+    main = "test_pdn.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
