@@ -8,16 +8,21 @@ from __future__ import annotations
 
 import collections
 import math
-from typing import Any
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import TypeAlias
 
 try:
     from foundry.entity_helpers import (
+        DEFAULT_DEF_UNITS,
+        DEFAULT_PIPE_UNDERGROUND_SPAN,
         DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
         DIRECTION_WEST,
         OPPOSITE_DIR,
+        TILE_HALF,
         get_underground_span,
     )
     from foundry.jumper import RouteResult
@@ -25,183 +30,315 @@ try:
     from foundry.placement import PlacementResult
 except ImportError:
     from entity_helpers import (
+        DEFAULT_DEF_UNITS,
+        DEFAULT_PIPE_UNDERGROUND_SPAN,
         DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
         DIRECTION_WEST,
         OPPOSITE_DIR,
+        TILE_HALF,
         get_underground_span,
     )
     from jumper import RouteResult
     from lef import get_macro_port_geometry
     from placement import PlacementResult
 
+TileCoord: TypeAlias = tuple[int, int]
+GridCoord: TypeAlias = tuple[float, float]
+ConduitNode: TypeAlias = tuple[str, int, int] | tuple[str, int, int, int]
+ConduitGraph: TypeAlias = dict[ConduitNode, set[ConduitNode]]
+EntityRecord: TypeAlias = dict[str, object]
+JsonMap: TypeAlias = Mapping[str, object]
+TileEntityMap: TypeAlias = dict[TileCoord, list[EntityRecord]]
+PipeEntityMap: TypeAlias = dict[TileCoord, EntityRecord]
 
-def _get_pump_tiles(
-    cx: float, cy: float, direction: int
-) -> tuple[tuple[int, int], tuple[int, int]]:
+PUMP_NODE_LEN = 4
+PUMP_NODE_X_IDX = 2
+PUMP_NODE_Y_IDX = 3
+PIPE_NODE_X_IDX = 1
+PIPE_NODE_Y_IDX = 2
+
+CARDINAL_OFFSETS: tuple[TileCoord, ...] = ((0, 1), (0, -1), (1, 0), (-1, 0))
+COMPRESSION_AXES: tuple[tuple[int, int, int, int], ...] = (
+    (1, 0, DIRECTION_WEST, DIRECTION_EAST),
+    (0, 1, DIRECTION_NORTH, DIRECTION_SOUTH),
+)
+PASSTHROUGH_OFFSETS: dict[str, TileCoord] = {
+    "boiler": (1, 4),
+    "steam-engine": (2, 6),
+}
+
+
+@dataclass(frozen=True)
+class PumpInsertionConfig:
+    """Configuration parameters for inline fluid pipeline pump insertion."""
+
+    default_units: float = DEFAULT_DEF_UNITS
+    default_pipe_span: int = DEFAULT_PIPE_UNDERGROUND_SPAN
+    max_segment_extent: int = 300
+    max_pumps: int = 200
+    target_extent_margin: int = 40
+    min_target_distance: int = 50
+    min_compress_run_length: int = 8
+    min_compress_inner_span: int = 4
+
+
+DEFAULT_PUMP_CONFIG = PumpInsertionConfig()
+
+
+@dataclass
+class _UndergroundPipePair:
+    """A matched pair of facing underground pipe-to-ground entities."""
+
+    ent_u: EntityRecord
+    ent_v: EntityRecord
+    ux: int
+    uy: int
+    direction: int
+    ug_direction: int
+    dx: int
+    dy: int
+    span: int
+    span_tiles: set[TileCoord]
+
+
+@dataclass(frozen=True)
+class _ComponentFlowProfile:
+    """Source/sink weights and BFS distance map for one fluid component."""
+
+    sources: set[ConduitNode]
+    sinks: set[ConduitNode]
+    raw_src: dict[ConduitNode, int]
+    raw_sink: dict[ConduitNode, int]
+    total_srcs: int
+    total_sinks: int
+    use_sources: bool
+    dist: dict[ConduitNode, int]
+
+
+@dataclass(frozen=True)
+class _PumpCandidate:
+    """A scored candidate pipe-pair replacement location for an inline pump."""
+
+    score: tuple[int, float, float, int]
+    in_tile: TileCoord
+    out_tile: TileCoord
+    direction: int
+    center_x: float
+    center_y: float
+
+
+def _as_float(val: object, default: float = 0.0) -> float:
+    return float(val) if isinstance(val, (int, float, str)) and val != "" else default
+
+
+def _as_int(val: object, default: int = 0) -> int:
+    return int(float(val)) if isinstance(val, (int, float, str)) and val != "" else default
+
+
+def _as_str(val: object, default: str = "") -> str:
+    return str(val) if val is not None and val != "" else default
+
+
+def _as_map(val: object) -> JsonMap:
+    return val if isinstance(val, Mapping) else {}
+
+
+def _as_list(val: object) -> list[object]:
+    return list(val) if isinstance(val, (list, tuple, set)) else []
+
+
+def _entity_coords(ent: JsonMap) -> GridCoord:
+    pos = ent.get("position", {})
+    if isinstance(pos, Mapping):
+        return _as_float(pos.get("x", 0.0)), _as_float(pos.get("y", 0.0))
+    if isinstance(pos, Sequence) and len(pos) >= 2:
+        return _as_float(pos[0]), _as_float(pos[1])
+    return 0.0, 0.0
+
+
+def _entity_tile(ent: JsonMap) -> TileCoord:
+    cx, cy = _entity_coords(ent)
+    return math.floor(cx), math.floor(cy)
+
+
+def _tile_center_key(tile: TileCoord) -> GridCoord:
+    return round(tile[0] + TILE_HALF, 2), round(tile[1] + TILE_HALF, 2)
+
+
+def _node_tile(node: ConduitNode) -> TileCoord:
+    if len(node) == PUMP_NODE_LEN:
+        return int(node[PUMP_NODE_X_IDX]), int(node[PUMP_NODE_Y_IDX])
+    return int(node[PIPE_NODE_X_IDX]), int(node[PIPE_NODE_Y_IDX])
+
+
+def _get_pump_tiles(cx: float, cy: float, direction: int) -> tuple[TileCoord, TileCoord]:
     """Return the (in_tile, out_tile) for a pump entity."""
-    if direction == DIRECTION_NORTH:
-        in_tile = (math.floor(cx), math.floor(cy + 0.5))
-        out_tile = (math.floor(cx), math.floor(cy - 0.5))
-    elif direction == DIRECTION_SOUTH:
-        in_tile = (math.floor(cx), math.floor(cy - 0.5))
-        out_tile = (math.floor(cx), math.floor(cy + 0.5))
-    elif direction == DIRECTION_EAST:
-        in_tile = (math.floor(cx - 0.5), math.floor(cy))
-        out_tile = (math.floor(cx + 0.5), math.floor(cy))
-    else:  # DIRECTION_WEST
-        in_tile = (math.floor(cx + 0.5), math.floor(cy))
-        out_tile = (math.floor(cx - 0.5), math.floor(cy))
+    dx, dy = DIR_STEPS.get(direction, (0, -1))
+    in_tile = (math.floor(cx - dx * TILE_HALF), math.floor(cy - dy * TILE_HALF))
+    out_tile = (math.floor(cx + dx * TILE_HALF), math.floor(cy + dy * TILE_HALF))
     return in_tile, out_tile
 
 
+def _add_edge(adj: ConduitGraph, u: ConduitNode, v: ConduitNode) -> None:
+    adj[u].add(v)
+    adj[v].add(u)
+
+
+def _connect_pump_neighbor(
+    adj: ConduitGraph,
+    source_node: ConduitNode,
+    source_tile: TileCoord,
+    neighbor_tile: TileCoord,
+    pump_ent: EntityRecord,
+) -> None:
+    """Connect a pipe or pipe-to-ground node to an adjacent pump input or output."""
+    pump_d = _as_int(pump_ent.get("direction"), DIRECTION_NORTH)
+    pcx, pcy = _entity_coords(pump_ent)
+    in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
+    p_dx, p_dy = DIR_STEPS.get(pump_d, (0, 0))
+    if neighbor_tile == in_t and source_tile == (in_t[0] - p_dx, in_t[1] - p_dy):
+        _add_edge(adj, source_node, ("pump_in", id(pump_ent), in_t[0], in_t[1]))
+    elif neighbor_tile == out_t and source_tile == (out_t[0] + p_dx, out_t[1] + p_dy):
+        _add_edge(adj, source_node, ("pump_out", id(pump_ent), out_t[0], out_t[1]))
+
+
+def _connect_surface_pipe_neighbor(
+    adj: ConduitGraph,
+    node: ConduitNode,
+    pipe_tile: TileCoord,
+    nb_tile: TileCoord,
+    nb: EntityRecord,
+) -> None:
+    """Connect a surface pipe node to one adjacent tile entity if fluid-compatible."""
+    nb_name = _as_str(nb.get("name"))
+    if nb_name == "pipe":
+        _add_edge(adj, node, ("pipe", nb_tile[0], nb_tile[1]))
+    elif nb_name == "pipe-to-ground":
+        nb_d = _as_int(nb.get("direction"), DIRECTION_NORTH)
+        surf_dx, surf_dy = DIR_STEPS.get(nb_d, (0, 0))
+        if (nb_tile[0] + surf_dx, nb_tile[1] + surf_dy) == pipe_tile:
+            _add_edge(adj, node, ("pipe-to-ground", nb_tile[0], nb_tile[1]))
+    elif nb_name == "pump":
+        _connect_pump_neighbor(adj, node, pipe_tile, nb_tile, nb)
+
+
+def _connect_p2g_surface_mouth(
+    adj: ConduitGraph,
+    node: ConduitNode,
+    p2g_tile: TileCoord,
+    direction: int,
+    tile_map: TileEntityMap,
+) -> None:
+    """Connect a pipe-to-ground surface mouth to a facing pipe-to-ground or pump."""
+    surf_dx, surf_dy = DIR_STEPS.get(direction, (0, 0))
+    surf_pos = (p2g_tile[0] + surf_dx, p2g_tile[1] + surf_dy)
+    for c in tile_map.get(surf_pos, ()):
+        c_name = _as_str(c.get("name"))
+        if c_name == "pipe-to-ground":
+            cd = _as_int(c.get("direction"), DIRECTION_NORTH)
+            c_dx, c_dy = DIR_STEPS.get(cd, (0, 0))
+            if (surf_pos[0] + c_dx, surf_pos[1] + c_dy) == p2g_tile:
+                _add_edge(adj, node, ("pipe-to-ground", surf_pos[0], surf_pos[1]))
+        elif c_name == "pump":
+            _connect_pump_neighbor(adj, node, p2g_tile, surf_pos, c)
+
+
+def _connect_p2g_underground_span(
+    adj: ConduitGraph,
+    node: ConduitNode,
+    p2g_tile: TileCoord,
+    ug_direction: int,
+    tile_map: TileEntityMap,
+    max_pipe_span: int,
+) -> None:
+    """Connect a pipe-to-ground underground side to the nearest facing pipe-to-ground within span."""
+    dx, dy = DIR_STEPS.get(ug_direction, (0, 0))
+    for span in range(1, max_pipe_span + 1):
+        chk_pos = (p2g_tile[0] + dx * span, p2g_tile[1] + dy * span)
+        match = next(
+            (
+                c
+                for c in tile_map.get(chk_pos, ())
+                if _as_str(c.get("name")) == "pipe-to-ground"
+                and _as_int(c.get("direction"), DIRECTION_NORTH) == ug_direction
+            ),
+            None,
+        )
+        if match is not None:
+            _add_edge(adj, node, ("pipe-to-ground", chk_pos[0], chk_pos[1]))
+            return
+
+
+def _index_conduit_entities(
+    entities: Sequence[EntityRecord],
+) -> tuple[TileEntityMap, PipeEntityMap, list[EntityRecord]]:
+    """Classify fluid entities into tile_map, pipe_entities, and pipe-to-ground list."""
+    tile_map: TileEntityMap = {}
+    pipe_entities: PipeEntityMap = {}
+    p2gs: list[EntityRecord] = []
+    for ent in entities:
+        name = _as_str(ent.get("name"))
+        if name == "pipe":
+            t = _entity_tile(ent)
+            tile_map.setdefault(t, []).append(ent)
+            pipe_entities[t] = ent
+        elif name == "pipe-to-ground":
+            tile_map.setdefault(_entity_tile(ent), []).append(ent)
+            p2gs.append(ent)
+        elif name == "pump":
+            cx, cy = _entity_coords(ent)
+            in_t, out_t = _get_pump_tiles(cx, cy, _as_int(ent.get("direction"), DIRECTION_NORTH))
+            tile_map.setdefault(in_t, []).append(ent)
+            tile_map.setdefault(out_t, []).append(ent)
+    return tile_map, pipe_entities, p2gs
+
+
 def build_conduit_graph(
-    entities: list[dict[str, Any]],
-) -> tuple[
-    dict[Any, set[Any]],
-    dict[tuple[int, int], list[dict[str, Any]]],
-    dict[tuple[int, int], dict[str, Any]],
-]:
+    entities: Sequence[EntityRecord],
+) -> tuple[ConduitGraph, TileEntityMap, PipeEntityMap]:
     """Build the undirected graph of fluid conduit connections.
 
     Pumps separate upstream and downstream networks by creating distinct
     pump_in and pump_out nodes with no connecting edge between them.
     """
-    tile_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
-    pipe_entities: dict[tuple[int, int], dict[str, Any]] = {}
+    tile_map, pipe_entities, p2gs = _index_conduit_entities(entities)
+    adj: ConduitGraph = collections.defaultdict(set)
 
-    for ent in entities:
-        pos = ent.get("position", {})
-        cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
-        cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
-        name = ent.get("name", "")
-
-        if name == "pipe":
-            t = (math.floor(cx), math.floor(cy))
-            tile_map.setdefault(t, []).append(ent)
-            pipe_entities[t] = ent
-        elif name == "pipe-to-ground":
-            t = (math.floor(cx), math.floor(cy))
-            tile_map.setdefault(t, []).append(ent)
-        elif name == "pump":
-            d = ent.get("direction", DIRECTION_NORTH)
-            in_t, out_t = _get_pump_tiles(cx, cy, d)
-            tile_map.setdefault(in_t, []).append(ent)
-            tile_map.setdefault(out_t, []).append(ent)
-
-    adj: dict[Any, set[Any]] = collections.defaultdict(set)
-
-    # 1. Connect surface pipes
     for px, py in pipe_entities:
-        node = ("pipe", px, py)
+        node: ConduitNode = ("pipe", px, py)
         adj.setdefault(node, set())
-        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-            nb_tile = (px + dx, py + dy)
-            for nb in tile_map.get(nb_tile, []):
-                nb_name = nb.get("name", "")
-                if nb_name == "pipe":
-                    nb_node = ("pipe", nb_tile[0], nb_tile[1])
-                    adj[node].add(nb_node)
-                    adj[nb_node].add(node)
-                elif nb_name == "pipe-to-ground":
-                    nb_d = nb.get("direction", DIRECTION_NORTH)
-                    surf_dx, surf_dy = DIR_STEPS.get(nb_d, (0, 0))
-                    surf_pos = (nb_tile[0] + surf_dx, nb_tile[1] + surf_dy)
-                    if surf_pos == (px, py):
-                        nb_node = ("pipe-to-ground", nb_tile[0], nb_tile[1])
-                        adj[node].add(nb_node)
-                        adj[nb_node].add(node)
-                elif nb_name == "pump":
-                    pump_d = nb.get("direction", DIRECTION_NORTH)
-                    pos_nb = nb.get("position", {})
-                    pcx = (
-                        float(pos_nb.get("x", 0)) if isinstance(pos_nb, dict) else float(pos_nb[0])
-                    )
-                    pcy = (
-                        float(pos_nb.get("y", 0)) if isinstance(pos_nb, dict) else float(pos_nb[1])
-                    )
-                    in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
+        for nb_tile, nb in (
+            ((px + dx, py + dy), ent)
+            for dx, dy in CARDINAL_OFFSETS
+            for ent in tile_map.get((px + dx, py + dy), ())
+        ):
+            _connect_surface_pipe_neighbor(adj, node, (px, py), nb_tile, nb)
 
-                    p_dx, p_dy = DIR_STEPS.get(pump_d, (0, 0))
-                    # Check if (px, py) supplies pump input
-                    if nb_tile == in_t and (px, py) == (in_t[0] - p_dx, in_t[1] - p_dy):
-                        in_node = ("pump_in", id(nb), in_t[0], in_t[1])
-                        adj[node].add(in_node)
-                        adj[in_node].add(node)
-                    # Check if (px, py) receives pump output
-                    elif nb_tile == out_t and (px, py) == (out_t[0] + p_dx, out_t[1] + p_dy):
-                        out_node = ("pump_out", id(nb), out_t[0], out_t[1])
-                        adj[node].add(out_node)
-                        adj[out_node].add(node)
-
-    # 2. Connect underground pipe-to-ground pairs
-    p2gs = [e for e in entities if e.get("name") == "pipe-to-ground"]
+    max_pipe_span = get_underground_span("pipe-to-ground", DEFAULT_PUMP_CONFIG.default_pipe_span)
     for p in p2gs:
-        pos = p.get("position", {})
-        px = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
-        py = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
-        d = p.get("direction", DIRECTION_NORTH)
+        px, py = _entity_tile(p)
+        d = _as_int(p.get("direction"), DIRECTION_NORTH)
         ug_d = OPPOSITE_DIR.get(d, d)
-        dx, dy = DIR_STEPS.get(ug_d, (0, 0))
         node = ("pipe-to-ground", px, py)
         adj.setdefault(node, set())
-
-        # Surface connection to facing pipe-to-ground mouth-to-mouth or pump
-        surf_dx, surf_dy = DIR_STEPS.get(d, (0, 0))
-        surf_pos = (px + surf_dx, py + surf_dy)
-        for c in tile_map.get(surf_pos, []):
-            if c.get("name") == "pipe-to-ground":
-                cd = c.get("direction", DIRECTION_NORTH)
-                c_surf_dx, c_surf_dy = DIR_STEPS.get(cd, (0, 0))
-                if (surf_pos[0] + c_surf_dx, surf_pos[1] + c_surf_dy) == (px, py):
-                    c_node = ("pipe-to-ground", surf_pos[0], surf_pos[1])
-                    adj[node].add(c_node)
-                    adj[c_node].add(node)
-            elif c.get("name") == "pump":
-                pump_d = c.get("direction", DIRECTION_NORTH)
-                pos_c = c.get("position", {})
-                pcx = float(pos_c.get("x", 0)) if isinstance(pos_c, dict) else float(pos_c[0])
-                pcy = float(pos_c.get("y", 0)) if isinstance(pos_c, dict) else float(pos_c[1])
-                in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
-                p_dx, p_dy = DIR_STEPS.get(pump_d, (0, 0))
-                if surf_pos == in_t and (px, py) == (in_t[0] - p_dx, in_t[1] - p_dy):
-                    in_node = ("pump_in", id(c), in_t[0], in_t[1])
-                    adj[node].add(in_node)
-                    adj[in_node].add(node)
-                elif surf_pos == out_t and (px, py) == (out_t[0] + p_dx, out_t[1] + p_dy):
-                    out_node = ("pump_out", id(c), out_t[0], out_t[1])
-                    adj[node].add(out_node)
-                    adj[out_node].add(node)
-
-        # Underground connection to facing pair within maximum span
-        max_pipe_span = get_underground_span("pipe-to-ground", 10)
-        for span in range(1, max_pipe_span + 1):
-            chk_pos = (px + dx * span, py + dy * span)
-            candidates = tile_map.get(chk_pos, [])
-            for c in candidates:
-                if c.get("name") == "pipe-to-ground" and c.get("direction") == ug_d:
-                    c_node = ("pipe-to-ground", chk_pos[0], chk_pos[1])
-                    adj[node].add(c_node)
-                    adj[c_node].add(node)
-                    break
-            else:
-                continue
-            break
+        _connect_p2g_surface_mouth(adj, node, (px, py), d, tile_map)
+        _connect_p2g_underground_span(adj, node, (px, py), ug_d, tile_map, max_pipe_span)
 
     return adj, tile_map, pipe_entities
 
 
-def find_fluid_components(adj: dict[Any, set[Any]]) -> list[set[Any]]:
+def find_fluid_components(adj: Mapping[ConduitNode, set[ConduitNode]]) -> list[set[ConduitNode]]:
     """Return all connected components of conduit nodes."""
-    visited: set[Any] = set()
-    components: list[set[Any]] = []
+    visited: set[ConduitNode] = set()
+    components: list[set[ConduitNode]] = []
 
     for node in adj:
         if node in visited:
             continue
-        comp: set[Any] = set()
+        comp: set[ConduitNode] = set()
         queue = collections.deque([node])
         visited.add(node)
         while queue:
@@ -216,137 +353,150 @@ def find_fluid_components(adj: dict[Any, set[Any]]) -> list[set[Any]]:
     return components
 
 
-def component_extent(comp: set[Any]) -> tuple[float, float, float, float, float]:
+def component_extent(comp: set[ConduitNode]) -> tuple[float, float, float, float, float]:
     """Calculate (extent, min_x, max_x, min_y, max_y) of a component."""
-    xs = [node[1] if len(node) == 3 else node[2] for node in comp]
-    ys = [node[2] if len(node) == 3 else node[3] for node in comp]
-    if not xs:
+    if not comp:
         return 0.0, 0.0, 0.0, 0.0, 0.0
+    coords = [_node_tile(node) for node in comp]
+    xs = [pt[0] for pt in coords]
+    ys = [pt[1] for pt in coords]
     min_x, max_x = float(min(xs)), float(max(xs))
     min_y, max_y = float(min(ys)), float(max(ys))
-    extent = max(max_x - min_x, max_y - min_y)
-    return extent, min_x, max_x, min_y, max_y
+    return max(max_x - min_x, max_y - min_y), min_x, max_x, min_y, max_y
+
+
+def _collect_blocked_ug_corridors(
+    entities: Sequence[EntityRecord],
+    max_span: int,
+) -> set[TileCoord]:
+    """Return all tiles lying within existing pipe-to-ground corridors."""
+    blocked: set[TileCoord] = set()
+    for ent in entities:
+        if _as_str(ent.get("name")) != "pipe-to-ground":
+            continue
+        px, py = _entity_tile(ent)
+        d = _as_int(ent.get("direction"), DIRECTION_NORTH)
+        dx, dy = DIR_STEPS.get(d, (0, 0))
+        for s in range(-max_span, max_span + 1):
+            blocked.add((px + dx * s, py + dy * s))
+    return blocked
+
+
+def _find_collinear_pipe_runs(
+    pipe_entities: PipeEntityMap,
+    adj: ConduitGraph,
+    protected_tiles: set[TileCoord],
+    blocked_ug_tiles: set[TileCoord],
+    dx: int,
+    dy: int,
+    min_run_len: int,
+) -> list[list[TileCoord]]:
+    """Find contiguous straight surface pipe runs along (dx, dy) of at least min_run_len."""
+    excluded = protected_tiles | blocked_ug_tiles
+    eligible = {
+        (x, y)
+        for x, y in pipe_entities
+        if (x, y) not in excluded
+        and len(adj.get(("pipe", x, y), ())) == 2
+        and {_node_tile(nb) for nb in adj.get(("pipe", x, y), ())}
+        == {(x - dx, y - dy), (x + dx, y + dy)}
+    }
+    runs: list[list[TileCoord]] = []
+    for x, y in sorted(pt for pt in eligible if (pt[0] - dx, pt[1] - dy) not in eligible):
+        run: list[TileCoord] = []
+        cx, cy = x, y
+        while (cx, cy) in eligible:
+            run.append((cx, cy))
+            cx += dx
+            cy += dy
+        if len(run) >= min_run_len:
+            runs.append(run)
+    return runs
+
+
+def _compress_single_pipe_run(
+    run: Sequence[TileCoord],
+    dir_neg: int,
+    dir_pos: int,
+    max_span: int,
+    min_inner_span: int,
+    pipe_entities: PipeEntityMap,
+    placement: PlacementResult,
+    to_remove_ids: set[int],
+) -> None:
+    """Convert interior pipes of one straight run into underground pipe-to-ground hops."""
+    inner = run[1:-1]
+    m = len(inner)
+    i = 0
+    while m - i >= min_inner_span:
+        span = min(max_span, m - 1 - i)
+        ent_start = pipe_entities.get(inner[i])
+        ent_end = pipe_entities.get(inner[i + span])
+        if ent_start is not None and ent_end is not None:
+            ent_start["name"] = "pipe-to-ground"
+            ent_start["direction"] = dir_neg
+            ent_end["name"] = "pipe-to-ground"
+            ent_end["direction"] = dir_pos
+            for j in range(i + 1, i + span):
+                ent_mid = pipe_entities.get(inner[j])
+                if ent_mid is not None:
+                    to_remove_ids.add(id(ent_mid))
+                    placement.grid_entities.pop(_tile_center_key(inner[j]), None)
+        i += span + 1
 
 
 def _compress_straight_pipes(
     placement: PlacementResult,
-    protected_tiles: set[tuple[int, int]],
+    protected_tiles: set[TileCoord],
+    cfg: PumpInsertionConfig = DEFAULT_PUMP_CONFIG,
 ) -> None:
     """Convert interior tiles of long straight surface pipe runs into pipe-to-ground pairs."""
     adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)
-    max_span = get_underground_span("pipe-to-ground", 10)
-
-    blocked_ug_tiles: set[tuple[int, int]] = set()
-    for ent in placement.entities:
-        if ent.get("name") != "pipe-to-ground":
-            continue
-        pos = ent.get("position", {})
-        px = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
-        py = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
-        d = ent.get("direction", DIRECTION_NORTH)
-        dx, dy = DIR_STEPS.get(d, (0, 0))
-        for s in range(-max_span, max_span + 1):
-            blocked_ug_tiles.add((px + dx * s, py + dy * s))
-
-    def _nb_tile(nb: Any) -> tuple[int, int]:
-        return (int(nb[2]), int(nb[3])) if len(nb) == 4 else (int(nb[1]), int(nb[2]))
-
+    max_span = get_underground_span("pipe-to-ground", cfg.default_pipe_span)
+    blocked_ug_tiles = _collect_blocked_ug_corridors(placement.entities, max_span)
     to_remove_ids: set[int] = set()
-    axes = (
-        (1, 0, DIRECTION_WEST, DIRECTION_EAST),
-        (0, 1, DIRECTION_NORTH, DIRECTION_SOUTH),
-    )
-    for dx, dy, dir_neg, dir_pos in axes:
-        eligible: set[tuple[int, int]] = set()
-        for x, y in pipe_entities:
-            if (x, y) in protected_tiles or (x, y) in blocked_ug_tiles:
-                continue
-            nbs = adj.get(("pipe", x, y), set())
-            if len(nbs) != 2:
-                continue
-            if {_nb_tile(nb) for nb in nbs} == {(x - dx, y - dy), (x + dx, y + dy)}:
-                eligible.add((x, y))
 
-        for x, y in sorted(eligible):
-            if (x - dx, y - dy) in eligible:
-                continue
-            run: list[tuple[int, int]] = []
-            cx, cy = x, y
-            while (cx, cy) in eligible:
-                run.append((cx, cy))
-                cx += dx
-                cy += dy
-            if len(run) < 8:
-                continue
-            inner = run[1:-1]
-            m = len(inner)
-            i = 0
-            while m - i >= 4:
-                span = min(max_span, m - 1 - i)
-                t_start = inner[i]
-                t_end = inner[i + span]
-                ent_start = pipe_entities.get(t_start)
-                ent_end = pipe_entities.get(t_end)
-                if ent_start is not None and ent_end is not None:
-                    ent_start["name"] = "pipe-to-ground"
-                    ent_start["direction"] = dir_neg
-                    ent_end["name"] = "pipe-to-ground"
-                    ent_end["direction"] = dir_pos
-                    for j in range(i + 1, i + span):
-                        t_mid = inner[j]
-                        ent_mid = pipe_entities.get(t_mid)
-                        if ent_mid is not None:
-                            to_remove_ids.add(id(ent_mid))
-                            placement.grid_entities.pop(
-                                (round(t_mid[0] + 0.5, 2), round(t_mid[1] + 0.5, 2)),
-                                None,
-                            )
-                i += span + 1
+    for dx, dy, dir_neg, dir_pos in COMPRESSION_AXES:
+        runs = _find_collinear_pipe_runs(
+            pipe_entities,
+            adj,
+            protected_tiles,
+            blocked_ug_tiles,
+            dx,
+            dy,
+            cfg.min_compress_run_length,
+        )
+        for run in runs:
+            _compress_single_pipe_run(
+                run,
+                dir_neg,
+                dir_pos,
+                max_span,
+                cfg.min_compress_inner_span,
+                pipe_entities,
+                placement,
+                to_remove_ids,
+            )
 
     if to_remove_ids:
         placement.entities[:] = [e for e in placement.entities if id(e) not in to_remove_ids]
 
 
-def _shrink_underground_pipe_spans(
-    placement: PlacementResult,
-    protected_tiles: set[tuple[int, int]],
-    max_segment_extent: int,
-) -> None:
-    """Unroll unobstructed sections of underground pipe-to-ground spans in overextended components."""
-    adj, tile_map, _pipe_entities = build_conduit_graph(placement.entities)
-    components = find_fluid_components(adj)
-    overextended_nodes: set[Any] = set()
-    for comp in components:
-        ext, _, _, _, _ = component_extent(comp)
-        if ext > float(max_segment_extent):
-            overextended_nodes.update(comp)
-    if not overextended_nodes:
-        return
-
-    max_span = get_underground_span("pipe-to-ground", 10)
-    p2gs = [e for e in placement.entities if e.get("name") == "pipe-to-ground"]
+def _match_underground_pipe_pairs(
+    entities: Sequence[EntityRecord],
+    tile_map: TileEntityMap,
+    max_span: int,
+) -> list[_UndergroundPipePair]:
+    """Pair facing pipe-to-ground entities along their underground spans."""
+    p2gs = [e for e in entities if _as_str(e.get("name")) == "pipe-to-ground"]
     matched: set[int] = set()
-    pairs: list[
-        tuple[
-            dict[str, Any],
-            dict[str, Any],
-            int,
-            int,
-            int,
-            int,
-            int,
-            int,
-            int,
-            set[tuple[int, int]],
-        ]
-    ] = []
+    pairs: list[_UndergroundPipePair] = []
+
     for p in p2gs:
         if id(p) in matched:
             continue
-        pos = p.get("position", {})
-        ux = math.floor(float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0]))
-        uy = math.floor(float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1]))
-        d = int(p.get("direction", DIRECTION_NORTH))
+        ux, uy = _entity_tile(p)
+        d = _as_int(p.get("direction"), DIRECTION_NORTH)
         ug_d = OPPOSITE_DIR.get(d, d)
         dx, dy = DIR_STEPS.get(ug_d, (0, 0))
         for span in range(1, max_span + 1):
@@ -354,9 +504,9 @@ def _shrink_underground_pipe_spans(
             found = next(
                 (
                     c
-                    for c in tile_map.get(chk_pos, [])
-                    if c.get("name") == "pipe-to-ground"
-                    and int(c.get("direction", DIRECTION_NORTH)) == ug_d
+                    for c in tile_map.get(chk_pos, ())
+                    if _as_str(c.get("name")) == "pipe-to-ground"
+                    and _as_int(c.get("direction"), DIRECTION_NORTH) == ug_d
                     and id(c) not in matched
                 ),
                 None,
@@ -365,517 +515,743 @@ def _shrink_underground_pipe_spans(
                 matched.add(id(p))
                 matched.add(id(found))
                 span_set = {(ux + dx * s, uy + dy * s) for s in range(1, span)}
-                pairs.append((p, found, ux, uy, d, ug_d, dx, dy, span, span_set))
-                break
-
-    def _has_perp_fluid(tx: int, ty: int, step_dx: int, step_dy: int) -> bool:
-        for nbx, nby in ((tx + step_dy, ty + step_dx), (tx - step_dy, ty - step_dx)):
-            if (nbx, nby) in protected_tiles:
-                return True
-            if any(
-                e.get("name") in ("pipe", "pipe-to-ground", "pump")
-                for e in tile_map.get((nbx, nby), [])
-            ):
-                return True
-        return False
-
-    for idx, (ent_u, ent_v, ux, uy, _d, _ug_d, dx, dy, span, _span_set) in enumerate(pairs):
-        if span < 2 or ("pipe-to-ground", ux, uy) not in overextended_nodes:
-            continue
-        other_ug_tiles: set[tuple[int, int]] = set()
-        for j, item_j in enumerate(pairs):
-            if j != idx:
-                other_ug_tiles.update(item_j[9])
-                other_ug_tiles.add((item_j[2], item_j[3]))
-                other_ug_tiles.add(
-                    (
-                        item_j[2] + item_j[6] * item_j[8],
-                        item_j[3] + item_j[7] * item_j[8],
-                    )
+                pairs.append(
+                    _UndergroundPipePair(p, found, ux, uy, d, ug_d, dx, dy, span, span_set)
                 )
-
-        can_be_pipe: list[bool] = []
-        can_be_hood: list[bool] = []
-        for s in range(span + 1):
-            tx, ty = ux + dx * s, uy + dy * s
-            pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
-            if s in (0, span):
-                can_be_hood.append(True)
-                can_be_pipe.append(
-                    (tx, ty) not in protected_tiles and not _has_perp_fluid(tx, ty, dx, dy)
-                )
-            else:
-                is_free = (
-                    pkey not in placement.occupied_positions
-                    and (tx, ty) not in tile_map
-                    and (tx, ty) not in protected_tiles
-                )
-                can_be_hood.append(is_free and (tx, ty) not in other_ug_tiles)
-                can_be_pipe.append(is_free and not _has_perp_fluid(tx, ty, dx, dy))
-
-        if all(can_be_pipe):
-            ent_u["name"] = "pipe"
-            ent_u.pop("direction", None)
-            ent_v["name"] = "pipe"
-            ent_v.pop("direction", None)
-            for s in range(1, span):
-                tx, ty = ux + dx * s, uy + dy * s
-                pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
-                new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
-                placement.entities.append(new_p)
-                placement.occupied_positions.add(pkey)
-                placement.grid_entities[pkey] = new_p
-                tile_map.setdefault((tx, ty), []).append(new_p)
-            pairs[idx] = (ent_u, ent_v, ux, uy, _d, _ug_d, dx, dy, 0, set())
-            continue
-
-        s_u = 0
-        for s in range(1, span):
-            if all(can_be_pipe[k] for k in range(s)) and can_be_hood[s]:
-                s_u = s
-            else:
                 break
+    return pairs
 
-        s_v = span
-        for s in range(span - 1, s_u, -1):
-            if all(can_be_pipe[k] for k in range(s + 1, span + 1)) and can_be_hood[s]:
-                s_v = s
-            else:
-                break
 
-        if s_u > 0 or s_v < span:
-            old_u_pos = (ux, uy)
-            old_v_pos = (ux + dx * span, uy + dy * span)
-            new_u_pos = (ux + dx * s_u, uy + dy * s_u)
-            new_v_pos = (ux + dx * s_v, uy + dy * s_v)
+def _has_perpendicular_fluid(
+    tx: int,
+    ty: int,
+    step_dx: int,
+    step_dy: int,
+    protected_tiles: set[TileCoord],
+    tile_map: TileEntityMap,
+) -> bool:
+    """Return True if either perpendicular neighbor tile has a fluid entity or is protected."""
+    for nbx, nby in ((tx + step_dy, ty + step_dx), (tx - step_dy, ty - step_dx)):
+        if (nbx, nby) in protected_tiles:
+            return True
+        if any(
+            _as_str(e.get("name")) in ("pipe", "pipe-to-ground", "pump")
+            for e in tile_map.get((nbx, nby), ())
+        ):
+            return True
+    return False
 
-            if s_u > 0:
-                new_uk = (round(new_u_pos[0] + 0.5, 2), round(new_u_pos[1] + 0.5, 2))
-                if old_u_pos in tile_map and ent_u in tile_map[old_u_pos]:
-                    tile_map[old_u_pos].remove(ent_u)
-                ent_u["position"] = {"x": new_uk[0], "y": new_uk[1]}
-                placement.occupied_positions.add(new_uk)
-                placement.grid_entities[new_uk] = ent_u
-                tile_map.setdefault(new_u_pos, []).append(ent_u)
-                for s in range(s_u):
-                    tx, ty = ux + dx * s, uy + dy * s
-                    pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
-                    new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
-                    placement.entities.append(new_p)
-                    placement.occupied_positions.add(pkey)
-                    placement.grid_entities[pkey] = new_p
-                    tile_map.setdefault((tx, ty), []).append(new_p)
 
-            if s_v < span:
-                new_vk = (round(new_v_pos[0] + 0.5, 2), round(new_v_pos[1] + 0.5, 2))
-                if old_v_pos in tile_map and ent_v in tile_map[old_v_pos]:
-                    tile_map[old_v_pos].remove(ent_v)
-                ent_v["position"] = {"x": new_vk[0], "y": new_vk[1]}
-                placement.occupied_positions.add(new_vk)
-                placement.grid_entities[new_vk] = ent_v
-                tile_map.setdefault(new_v_pos, []).append(ent_v)
-                for s in range(s_v + 1, span + 1):
-                    tx, ty = ux + dx * s, uy + dy * s
-                    pkey = (round(tx + 0.5, 2), round(ty + 0.5, 2))
-                    new_p = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
-                    placement.entities.append(new_p)
-                    placement.occupied_positions.add(pkey)
-                    placement.grid_entities[pkey] = new_p
-                    tile_map.setdefault((tx, ty), []).append(new_p)
+def _place_unrolled_surface_pipes(
+    ux: int,
+    uy: int,
+    dx: int,
+    dy: int,
+    steps: range,
+    placement: PlacementResult,
+    tile_map: TileEntityMap,
+) -> None:
+    """Insert surface pipes along the specified step indices of an unrolled span."""
+    for s in steps:
+        tile = (ux + dx * s, uy + dy * s)
+        pkey = _tile_center_key(tile)
+        new_p: EntityRecord = {"name": "pipe", "position": {"x": pkey[0], "y": pkey[1]}}
+        placement.entities.append(new_p)
+        placement.occupied_positions.add(pkey)
+        placement.grid_entities[pkey] = new_p
+        tile_map.setdefault(tile, []).append(new_p)
 
-            new_span_set = {(ux + dx * s, uy + dy * s) for s in range(s_u + 1, s_v)}
-            pairs[idx] = (
-                ent_u,
-                ent_v,
-                new_u_pos[0],
-                new_u_pos[1],
-                _d,
-                _ug_d,
-                dx,
-                dy,
-                s_v - s_u,
-                new_span_set,
+
+def _relocate_p2g_hood(
+    ent: EntityRecord,
+    new_pos: TileCoord,
+    placement: PlacementResult,
+    tile_map: TileEntityMap,
+) -> None:
+    """Move an underground pipe hood entity to a new tile coordinate."""
+    old_pos = _entity_tile(ent)
+    new_key = _tile_center_key(new_pos)
+    if old_pos in tile_map and ent in tile_map[old_pos]:
+        tile_map[old_pos].remove(ent)
+    ent["position"] = {"x": new_key[0], "y": new_key[1]}
+    placement.occupied_positions.add(new_key)
+    placement.grid_entities[new_key] = ent
+    tile_map.setdefault(new_pos, []).append(ent)
+
+
+def _evaluate_span_unroll_eligibility(
+    pair: _UndergroundPipePair,
+    other_ug_tiles: set[TileCoord],
+    protected_tiles: set[TileCoord],
+    placement: PlacementResult,
+    tile_map: TileEntityMap,
+) -> tuple[list[bool], list[bool]]:
+    """Compute (can_be_pipe, can_be_hood) flags for each step 0..span of an underground pair."""
+    can_be_pipe: list[bool] = []
+    can_be_hood: list[bool] = []
+    for s in range(pair.span + 1):
+        tx, ty = pair.ux + pair.dx * s, pair.uy + pair.dy * s
+        pkey = _tile_center_key((tx, ty))
+        no_perp = not _has_perpendicular_fluid(tx, ty, pair.dx, pair.dy, protected_tiles, tile_map)
+        if s in (0, pair.span):
+            can_be_hood.append(True)
+            can_be_pipe.append((tx, ty) not in protected_tiles and no_perp)
+        else:
+            is_free = (
+                pkey not in placement.occupied_positions
+                and (tx, ty) not in tile_map
+                and (tx, ty) not in protected_tiles
             )
+            can_be_hood.append(is_free and (tx, ty) not in other_ug_tiles)
+            can_be_pipe.append(is_free and no_perp)
+    return can_be_pipe, can_be_hood
 
 
-def insert_pipeline_pumps(
+def _shrink_single_pair(
+    pair: _UndergroundPipePair,
+    other_ug_tiles: set[TileCoord],
+    protected_tiles: set[TileCoord],
+    placement: PlacementResult,
+    tile_map: TileEntityMap,
+) -> None:
+    """Unroll an underground pipe pair completely or partially where surface tiles are free."""
+    can_be_pipe, can_be_hood = _evaluate_span_unroll_eligibility(
+        pair, other_ug_tiles, protected_tiles, placement, tile_map
+    )
+    if all(can_be_pipe):
+        pair.ent_u["name"] = "pipe"
+        pair.ent_u.pop("direction", None)
+        pair.ent_v["name"] = "pipe"
+        pair.ent_v.pop("direction", None)
+        _place_unrolled_surface_pipes(
+            pair.ux, pair.uy, pair.dx, pair.dy, range(1, pair.span), placement, tile_map
+        )
+        pair.span = 0
+        pair.span_tiles = set()
+        return
+
+    s_u = max(
+        (s for s in range(1, pair.span) if all(can_be_pipe[:s]) and can_be_hood[s]),
+        default=0,
+    )
+    s_v = min(
+        (
+            s
+            for s in range(pair.span - 1, s_u, -1)
+            if all(can_be_pipe[s + 1 : pair.span + 1]) and can_be_hood[s]
+        ),
+        default=pair.span,
+    )
+    if s_u == 0 and s_v == pair.span:
+        return
+
+    new_u_pos = (pair.ux + pair.dx * s_u, pair.uy + pair.dy * s_u)
+    new_v_pos = (pair.ux + pair.dx * s_v, pair.uy + pair.dy * s_v)
+
+    if s_u > 0:
+        _relocate_p2g_hood(pair.ent_u, new_u_pos, placement, tile_map)
+        _place_unrolled_surface_pipes(
+            pair.ux, pair.uy, pair.dx, pair.dy, range(s_u), placement, tile_map
+        )
+
+    if s_v < pair.span:
+        _relocate_p2g_hood(pair.ent_v, new_v_pos, placement, tile_map)
+        _place_unrolled_surface_pipes(
+            pair.ux, pair.uy, pair.dx, pair.dy, range(s_v + 1, pair.span + 1), placement, tile_map
+        )
+
+    pair.span_tiles = {(pair.ux + pair.dx * s, pair.uy + pair.dy * s) for s in range(s_u + 1, s_v)}
+    pair.ux, pair.uy = new_u_pos
+    pair.span = s_v - s_u
+
+
+def _other_pair_tiles(pairs: Sequence[_UndergroundPipePair], exclude_idx: int) -> set[TileCoord]:
+    """Return all underground span tiles belonging to underground pairs other than exclude_idx."""
+    tiles: set[TileCoord] = set()
+    for j, other in enumerate(pairs):
+        if j != exclude_idx:
+            tiles.update(other.span_tiles)
+    return tiles
+
+
+def _shrink_underground_pipe_spans(
+    placement: PlacementResult,
+    protected_tiles: set[TileCoord],
+    max_segment_extent: int,
+    cfg: PumpInsertionConfig = DEFAULT_PUMP_CONFIG,
+) -> None:
+    """Unroll unobstructed sections of underground pipe-to-ground spans in overextended components."""
+    adj, tile_map, _pipe_entities = build_conduit_graph(placement.entities)
+    overextended_nodes = {
+        node
+        for comp in find_fluid_components(adj)
+        if component_extent(comp)[0] > float(max_segment_extent)
+        for node in comp
+    }
+    if not overextended_nodes:
+        return
+
+    max_span = get_underground_span("pipe-to-ground", cfg.default_pipe_span)
+    pairs = _match_underground_pipe_pairs(placement.entities, tile_map, max_span)
+
+    for idx, pair in enumerate(pairs):
+        if pair.span >= 2 and ("pipe-to-ground", pair.ux, pair.uy) in overextended_nodes:
+            other_ug_tiles = _other_pair_tiles(pairs, idx)
+            _shrink_single_pair(pair, other_ug_tiles, protected_tiles, placement, tile_map)
+
+
+def _matches_fluid(name: str, fluids: set[str]) -> bool:
+    return name in fluids or any(f in name for f in fluids)
+
+
+def _collect_component_fluid_ports(
+    comp: JsonMap,
+    inst_map: dict[str, JsonMap],
+    cell_map: JsonMap,
+    scale: float,
+    fluids: set[str],
+    fluid_source_tiles: set[TileCoord],
+    fluid_sink_tiles: set[TileCoord],
+    unused_passthrough_tiles: set[TileCoord],
+) -> None:
+    """Record fluid source, sink, and passthrough tiles for one placed component."""
+    cname = _as_str(comp.get("name"))
+    inst = inst_map.get(cname, {})
+    cell_id = _as_str(inst.get("cell"), _as_str(comp.get("macro")))
+    cell = _as_map(cell_map.get(cell_id))
+    gx = _as_float(comp.get("x")) * scale
+    gy = _as_float(comp.get("y")) * scale
+    machine_type = _as_str(cell.get("machine"))
+    if machine_type in PASSTHROUGH_OFFSETS:
+        ox, oy = PASSTHROUGH_OFFSETS[machine_type]
+        unused_passthrough_tiles.add((math.floor(gx + ox), math.floor(gy + oy)))
+
+    for raw_port in _as_list(cell.get("outputs")):
+        port = _as_str(raw_port)
+        if _matches_fluid(port, fluids):
+            geom = get_macro_port_geometry(cell, port, is_output=True)
+            ax, ay = geom["inserter_pos"]
+            fluid_source_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
+
+    for raw_port in _as_list(cell.get("inputs")):
+        port = _as_str(raw_port)
+        if _matches_fluid(port, fluids):
+            geom = get_macro_port_geometry(cell, port, is_output=False)
+            ax, ay = geom["inserter_pos"]
+            fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
+
+
+def _collect_pin_fluid_terminals(
+    pins: Sequence[object],
+    scale: float,
+    fluids: set[str],
+) -> tuple[set[TileCoord], set[TileCoord]]:
+    """Extract (fluid_source_tiles, fluid_sink_tiles) from DEF boundary pins."""
+    sources: set[TileCoord] = set()
+    sinks: set[TileCoord] = set()
+    for raw_pin in pins:
+        pin = _as_map(raw_pin)
+        pname = _as_str(pin.get("name"), _as_str(pin.get("net")))
+        if not _matches_fluid(pname, fluids):
+            continue
+        pt = (
+            math.floor(_as_float(pin.get("x")) * scale),
+            math.floor(_as_float(pin.get("y")) * scale),
+        )
+        pin_dir = _as_str(pin.get("direction"))
+        if pin_dir == "INPUT":
+            sources.add(pt)
+        elif pin_dir == "OUTPUT":
+            sinks.add(pt)
+    return sources, sinks
+
+
+def _collect_fluid_terminals_and_protected_tiles(
     placement: PlacementResult,
     routes: RouteResult,
-    def_data: dict[str, Any],
-    netlist_data: dict[str, Any],
-    max_segment_extent: int = 300,
-    max_pumps: int = 200,
-) -> int:
-    """Insert powered inline pumps to split pipelines exceeding max_segment_extent.
-
-    Returns the number of pumps inserted.
-    """
-    scale = 1.0 / float(def_data.get("units", 1000))
-    pumps_inserted = 0
-
-    raw_fluids = set(netlist_data.get("fluids") or []) | set(placement.fluids or [])
+    def_data: JsonMap,
+    netlist_data: JsonMap,
+    cfg: PumpInsertionConfig,
+) -> tuple[set[TileCoord], set[TileCoord], set[TileCoord]]:
+    """Collect (fluid_source_tiles, fluid_sink_tiles, protected_tiles) from layout metadata."""
+    scale = 1.0 / _as_float(def_data.get("units"), cfg.default_units)
+    raw_fluids = {_as_str(f) for f in _as_list(netlist_data.get("fluids"))} | set(
+        placement.fluids or set()
+    )
     fluids = (
         {f.replace("-", "_") for f in raw_fluids}
         | {f.replace("_", "-") for f in raw_fluids}
         | raw_fluids
     )
-    inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
-    cell_map = netlist_data.get("cells", {})
+    inst_map = {
+        _as_str(_as_map(inst).get("name")): _as_map(inst)
+        for inst in _as_list(netlist_data.get("instances"))
+    }
+    cell_map = _as_map(netlist_data.get("cells"))
 
-    # 1. Collect all known fluid sources (input pins + machine fluid outputs)
-    fluid_source_tiles: set[tuple[int, int]] = set()
-    fluid_sink_tiles: set[tuple[int, int]] = set()
-
-    for pin in def_data.get("pins", []):
-        pname = pin.get("name", pin.get("net", ""))
-        if pname in fluids or any(f in pname for f in fluids):
-            px = math.floor(pin["x"] * scale)
-            py = math.floor(pin["y"] * scale)
-            if pin.get("direction") == "INPUT":
-                fluid_source_tiles.add((px, py))
-            elif pin.get("direction") == "OUTPUT":
-                fluid_sink_tiles.add((px, py))
-
-    unused_passthrough_tiles: set[tuple[int, int]] = set()
-    for comp in def_data.get("components", []):
-        cname = comp["name"]
-        inst = inst_map.get(cname, {})
-        cell_id = inst.get("cell", comp.get("macro", ""))
-        cell = cell_map.get(cell_id, {})
-        gx = comp["x"] * scale
-        gy = comp["y"] * scale
-        machine_type = cell.get("machine", "")
-        if machine_type == "boiler":
-            unused_passthrough_tiles.add((math.floor(gx + 1), math.floor(gy + 4)))
-        elif machine_type == "steam-engine":
-            unused_passthrough_tiles.add((math.floor(gx + 2), math.floor(gy + 6)))
-
-        for port in cell.get("outputs", []):
-            if port in fluids or any(f in port for f in fluids):
-                geom = get_macro_port_geometry(cell, port, is_output=True)
-                ax, ay = geom["inserter_pos"]
-                fluid_source_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
-
-        for port in cell.get("inputs", []):
-            if port in fluids or any(f in port for f in fluids):
-                geom = get_macro_port_geometry(cell, port, is_output=False)
-                ax, ay = geom["inserter_pos"]
-                fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
-
-    protected_tiles: set[tuple[int, int]] = (
-        set(fluid_source_tiles) | set(fluid_sink_tiles) | unused_passthrough_tiles
+    fluid_source_tiles, fluid_sink_tiles = _collect_pin_fluid_terminals(
+        _as_list(def_data.get("pins")), scale, fluids
     )
-    for px_f, py_f in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
-        protected_tiles.add((math.floor(px_f), math.floor(py_f)))
-    macro_fp = def_data.get("_macro_floorplan")
-    if macro_fp is not None:
-        for bport in getattr(macro_fp, "block_ports", []):
-            protected_tiles.add((int(bport.core_pos[0]), int(bport.core_pos[1])))
-            protected_tiles.add((int(bport.channel_pos[0]), int(bport.channel_pos[1])))
+    unused_passthrough_tiles: set[TileCoord] = set()
 
-    _shrink_underground_pipe_spans(placement, protected_tiles, max_segment_extent)
+    for raw_comp in _as_list(def_data.get("components")):
+        _collect_component_fluid_ports(
+            _as_map(raw_comp),
+            inst_map,
+            cell_map,
+            scale,
+            fluids,
+            fluid_source_tiles,
+            fluid_sink_tiles,
+            unused_passthrough_tiles,
+        )
 
-    for _iteration in range(max_pumps):
+    route_pins = {
+        (math.floor(px_f), math.floor(py_f))
+        for px_f, py_f in (routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins)
+    }
+    protected_tiles = (
+        set(fluid_source_tiles) | set(fluid_sink_tiles) | unused_passthrough_tiles | route_pins
+    )
+    for bport in getattr(def_data.get("_macro_floorplan"), "block_ports", ()):
+        protected_tiles.add((int(bport.core_pos[0]), int(bport.core_pos[1])))
+        protected_tiles.add((int(bport.channel_pos[0]), int(bport.channel_pos[1])))
+
+    return fluid_source_tiles, fluid_sink_tiles, protected_tiles
+
+
+def _build_full_conduit_graph(
+    adj: ConduitGraph,
+    entities: Sequence[EntityRecord],
+) -> ConduitGraph:
+    """Copy the conduit graph and bridge pump_in and pump_out nodes across existing pumps."""
+    full_adj: ConduitGraph = {node: set(nbs) for node, nbs in adj.items()}
+    for ent in entities:
+        if _as_str(ent.get("name")) != "pump":
+            continue
+        pcx, pcy = _entity_coords(ent)
+        pump_d = _as_int(ent.get("direction"), DIRECTION_NORTH)
+        in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
+        in_node: ConduitNode = ("pump_in", id(ent), in_t[0], in_t[1])
+        out_node: ConduitNode = ("pump_out", id(ent), out_t[0], out_t[1])
+        if in_node in full_adj and out_node in full_adj:
+            _add_edge(full_adj, in_node, out_node)
+    return full_adj
+
+
+def _count_external_pump_terminals(
+    start_node: ConduitNode,
+    worst_comp: set[ConduitNode],
+    full_adj: ConduitGraph,
+    fluid_source_tiles: set[TileCoord],
+    fluid_sink_tiles: set[TileCoord],
+) -> tuple[int, int]:
+    """Count true fluid sources and sinks reachable beyond a pump node outside worst_comp."""
+    visited: set[ConduitNode] = {start_node}
+    queue: collections.deque[ConduitNode] = collections.deque([start_node])
+    while queue:
+        curr = queue.popleft()
+        unseen = (full_adj.get(curr, set()) - worst_comp) - visited
+        visited.update(unseen)
+        queue.extend(unseen)
+
+    pipe_tiles = [
+        _node_tile(nb) for nb in visited if nb != start_node and nb[0] in ("pipe", "pipe-to-ground")
+    ]
+    ext_srcs = sum(1 for pt in pipe_tiles if pt in fluid_source_tiles)
+    ext_sinks = sum(1 for pt in pipe_tiles if pt in fluid_sink_tiles)
+    return ext_srcs, ext_sinks
+
+
+def _bfs_component_distances(
+    ref_nodes: Sequence[ConduitNode],
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+) -> dict[ConduitNode, int]:
+    """Compute shortest-path hop distances from ref_nodes within worst_comp."""
+    dist: dict[ConduitNode, int] = dict.fromkeys(ref_nodes, 0)
+    queue: collections.deque[tuple[ConduitNode, int]] = collections.deque((s, 0) for s in ref_nodes)
+    while queue:
+        curr, d = queue.popleft()
+        for nb in adj.get(curr, set()) & worst_comp:
+            if nb not in dist:
+                dist[nb] = d + 1
+                queue.append((nb, d + 1))
+    return dist
+
+
+def _record_node_terminals(
+    node: ConduitNode,
+    worst_comp: set[ConduitNode],
+    full_adj: ConduitGraph,
+    fluid_source_tiles: set[TileCoord],
+    fluid_sink_tiles: set[TileCoord],
+    sources: list[ConduitNode],
+    sinks: list[ConduitNode],
+    raw_src: dict[ConduitNode, int],
+    raw_sink: dict[ConduitNode, int],
+) -> None:
+    """Classify one conduit node as a fluid source and/or sink and record its terminal weights."""
+    ntype = node[0]
+    if ntype == "pump_out":
+        ext_srcs, ext_sinks = _count_external_pump_terminals(
+            node, worst_comp, full_adj, fluid_source_tiles, fluid_sink_tiles
+        )
+        sources.append(node)
+        raw_src[node] = max(1, ext_srcs)
+        raw_sink[node] = ext_sinks
+        return
+    if ntype == "pump_in":
+        ext_srcs, ext_sinks = _count_external_pump_terminals(
+            node, worst_comp, full_adj, fluid_source_tiles, fluid_sink_tiles
+        )
+        sinks.append(node)
+        raw_src[node] = ext_srcs
+        raw_sink[node] = max(1, ext_sinks)
+        return
+    pt = _node_tile(node)
+    if pt in fluid_source_tiles:
+        sources.append(node)
+        raw_src[node] = 1
+    if pt in fluid_sink_tiles:
+        sinks.append(node)
+        raw_sink[node] = 1
+
+
+def _compute_component_flow_profile(
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+    full_adj: ConduitGraph,
+    fluid_source_tiles: set[TileCoord],
+    fluid_sink_tiles: set[TileCoord],
+) -> _ComponentFlowProfile:
+    """Identify sources, sinks, terminal weights, and BFS distances for a component."""
+    sources: list[ConduitNode] = []
+    sinks: list[ConduitNode] = []
+    raw_src: dict[ConduitNode, int] = {}
+    raw_sink: dict[ConduitNode, int] = {}
+
+    for node in worst_comp:
+        _record_node_terminals(
+            node,
+            worst_comp,
+            full_adj,
+            fluid_source_tiles,
+            fluid_sink_tiles,
+            sources,
+            sinks,
+            raw_src,
+            raw_sink,
+        )
+
+    use_sources = bool(sources) or not bool(sinks)
+    ref_nodes = sources or sinks or [min(worst_comp, key=_node_tile)]
+    dist = _bfs_component_distances(ref_nodes, worst_comp, adj)
+
+    return _ComponentFlowProfile(
+        sources=set(sources),
+        sinks=set(sinks),
+        raw_src=raw_src,
+        raw_sink=raw_sink,
+        total_srcs=sum(raw_src.values()),
+        total_sinks=sum(raw_sink.values()),
+        use_sources=use_sources,
+        dist=dist,
+    )
+
+
+def _is_collinear_degree_two_pair(
+    u_node: ConduitNode,
+    v_node: ConduitNode,
+    ux: int,
+    uy: int,
+    vx: int,
+    vy: int,
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+) -> bool:
+    """Return True if u_node and v_node form a straight degree-2 pipe segment in worst_comp."""
+    u_nbs = [nb for nb in adj.get(u_node, ()) if nb in worst_comp]
+    v_nbs = [nb for nb in adj.get(v_node, ()) if nb in worst_comp]
+    if len(u_nbs) != 2 or len(v_nbs) != 2:
+        return False
+    dx, dy = vx - ux, vy - uy
+    nb_u = u_nbs[0] if u_nbs[1] == v_node else u_nbs[1]
+    nb_v = v_nbs[0] if v_nbs[1] == u_node else v_nbs[1]
+    if nb_u[0] not in ("pipe", "pipe-to-ground") or nb_v[0] not in ("pipe", "pipe-to-ground"):
+        return False
+    return _node_tile(nb_u) == (ux - dx, uy - dy) and _node_tile(nb_v) == (vx + dx, vy + dy)
+
+
+def _partition_without_edge(
+    u_node: ConduitNode,
+    v_node: ConduitNode,
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+) -> set[ConduitNode]:
+    """Return the connected subset of worst_comp reachable from u_node when (u_node, v_node) is cut."""
+    comp_u: set[ConduitNode] = {u_node}
+    queue: collections.deque[ConduitNode] = collections.deque([u_node])
+    blocked_edges = {(u_node, v_node), (v_node, u_node)}
+    while queue:
+        cur = queue.popleft()
+        for nb in adj.get(cur, ()):
+            if nb in worst_comp and nb not in comp_u and (cur, nb) not in blocked_edges:
+                comp_u.add(nb)
+                queue.append(nb)
+    return comp_u
+
+
+def _determine_cut_flow_direction(
+    u_srcs: int,
+    u_sinks: int,
+    v_srcs: int,
+    v_sinks: int,
+    default_u_in: bool,
+    has_both_terminals: bool,
+) -> tuple[bool, int]:
+    """Return (is_u_in, sep_penalty) from source/sink counts across a partition cut."""
+    if not has_both_terminals:
+        return default_u_in, 0
+    flow_u_to_v = u_srcs * v_sinks
+    flow_v_to_u = v_srcs * u_sinks
+    if flow_u_to_v == 0 and flow_v_to_u == 0:
+        return default_u_in, 1
+    if flow_u_to_v != flow_v_to_u:
+        return flow_u_to_v > flow_v_to_u, 0
+    return default_u_in, 0
+
+
+def _resolve_split_flow_and_metrics(
+    comp_u: set[ConduitNode],
+    v_node: ConduitNode,
+    u_dist: int,
+    v_dist: int,
+    worst_extent: float,
+    worst_comp: set[ConduitNode],
+    profile: _ComponentFlowProfile,
+    max_segment_extent: int,
+) -> tuple[bool, int, float, float]:
+    """Compute (is_u_in, sep_penalty, over_limit, primary_metric) for a candidate edge cut."""
+    default_u_in = (u_dist < v_dist) if profile.use_sources else (u_dist > v_dist)
+    if v_node in comp_u:
+        return default_u_in, 1, worst_extent, round(worst_extent, 2)
+
+    comp_v = worst_comp - comp_u
+    u_srcs = sum(profile.raw_src.get(n, 0) for n in comp_u)
+    u_sinks = sum(profile.raw_sink.get(n, 0) for n in comp_u)
+    v_srcs = profile.total_srcs - u_srcs
+    v_sinks = profile.total_sinks - u_sinks
+
+    is_u_in, sep_penalty = _determine_cut_flow_direction(
+        u_srcs, u_sinks, v_srcs, v_sinks, default_u_in, bool(profile.sources and profile.sinks)
+    )
+    ext_u = component_extent(comp_u)[0]
+    ext_v = component_extent(comp_v)[0]
+    split_ext = max(ext_u, ext_v)
+    over_limit = max(0.0, split_ext - float(max_segment_extent))
+
+    comp_in, comp_out = (comp_u, comp_v) if is_u_in else (comp_v, comp_u)
+    in_sinks, out_srcs = (u_sinks, v_srcs) if is_u_in else (v_sinks, u_srcs)
+    in_has_sink = in_sinks > 0 or bool(comp_in & profile.sinks)
+    out_has_src = out_srcs > 0 or bool(comp_out & profile.sources)
+    use_out_ext = over_limit == 0.0 and in_has_sink and not out_has_src
+    ext_out = ext_v if is_u_in else ext_u
+    primary_metric = round(ext_out if use_out_ext else split_ext, 2)
+    return is_u_in, sep_penalty, over_limit, primary_metric
+
+
+def _pump_placement_for_tiles(
+    in_t: TileCoord,
+    out_t: TileCoord,
+    is_vertical: bool,
+) -> tuple[int, float, float]:
+    """Return (pump_direction, center_x, center_y) for an inline pump from in_t to out_t."""
+    if is_vertical:
+        if out_t[1] < in_t[1]:
+            return DIRECTION_NORTH, in_t[0] + TILE_HALF, float(in_t[1])
+        return DIRECTION_SOUTH, in_t[0] + TILE_HALF, float(in_t[1] + 1.0)
+    if out_t[0] > in_t[0]:
+        return DIRECTION_EAST, float(in_t[0] + 1.0), in_t[1] + TILE_HALF
+    return DIRECTION_WEST, float(in_t[0]), in_t[1] + TILE_HALF
+
+
+def _score_pipe_pair_candidate(
+    ux: int,
+    uy: int,
+    vx: int,
+    vy: int,
+    is_vertical: bool,
+    worst_extent: float,
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+    profile: _ComponentFlowProfile,
+    target_dist: int,
+    max_segment_extent: int,
+) -> _PumpCandidate | None:
+    """Evaluate one adjacent (u, v) surface pipe pair and return a scored candidate if valid."""
+    u_node: ConduitNode = ("pipe", ux, uy)
+    v_node: ConduitNode = ("pipe", vx, vy)
+    u_dist = profile.dist.get(u_node)
+    v_dist = profile.dist.get(v_node)
+    if u_dist is None or v_dist is None or u_dist == v_dist:
+        return None
+    if not _is_collinear_degree_two_pair(u_node, v_node, ux, uy, vx, vy, worst_comp, adj):
+        return None
+
+    comp_u = _partition_without_edge(u_node, v_node, worst_comp, adj)
+    is_u_in, sep_penalty, over_limit, primary_metric = _resolve_split_flow_and_metrics(
+        comp_u, v_node, u_dist, v_dist, worst_extent, worst_comp, profile, max_segment_extent
+    )
+    in_t, out_t = ((ux, uy), (vx, vy)) if is_u_in else ((vx, vy), (ux, uy))
+    base_dist = u_dist if is_u_in else v_dist
+    pump_dir, center_x, center_y = _pump_placement_for_tiles(in_t, out_t, is_vertical)
+    score = (
+        sep_penalty,
+        round(over_limit, 2),
+        primary_metric,
+        abs(base_dist - target_dist),
+    )
+    return _PumpCandidate(score, in_t, out_t, pump_dir, center_x, center_y)
+
+
+def _find_component_pump_candidates(
+    worst_extent: float,
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+    full_adj: ConduitGraph,
+    pipe_entities: PipeEntityMap,
+    protected_tiles: set[TileCoord],
+    fluid_source_tiles: set[TileCoord],
+    fluid_sink_tiles: set[TileCoord],
+    max_segment_extent: int,
+    cfg: PumpInsertionConfig,
+) -> tuple[list[_PumpCandidate], PipeEntityMap]:
+    """Evaluate all legal collinear pipe pairs in worst_comp and return scored pump candidates."""
+    profile = _compute_component_flow_profile(
+        worst_comp, adj, full_adj, fluid_source_tiles, fluid_sink_tiles
+    )
+    target_dist = max(
+        cfg.min_target_distance,
+        min(max_segment_extent - cfg.target_extent_margin, int(worst_extent // 2)),
+    )
+    comp_pipes: PipeEntityMap = {
+        _node_tile(n): pipe_entities[_node_tile(n)]
+        for n in worst_comp
+        if n[0] == "pipe" and _node_tile(n) in pipe_entities
+    }
+    unprotected_pipes = set(comp_pipes) - protected_tiles
+    candidates: list[_PumpCandidate] = []
+
+    for ux, uy in unprotected_pipes:
+        for vx, vy, is_vertical in ((ux, uy + 1, True), (ux + 1, uy, False)):
+            if (vx, vy) not in unprotected_pipes:
+                continue
+            cand = _score_pipe_pair_candidate(
+                ux,
+                uy,
+                vx,
+                vy,
+                is_vertical,
+                worst_extent,
+                worst_comp,
+                adj,
+                profile,
+                target_dist,
+                max_segment_extent,
+            )
+            if cand is not None:
+                candidates.append(cand)
+
+    return candidates, comp_pipes
+
+
+def _apply_pump_candidate(
+    cand: _PumpCandidate,
+    comp_pipes: PipeEntityMap,
+    placement: PlacementResult,
+) -> None:
+    """Replace the two surface pipes of the winning candidate with a pump entity."""
+    ent_in = comp_pipes.get(cand.in_tile)
+    ent_out = comp_pipes.get(cand.out_tile)
+    if ent_in in placement.entities:
+        placement.entities.remove(ent_in)
+    if ent_out in placement.entities:
+        placement.entities.remove(ent_out)
+
+    pump_ent: EntityRecord = {
+        "name": "pump",
+        "position": {"x": cand.center_x, "y": cand.center_y},
+        "direction": cand.direction,
+    }
+    placement.entities.append(pump_ent)
+
+    pos_in_key = _tile_center_key(cand.in_tile)
+    pos_out_key = _tile_center_key(cand.out_tile)
+    placement.grid_entities[pos_in_key] = pump_ent
+    placement.grid_entities[pos_out_key] = pump_ent
+    placement.occupied_positions.add(pos_in_key)
+    placement.occupied_positions.add(pos_out_key)
+
+
+def insert_pipeline_pumps(
+    placement: PlacementResult,
+    routes: RouteResult,
+    def_data: JsonMap,
+    netlist_data: JsonMap,
+    max_segment_extent: int | None = None,
+    max_pumps: int | None = None,
+    cfg: PumpInsertionConfig = DEFAULT_PUMP_CONFIG,
+) -> int:
+    """Insert powered inline pumps to split pipelines exceeding max_segment_extent.
+
+    Returns the number of pumps inserted.
+    """
+    extent_limit = max_segment_extent if max_segment_extent is not None else cfg.max_segment_extent
+    pump_limit = max_pumps if max_pumps is not None else cfg.max_pumps
+    fluid_source_tiles, fluid_sink_tiles, protected_tiles = (
+        _collect_fluid_terminals_and_protected_tiles(placement, routes, def_data, netlist_data, cfg)
+    )
+    _shrink_underground_pipe_spans(placement, protected_tiles, extent_limit, cfg)
+
+    pumps_inserted = 0
+    for _iteration in range(pump_limit):
         adj, _tile_map, pipe_entities = build_conduit_graph(placement.entities)
-        components = find_fluid_components(adj)
-
-        overextended: list[tuple[float, set[Any]]] = []
-        for comp in components:
-            ext, _, _, _, _ = component_extent(comp)
-            if ext > float(max_segment_extent):
-                overextended.append((ext, comp))
-
+        overextended = [
+            (ext, comp)
+            for comp in find_fluid_components(adj)
+            if (ext := component_extent(comp)[0]) > float(extent_limit)
+        ]
         if not overextended:
-            break  # All components are within max_segment_extent
-
-        full_adj: dict[Any, set[Any]] = {node: set(nbs) for node, nbs in adj.items()}
-        for ent in placement.entities:
-            if ent.get("name") == "pump":
-                pos_p = ent.get("position", {})
-                pcx = float(pos_p.get("x", 0)) if isinstance(pos_p, dict) else float(pos_p[0])
-                pcy = float(pos_p.get("y", 0)) if isinstance(pos_p, dict) else float(pos_p[1])
-                pump_d = ent.get("direction", DIRECTION_NORTH)
-                in_t, out_t = _get_pump_tiles(pcx, pcy, pump_d)
-                in_node = ("pump_in", id(ent), in_t[0], in_t[1])
-                out_node = ("pump_out", id(ent), out_t[0], out_t[1])
-                if in_node in full_adj and out_node in full_adj:
-                    full_adj[in_node].add(out_node)
-                    full_adj[out_node].add(in_node)
-
-        overextended.sort(key=lambda item: item[0], reverse=True)
-
-        candidates: list[
-            tuple[
-                tuple[int, float, float, int],
-                tuple[int, int],
-                tuple[int, int],
-                int,
-                float,
-                float,
-            ]
-        ] = []
-        comp_pipes: dict[tuple[int, int], dict[str, Any]] = {}
-
-        for worst_extent, worst_comp in overextended:
-            # Identify sources and sinks for this component, weighting pump endpoints
-            # by the true fluid sources and sinks reachable beyond the pump.
-            sources: list[Any] = []
-            sinks: list[Any] = []
-            raw_src: dict[Any, int] = {}
-            raw_sink: dict[Any, int] = {}
-            for node in worst_comp:
-                ntype = node[0]
-                if ntype in ("pump_out", "pump_in"):
-                    ext_visited: set[Any] = {node}
-                    ext_q: collections.deque[Any] = collections.deque([node])
-                    ext_srcs = 0
-                    ext_sinks = 0
-                    while ext_q:
-                        cur_ext = ext_q.popleft()
-                        for nb_ext in full_adj.get(cur_ext, ()):
-                            if nb_ext in worst_comp or nb_ext in ext_visited:
-                                continue
-                            ext_visited.add(nb_ext)
-                            ext_q.append(nb_ext)
-                            if nb_ext[0] in ("pipe", "pipe-to-ground"):
-                                pt_ext = (nb_ext[1], nb_ext[2])
-                                if pt_ext in fluid_source_tiles:
-                                    ext_srcs += 1
-                                if pt_ext in fluid_sink_tiles:
-                                    ext_sinks += 1
-                    if ntype == "pump_out":
-                        sources.append(node)
-                        raw_src[node] = max(1, ext_srcs)
-                        raw_sink[node] = ext_sinks
-                    else:
-                        sinks.append(node)
-                        raw_src[node] = ext_srcs
-                        raw_sink[node] = max(1, ext_sinks)
-                elif ntype in ("pipe", "pipe-to-ground"):
-                    pt = (node[1], node[2])
-                    is_src = pt in fluid_source_tiles
-                    is_sink = pt in fluid_sink_tiles
-                    if is_src:
-                        sources.append(node)
-                        raw_src[node] = 1
-                    if is_sink:
-                        sinks.append(node)
-                        raw_sink[node] = 1
-
-            total_comp_srcs = sum(raw_src.values())
-            total_comp_sinks = sum(raw_sink.values())
-
-            use_sources = bool(sources)
-            ref_nodes = sources if use_sources else sinks
-
-            if not ref_nodes:
-                # Fallback: pick node with minimum coordinate as source
-                ref_nodes = [
-                    min(
-                        worst_comp,
-                        key=lambda n: (
-                            n[2] if len(n) == 4 else n[1],
-                            n[3] if len(n) == 4 else n[2],
-                        ),
-                    )
-                ]
-                use_sources = True
-
-            # Compute BFS distances from reference nodes
-            dist: dict[Any, int] = {}
-            queue: collections.deque[tuple[Any, int]] = collections.deque()
-            for s in ref_nodes:
-                dist[s] = 0
-                queue.append((s, 0))
-
-            while queue:
-                curr, d = queue.popleft()
-                for nb in adj.get(curr, ()):
-                    if nb in worst_comp and nb not in dist:
-                        dist[nb] = d + 1
-                        queue.append((nb, d + 1))
-
-            # Target distance along path for inserting a pump
-            target_dist = min(max_segment_extent - 40, int(worst_extent // 2))
-            target_dist = max(target_dist, 50)
-
-            comp_pipes = {
-                (n[1], n[2]): pipe_entities[(n[1], n[2])]
-                for n in worst_comp
-                if n[0] == "pipe" and (n[1], n[2]) in pipe_entities
-            }
-            src_set = set(sources)
-            sink_set = set(sinks)
-
-            for ux, uy in comp_pipes:
-                u_node = ("pipe", ux, uy)
-                u_dist = dist.get(u_node)
-                if u_dist is None:
-                    continue
-
-                # Check neighbors: Vertical and Horizontal
-                for vx, vy, is_vertical in ((ux, uy + 1, True), (ux + 1, uy, False)):
-                    if (vx, vy) not in comp_pipes:
-                        continue
-                    v_node = ("pipe", vx, vy)
-                    v_dist = dist.get(v_node)
-                    if v_dist is None or u_dist == v_dist:
-                        continue
-
-                    # Ensure neither tile is a protected pin, port, or machine approach tile
-                    if (ux, uy) in protected_tiles or (vx, vy) in protected_tiles:
-                        continue
-
-                    # Check degree in component: each pipe must connect to the other and one collinear neighbor
-                    u_nbs = [nb for nb in adj.get(u_node, ()) if nb in worst_comp]
-                    v_nbs = [nb for nb in adj.get(v_node, ()) if nb in worst_comp]
-                    if len(u_nbs) != 2 or len(v_nbs) != 2:
-                        continue
-
-                    dx, dy = vx - ux, vy - uy
-                    nb_u = u_nbs[0] if u_nbs[1] == v_node else u_nbs[1]
-                    nb_v = v_nbs[0] if v_nbs[1] == u_node else v_nbs[1]
-                    if nb_u[0] not in ("pipe", "pipe-to-ground") or nb_v[0] not in (
-                        "pipe",
-                        "pipe-to-ground",
-                    ):
-                        continue
-                    if (nb_u[1], nb_u[2]) != (ux - dx, uy - dy) or (nb_v[1], nb_v[2]) != (
-                        vx + dx,
-                        vy + dy,
-                    ):
-                        continue
-
-                    # Partition worst_comp by removing edge (u_node, v_node)
-                    comp_u: set[Any] = {u_node}
-                    q_u: collections.deque[Any] = collections.deque([u_node])
-                    while q_u:
-                        cur = q_u.popleft()
-                        for nb in adj.get(cur, ()):
-                            if nb in worst_comp and nb not in comp_u:
-                                if (cur == u_node and nb == v_node) or (
-                                    cur == v_node and nb == u_node
-                                ):
-                                    continue
-                                comp_u.add(nb)
-                                q_u.append(nb)
-
-                    sep_penalty = 0
-                    if v_node in comp_u:
-                        split_ext = worst_extent
-                        over_limit = worst_extent
-                        primary_metric = round(worst_extent, 2)
-                        is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-                        sep_penalty = 1
-                    else:
-                        comp_v = worst_comp - comp_u
-                        u_srcs = sum(raw_src.get(n, 0) for n in comp_u)
-                        u_sinks = sum(raw_sink.get(n, 0) for n in comp_u)
-                        v_srcs = total_comp_srcs - u_srcs
-                        v_sinks = total_comp_sinks - u_sinks
-                        u_has_src = u_srcs > 0 or bool(comp_u & src_set)
-                        v_has_src = v_srcs > 0 or bool(comp_v & src_set)
-                        u_has_sink = u_sinks > 0 or bool(comp_u & sink_set)
-                        v_has_sink = v_sinks > 0 or bool(comp_v & sink_set)
-
-                        if src_set and sink_set:
-                            flow_u_to_v = u_srcs * v_sinks
-                            flow_v_to_u = v_srcs * u_sinks
-                            if flow_u_to_v > 0 or flow_v_to_u > 0:
-                                if flow_u_to_v > flow_v_to_u:
-                                    is_u_in = True
-                                elif flow_v_to_u > flow_u_to_v:
-                                    is_u_in = False
-                                else:
-                                    is_u_in = (
-                                        (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-                                    )
-                            else:
-                                is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-                                sep_penalty = 1
-                        else:
-                            is_u_in = (u_dist < v_dist) if use_sources else (u_dist > v_dist)
-
-                        ext_u, _, _, _, _ = component_extent(comp_u)
-                        ext_v, _, _, _, _ = component_extent(comp_v)
-                        split_ext = max(ext_u, ext_v)
-                        ext_out = ext_v if is_u_in else ext_u
-                        in_has_sink = u_has_sink if is_u_in else v_has_sink
-                        out_has_src = v_has_src if is_u_in else u_has_src
-                        over_limit = max(0.0, split_ext - float(max_segment_extent))
-                        if over_limit == 0.0 and in_has_sink and not out_has_src:
-                            primary_metric = round(ext_out, 2)
-                        else:
-                            primary_metric = round(split_ext, 2)
-
-                    if is_u_in:
-                        in_t, out_t = (ux, uy), (vx, vy)
-                        base_dist = u_dist
-                    else:
-                        in_t, out_t = (vx, vy), (ux, uy)
-                        base_dist = v_dist
-
-                    if is_vertical:
-                        if out_t[1] < in_t[1]:  # Flow North
-                            pump_dir = DIRECTION_NORTH
-                            center_x = in_t[0] + 0.5
-                            center_y = float(in_t[1])
-                        else:  # Flow South
-                            pump_dir = DIRECTION_SOUTH
-                            center_x = in_t[0] + 0.5
-                            center_y = float(in_t[1] + 1.0)
-                    else:
-                        if out_t[0] > in_t[0]:  # Flow East
-                            pump_dir = DIRECTION_EAST
-                            center_x = float(in_t[0] + 1.0)
-                            center_y = in_t[1] + 0.5
-                        else:  # Flow West
-                            pump_dir = DIRECTION_WEST
-                            center_x = float(in_t[0])
-                            center_y = in_t[1] + 0.5
-
-                    score = (
-                        sep_penalty,
-                        round(over_limit, 2),
-                        primary_metric,
-                        abs(base_dist - target_dist),
-                    )
-                    candidates.append((score, in_t, out_t, pump_dir, center_x, center_y))
-
-            if candidates:
-                break
-
-        if not candidates:
             break
 
-        # Pick candidate with best score
-        candidates.sort(key=lambda c: c[0])
-        _, best_in, best_out, best_dir, best_cx, best_cy = candidates[0]
+        overextended.sort(key=lambda item: item[0], reverse=True)
+        full_adj = _build_full_conduit_graph(adj, placement.entities)
 
-        # Replace the two pipes with the pump
-        ent_in = comp_pipes.get(best_in)
-        ent_out = comp_pipes.get(best_out)
-        if ent_in in placement.entities:
-            placement.entities.remove(ent_in)
-        if ent_out in placement.entities:
-            placement.entities.remove(ent_out)
+        winning_candidates: list[_PumpCandidate] = []
+        winning_pipes: PipeEntityMap = {}
+        for worst_extent, worst_comp in overextended:
+            winning_candidates, winning_pipes = _find_component_pump_candidates(
+                worst_extent,
+                worst_comp,
+                adj,
+                full_adj,
+                pipe_entities,
+                protected_tiles,
+                fluid_source_tiles,
+                fluid_sink_tiles,
+                extent_limit,
+                cfg,
+            )
+            if winning_candidates:
+                break
 
-        pump_ent = {
-            "name": "pump",
-            "position": {"x": best_cx, "y": best_cy},
-            "direction": best_dir,
-        }
-        placement.entities.append(pump_ent)
+        if not winning_candidates:
+            break
 
-        # Update placement grid_entities and occupied_positions
-        pos_in_key = (round(best_in[0] + 0.5, 2), round(best_in[1] + 0.5, 2))
-        pos_out_key = (round(best_out[0] + 0.5, 2), round(best_out[1] + 0.5, 2))
-        placement.grid_entities[pos_in_key] = pump_ent
-        placement.grid_entities[pos_out_key] = pump_ent
-        placement.occupied_positions.add(pos_in_key)
-        placement.occupied_positions.add(pos_out_key)
-
+        winning_candidates.sort(key=lambda c: c.score)
+        _apply_pump_candidate(winning_candidates[0], winning_pipes, placement)
         pumps_inserted += 1
 
-    _compress_straight_pipes(placement, protected_tiles)
+    _compress_straight_pipes(placement, protected_tiles, cfg)
     return pumps_inserted
