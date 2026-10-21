@@ -361,7 +361,15 @@ class TestDef2Bp(unittest.TestCase):
             ((10, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
         )
         self.assertEqual(
+            def2bp._resolve_terminal("s_w", "a1", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
             def2bp._resolve_terminal("s_w", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_w", "a2", "n", comp_map, {}, {}, {}, set(), 0.001),
             ((11, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
         )
         self.assertEqual(
@@ -378,7 +386,15 @@ class TestDef2Bp(unittest.TestCase):
             ((9, 20), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
         )
         self.assertEqual(
+            def2bp._resolve_terminal("s_n", "a1", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 20), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
             def2bp._resolve_terminal("s_n", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 21), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_n", "a2", "n", comp_map, {}, {}, {}, set(), 0.001),
             ((9, 21), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
         )
         self.assertEqual(
@@ -625,7 +641,7 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(res_s_fast[0]["name"], "fast-underground-belt")
         self.assertEqual(res_s_fast[1]["name"], "fast-underground-belt")
 
-        # South (8): chained underground belt upgraded to express-underground-belt (dist=6, dist+3=9 > 7)
+        # South (8): chained underground belt upgraded to express-underground-belt at max_underground_span (dist=9)
         ents_s_exp = [
             {"name": "transport-belt", "position": {"x": 9.5, "y": 8.5}, "direction": 8},
             {"name": "transport-belt", "position": {"x": 9.5, "y": 9.5}, "direction": 8},
@@ -645,7 +661,7 @@ class TestDef2Bp(unittest.TestCase):
             {
                 "name": "underground-belt",
                 "type": "output",
-                "position": {"x": 9.5, "y": 17.5},
+                "position": {"x": 9.5, "y": 20.5},
                 "direction": 8,
             },
         ]
@@ -760,6 +776,11 @@ class TestDef2Bp(unittest.TestCase):
 
         self.assertEqual(res.valid_input_pins, {(0.0, 10.0)})
         self.assertEqual(res.valid_output_pins, {(40.0, 10.0)})
+        # Pin pad offsets for INPUT (-1, 0), (-2, 0), (-1, -1), (-1, 1) and OUTPUT (1, 0), (2, 0), (1, -1), (1, 1)
+        self.assertIn((-1, 10), captured_init["obstacles"])
+        self.assertIn((-2, 10), captured_init["obstacles"])
+        self.assertIn((41, 10), captured_init["obstacles"])
+        self.assertIn((42, 10), captured_init["obstacles"])
         # MST for water__1 connects (0, 10) -> (10, 9) first (dist 11), then (10, 9) -> (30, 9) (dist 20)
         mst_specs = [s for s in captured_specs if s.is_fluid]
         self.assertEqual(len(mst_specs), 2)
@@ -910,7 +931,7 @@ class TestDef2Bp(unittest.TestCase):
         med_positions = [(mp["position"]["x"], mp["position"]["y"]) for mp in med_poles]
         for _mx, my in med_positions:
             self.assertEqual(my % 1.0, 0.5)
-        # First bridge pole from (5.0, 35.0) towards (5.5, 50.5) would land on (5.5, 43.5), so guard (5.5, 43.5) with pin at (2.0, 43.0)
+        # Guard tile (5.5, 43.5) with pin at (2.0, 43.0) so bridge pole shifts away.
         self.assertIn((5.5, 43.5), med_positions)
         self.assertEqual(len(med_poles), 5)
 
@@ -941,9 +962,40 @@ class TestDef2Bp(unittest.TestCase):
         self.assertNotIn((5.5, 43.5), med_positions_g)
         self.assertIn((6.5, 43.5), med_positions_g)
 
-        # Direct unit assertion for _step_bridge_pole_toward when base_iy > 0 and dy varies
-        step_pt = def2bp._step_bridge_pole_toward(10.0, 20.0, 10.5, 29.0, set(), 9.0)
-        self.assertEqual(step_pt, (10.5, 28.5))
+        # Direct unit assertion for _step_bridge_pole_toward and _reserve_pin_guard_tiles
+        step_pt = def2bp._step_bridge_pole_toward(10.0, 20.0, 19.0, 20.5, set(), 9.0)
+        self.assertEqual(step_pt, (18.5, 20.5))
+        step_pt_y = def2bp._step_bridge_pole_toward(10.0, 20.0, 10.5, 29.0, set(), 9.0)
+        self.assertEqual(step_pt_y, (10.5, 28.5))
+        guard_occ: set[tuple[float, float]] = set()
+        def2bp._reserve_pin_guard_tiles(
+            RouteResult({}, {}, set(), {(5.0, 10.0)}, set(), set()),
+            guard_occ,
+        )
+        self.assertIn((4.5, 10.5), guard_occ)
+        self.assertIn((6.5, 10.5), guard_occ)
+        self.assertIn((5.5, 9.5), guard_occ)
+        self.assertIn((5.5, 11.5), guard_occ)
+
+        # Single-item-net tile_to_nets entry must not be flagged as unresolved crossing in DRC
+        single_item_routes = RouteResult(
+            net_surface_tiles={"iron__1": {(20.5, 20.5): 4}},
+            tile_to_nets={(20.5, 20.5): {"iron__1"}},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles=set(),
+            valid_input_pins=set(),
+            valid_output_pins=set(),
+        )
+        def2bp._run_drc_and_verify(
+            [],
+            [],
+            single_item_routes,
+            PlacementResult([], set(), {}, {}, set(), False),
+            {"pins": []},
+            {},
+            0.001,
+            strict_drc=True,
+        )
 
     def test_route_with_maze_router_hierarchical_and_verifier(self) -> None:
         """Verify hierarchical Stage 1/2 routing, obstacle masking, and NativeLayoutVerifier."""
@@ -972,9 +1024,16 @@ class TestDef2Bp(unittest.TestCase):
 
         router_instances: list[dict[str, Any]] = []
 
+        class FakeNode:
+            def __init__(self, x: int, y: int, z: int, heading: int) -> None:
+                self.x = x
+                self.y = y
+                self.z = z
+                self.heading = heading
+
         class FakeRouteRes:
             is_success = True
-            nodes: tuple = ()
+            nodes = (FakeNode(10, 10, 0, 4), FakeNode(11, 10, 1, 4))
 
         class FakeHierRouter:
             def __init__(self, **kwargs: Any) -> None:
@@ -1019,7 +1078,11 @@ class TestDef2Bp(unittest.TestCase):
                 side_effect=[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
             ),
         ):
-            def2bp.route_with_maze_router(def_data, netlist_data, placement, engine=object())
+            hier_res = def2bp.route_with_maze_router(
+                def_data, netlist_data, placement, engine=object()
+            )
+        self.assertIn((10.5, 10.5), hier_res.tile_to_nets)
+        self.assertNotIn((11.5, 10.5), hier_res.tile_to_nets)
 
         err_out = stderr_buf.getvalue()
         self.assertIn("Stage 1: routing", err_out)
@@ -1042,13 +1105,21 @@ class TestDef2Bp(unittest.TestCase):
         self.assertIn((115, 117), hwy_obs)
         self.assertIn((115, 95), hwy_obs)
         # Direct unit assertion for _build_highway_obstacles with margin=3 vs BAY_Y_STOP=17
-        direct_obs = def2bp._build_highway_obstacles(2, 2, 3, 100, {(0, 0), (0, 1)}, set(), [])
+        direct_obs = def2bp._build_highway_obstacles(
+            2, 2, 3, 100, {(0, 0), (0, 1), (1, 0)}, set(), []
+        )
         self.assertNotIn((10, 4), direct_obs)
+        self.assertNotIn((96, 10), direct_obs)
+        self.assertNotIn((196, 10), direct_obs)
         self.assertNotIn((10, 16), direct_obs)
         self.assertIn((10, 17), direct_obs)
+        self.assertIn((10, 96), direct_obs)
+        self.assertNotIn((10, 97), direct_obs)
         self.assertNotIn((10, 104), direct_obs)
         self.assertNotIn((10, 116), direct_obs)
         self.assertIn((10, 117), direct_obs)
+        self.assertIn((10, 196), direct_obs)
+        self.assertNotIn((10, 197), direct_obs)
 
     def test_build_entities_legacy_floorplan_and_grid_sizes(self) -> None:
         """Verify 2x2 vs 1x1 chassis obstacle handling and legacy floorplan input routing."""
@@ -1166,7 +1237,15 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(def_legacy["pins"][0]["x"], 98000)
         self.assertEqual(def_legacy["pins"][1]["x"], 0)
         self.assertEqual(def_legacy["nets"][2].get("wires"), [])
-        self.assertGreater(len(ents_leg), 2)
+        # Legacy L-channel must emit vertical south belts from y=0.5 up to y=9.5 at x=98.5
+        leg_positions = [(e["position"]["x"], e["position"]["y"]) for e in ents_leg]
+        self.assertIn((98.5, 0.5), leg_positions)
+        self.assertIn((98.5, 9.5), leg_positions)
+        self.assertIn((109.5, 10.5), leg_positions)
+
+        # Direct unit check for _select_cityblock_chassis programmatic threshold (2x2 >= 4 vs 1x1 < 4)
+        ch_2x2 = def2bp._select_cityblock_chassis(2, 2, def2bp.DEFAULT_DEF2BP_CONFIG)
+        self.assertEqual(ch_2x2.channel_width, 8)
 
 
 if __name__ == "__main__":
