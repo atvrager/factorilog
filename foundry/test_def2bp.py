@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import sys
@@ -14,6 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import blueprint
 import def2bp
 from placement import PlacementResult, RouteResult
+
+perf_case = getattr(
+    builtins,
+    "perf_case",
+    lambda *_args, **_kwargs: lambda fn: fn,
+)
 
 MINI_DEF = """
 VERSION 5.8 ;
@@ -1246,6 +1253,201 @@ class TestDef2Bp(unittest.TestCase):
         # Direct unit check for _select_cityblock_chassis programmatic threshold (2x2 >= 4 vs 1x1 < 4)
         ch_2x2 = def2bp._select_cityblock_chassis(2, 2, def2bp.DEFAULT_DEF2BP_CONFIG)
         self.assertEqual(ch_2x2.channel_width, 8)
+
+    def test_perf_cases_smoke(self) -> None:
+        """Smoke-test all @perf_case scale benchmark functions at small scale."""
+        self.assertEqual(len(perf_build_fluid_mst_specs(_setup_fluid_mst_terms(8))), 7)
+        big_p, med_p = perf_wire_chassis_big_and_medium_poles(_setup_chassis_poles(8))
+        self.assertEqual(len(big_p), 8)
+        self.assertEqual(len(med_p), 8)
+        self.assertGreater(perf_bridge_disconnected_chassis_poles(_setup_disconnected_poles(8)), 0)
+        self.assertGreater(
+            perf_register_chassis_router_obstacles(_setup_chassis_obstacles_and_pins(8)), 0
+        )
+        self.assertGreater(perf_merge_chassis_base_entities(_setup_merge_chassis_entities(8)), 8)
+        self.assertEqual(len(perf_jumper_belts_across_chassis_poles(_setup_jumper_belts(8))), 16)
+
+
+def _setup_fluid_mst_terms(
+    n: int,
+) -> list[tuple[tuple[int, int], int | None, int | None]]:
+    return [
+        ((i * 3, (i * 17) % 97), def2bp.DIRECTION_EAST, def2bp.DIRECTION_WEST) for i in range(n)
+    ]
+
+
+@perf_case(scales=(32, 64, 128, 256), setup=_setup_fluid_mst_terms, rounds=3)
+def perf_build_fluid_mst_specs(
+    terms: list[tuple[tuple[int, int], int | None, int | None]],
+) -> list[Any]:
+    """Scale benchmark for fluid terminal Manhattan MST construction."""
+    return def2bp._build_fluid_mst_specs("water__1", "water", terms)
+
+
+def _setup_chassis_poles(n: int) -> list[dict[str, Any]]:
+    entities: list[dict[str, Any]] = []
+    for i in range(n):
+        gx = float((i % 16) * 30 + 5)
+        gy = float((i // 16) * 30 + 5)
+        entities.append(
+            {
+                "name": "big-electric-pole",
+                "position": {"x": gx, "y": gy},
+                "entity_number": i * 2 + 1,
+            }
+        )
+        entities.append(
+            {
+                "name": "medium-electric-pole",
+                "position": {"x": gx + 3.5, "y": gy + 3.5},
+                "entity_number": i * 2 + 2,
+            }
+        )
+    return entities
+
+
+@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_chassis_poles, rounds=3)
+def perf_wire_chassis_big_and_medium_poles(
+    entities: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Scale benchmark for chassis big and medium electric pole wiring."""
+    return def2bp._wire_chassis_big_and_medium_poles(entities, [], def2bp.DEFAULT_DEF2BP_CONFIG)
+
+
+def _setup_disconnected_poles(
+    n: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], RouteResult, int]:
+    med_poles: list[dict[str, Any]] = [
+        {
+            "name": "medium-electric-pole",
+            "position": {"x": float((i % 16) * 7 + 0.5), "y": float((i // 16) * 7 + 0.5)},
+            "entity_number": i + 1,
+        }
+        for i in range(n)
+    ]
+    routes = RouteResult({}, {}, set(), set(), set(), set())
+    return list(med_poles), med_poles, routes, len(med_poles)
+
+
+@perf_case(scales=(32, 64, 128, 256), setup=_setup_disconnected_poles, rounds=3)
+def perf_bridge_disconnected_chassis_poles(
+    data: tuple[list[dict[str, Any]], list[dict[str, Any]], RouteResult, int],
+) -> int:
+    """Scale benchmark for bridging disconnected chassis electric pole components."""
+    entities, med_poles, routes, base_len = data
+    del entities[base_len:]
+    wires: list[list[int]] = [[1, 5, 2, 5]]
+    occupied: set[tuple[float, float]] = set()
+    def2bp._bridge_disconnected_chassis_poles(
+        entities, wires, [], med_poles, routes, occupied, def2bp.DEFAULT_DEF2BP_CONFIG
+    )
+    return len(wires)
+
+
+def _setup_chassis_obstacles_and_pins(
+    n: int,
+) -> tuple[dict[str, Any], PlacementResult, list[dict[str, Any]], int, int, float, float]:
+    pins = [
+        {"name": f"p_{i}", "net": f"n_{i}", "direction": "INPUT", "x": (i * 13) * 1000, "y": 0}
+        for i in range(n)
+    ]
+    chassis_ents = [
+        {
+            "name": "radar" if i % 4 == 0 else "big-electric-pole",
+            "position": {"x": float((i % 32) * 10 + 5), "y": float((i // 32) * 10 + 5)},
+        }
+        for i in range(n)
+    ]
+    placement = PlacementResult([], set(), {}, {}, set(), False)
+    return {"pins": pins}, placement, chassis_ents, 4, 4, 400.0, 400.0
+
+
+@perf_case(
+    scales=(64, 128, 256, 512, 1024),
+    setup=_setup_chassis_obstacles_and_pins,
+    rounds=3,
+)
+def perf_register_chassis_router_obstacles(
+    data: tuple[dict[str, Any], PlacementResult, list[dict[str, Any]], int, int, float, float],
+) -> int:
+    """Scale benchmark for chassis obstacle registration against pin clearance zones."""
+    def_data, placement, chassis_ents, gw, gh, dw, dh = data
+    placement.occupied_positions.clear()
+    def2bp._register_chassis_router_obstacles(
+        def_data,
+        placement,
+        chassis_ents,
+        gw,
+        gh,
+        dw,
+        dh,
+        0.001,
+        def2bp.DEFAULT_DEF2BP_CONFIG,
+    )
+    return len(placement.occupied_positions)
+
+
+def _setup_merge_chassis_entities(
+    n: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    entities: list[dict[str, Any]] = [
+        {
+            "name": "medium-electric-pole",
+            "position": {"x": float((i % 32) * 8 + 1.5), "y": float((i // 32) * 8 + 1.5)},
+            "direction": 0,
+        }
+        for i in range(n)
+    ]
+    chassis_base: list[dict[str, Any]] = [
+        {
+            "name": "small-lamp" if i % 2 == 0 else "big-electric-pole",
+            "position": {"x": float((i % 32) * 8 + 2.5), "y": float((i // 32) * 8 + 2.5)},
+        }
+        for i in range(n)
+    ]
+    return entities, chassis_base, len(entities)
+
+
+@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_merge_chassis_entities, rounds=3)
+def perf_merge_chassis_base_entities(
+    data: tuple[list[dict[str, Any]], list[dict[str, Any]], int],
+) -> int:
+    """Scale benchmark for merging chassis base entities and spatial lamp filtering."""
+    entities, chassis_base, base_len = data
+    del entities[base_len:]
+    merged, _ = def2bp._merge_chassis_base_entities(
+        entities, chassis_base, True, def2bp.DEFAULT_DEF2BP_CONFIG
+    )
+    return len(merged)
+
+
+def _setup_jumper_belts(
+    n: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    belts: list[dict[str, Any]] = []
+    poles: list[dict[str, Any]] = []
+    for i in range(n):
+        px = float((i % 32) * 10 + 10)
+        py = float((i // 32) * 10 + 10)
+        poles.append({"name": "big-electric-pole", "position": {"x": px, "y": py}})
+        belts.extend(
+            {
+                "name": "transport-belt",
+                "position": {"x": px - 0.5, "y": py + dy},
+                "direction": def2bp.DIRECTION_SOUTH,
+            }
+            for dy in (-1.5, -0.5, 0.5, 1.5)
+        )
+    return belts, poles
+
+
+@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_jumper_belts, rounds=3)
+def perf_jumper_belts_across_chassis_poles(
+    data: tuple[list[dict[str, Any]], list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Scale benchmark for converting pole-colliding belts into underground jumpers."""
+    belts, poles = data
+    return def2bp.jumper_belts_across_chassis_poles(belts, poles, cfg=def2bp.DEFAULT_DEF2BP_CONFIG)
 
 
 if __name__ == "__main__":
