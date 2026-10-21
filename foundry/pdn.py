@@ -8,7 +8,7 @@ Supports multi-domain power gating when power switches are present.
 from __future__ import annotations
 
 import collections
-import itertools
+import heapq
 import math
 import sys
 from collections.abc import Mapping, MutableSequence, Sequence
@@ -64,6 +64,17 @@ TERMINAL_SEARCH_DELTAS: tuple[tuple[int, int], ...] = tuple(
     for dy in deltas
     if math.hypot(dx, dy) <= TERMINAL_PLACE_RADIUS
 )
+NEIGHBOR_BUCKET_OFFSETS: tuple[tuple[int, int], ...] = (
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 0),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+)
 
 POWERED_KEYWORDS: tuple[str, ...] = (
     "assembling-machine",
@@ -83,7 +94,7 @@ POWERED_KEYWORDS: tuple[str, ...] = (
 AON_KEYWORDS: tuple[str, ...] = ("combinator", "display-panel", "steam-engine")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PdnConfig:
     """Configuration parameters for PDN synthesis."""
 
@@ -201,24 +212,6 @@ def _generate_candidate_poles(
     return cands
 
 
-def _place_switch_terminal(
-    target_pos: GridPos,
-    surface_occupied: set[GridPos],
-    forbidden_entities: Sequence[JsonMap],
-    cfg: PdnConfig,
-) -> GridPos:
-    """Place a power switch terminal pole near target_pos avoiding forbidden_entities."""
-    bx = math.floor(target_pos[0]) + TILE_HALF
-    by = math.floor(target_pos[1]) + TILE_HALF
-    for dx, dy in TERMINAL_SEARCH_DELTAS:
-        cand = (bx + dx, by + dy)
-        if cand not in surface_occupied and not any(
-            _is_covered(fe, cand, cfg.supply_radius) for fe in forbidden_entities
-        ):
-            return cand
-    raise RuntimeError(f"Could not place power switch terminal near {target_pos}")
-
-
 def _entity_grid_buckets(ent: JsonMap, cfg: PdnConfig) -> list[tuple[int, int]]:
     """Return all candidate grid bucket keys within supply reach of ent."""
     ex, ey = _ent_xy(ent)
@@ -230,6 +223,48 @@ def _entity_grid_buckets(ent: JsonMap, cfg: PdnConfig) -> list[tuple[int, int]]:
     gy_min = int((ey - reach_y) // cfg.grid_step)
     gy_max = int((ey + reach_y) // cfg.grid_step)
     return [(gx, gy) for gx in range(gx_min, gx_max + 1) for gy in range(gy_min, gy_max + 1)]
+
+
+def _index_forbidden_entities(
+    forbidden_entities: Sequence[JsonMap],
+    cfg: PdnConfig,
+) -> dict[tuple[int, int], list[JsonMap]]:
+    """Index forbidden entities by grid bucket within supply reach."""
+    if not forbidden_entities:
+        return {}
+    forbidden_grid: dict[tuple[int, int], list[JsonMap]] = collections.defaultdict(list)
+    for fe in forbidden_entities:
+        for bucket in _entity_grid_buckets(fe, cfg):
+            forbidden_grid[bucket].append(fe)
+    return forbidden_grid
+
+
+def _is_forbidden_cand(
+    cand: GridPos,
+    forbidden_grid: Mapping[tuple[int, int], Sequence[JsonMap]],
+    cfg: PdnConfig,
+) -> bool:
+    """Return True if cand supplies power to any entity in forbidden_grid."""
+    if not forbidden_grid:
+        return False
+    bucket = (int(cand[0] // cfg.grid_step), int(cand[1] // cfg.grid_step))
+    return any(_is_covered(fe, cand, cfg.supply_radius) for fe in forbidden_grid.get(bucket, ()))
+
+
+def _place_switch_terminal(
+    target_pos: GridPos,
+    surface_occupied: set[GridPos],
+    forbidden_grid: Mapping[tuple[int, int], Sequence[JsonMap]],
+    cfg: PdnConfig,
+) -> GridPos:
+    """Place a power switch terminal pole near target_pos avoiding forbidden_grid."""
+    bx = math.floor(target_pos[0]) + TILE_HALF
+    by = math.floor(target_pos[1]) + TILE_HALF
+    for dx, dy in TERMINAL_SEARCH_DELTAS:
+        cand = (bx + dx, by + dy)
+        if cand not in surface_occupied and not _is_forbidden_cand(cand, forbidden_grid, cfg):
+            return cand
+    raise RuntimeError(f"Could not place power switch terminal near {target_pos}")
 
 
 def _index_candidate_coverage(
@@ -251,6 +286,43 @@ def _index_candidate_coverage(
     return cand_covers
 
 
+def _build_set_cover_heap(
+    uncovered: set[int],
+    cand_covers: Mapping[GridPos, set[int]],
+) -> tuple[dict[int, list[GridPos]], dict[GridPos, int], list[tuple[int, int, GridPos]]]:
+    """Build inverted entity-to-candidate index, coverage counts, and priority heap."""
+    ent_to_cands: dict[int, list[GridPos]] = collections.defaultdict(list)
+    rem_count: dict[GridPos, int] = {}
+    heap: list[tuple[int, int, GridPos]] = []
+    for idx, (cand, cov) in enumerate(cand_covers.items()):
+        active = cov & uncovered
+        cnt = len(active)
+        if cnt <= 0:
+            continue
+        rem_count[cand] = cnt
+        heap.append((-cnt, idx, cand))
+        for ent_id in active:
+            ent_to_cands[ent_id].append(cand)
+    heapq.heapify(heap)
+    return ent_to_cands, rem_count, heap
+
+
+def _pop_best_cover_candidate(
+    heap: list[tuple[int, int, GridPos]],
+    rem_count: Mapping[GridPos, int],
+) -> GridPos | None:
+    """Pop the candidate with the largest current uncovered entity count."""
+    while heap:
+        neg_cnt, idx, cand = heapq.heappop(heap)
+        actual = rem_count.get(cand, 0)
+        if actual <= 0:
+            continue
+        if -neg_cnt == actual:
+            return cand
+        heapq.heappush(heap, (-actual, idx, cand))
+    return None
+
+
 def _greedy_set_cover(
     num_entities: int,
     cand_covers: Mapping[GridPos, set[int]],
@@ -258,14 +330,17 @@ def _greedy_set_cover(
     """Select candidate poles using greedy set cover."""
     uncovered = set(range(num_entities))
     chosen: set[GridPos] = set()
-    active_cands = list(cand_covers.keys())
-    while uncovered and active_cands:
-        best_cand = max(active_cands, key=lambda c: len(cand_covers[c] & uncovered))
-        best_covered = cand_covers[best_cand] & uncovered
-        if not best_covered:
+    ent_to_cands, rem_count, heap = _build_set_cover_heap(uncovered, cand_covers)
+    while uncovered:
+        best_cand = _pop_best_cover_candidate(heap, rem_count)
+        if best_cand is None:
             break
         chosen.add(best_cand)
-        uncovered -= best_covered
+        rem_count[best_cand] = 0
+        for ent_id in cand_covers[best_cand] & uncovered:
+            uncovered.remove(ent_id)
+            for other_c in ent_to_cands[ent_id]:
+                rem_count[other_c] -= 1
     return chosen, uncovered
 
 
@@ -273,7 +348,7 @@ def _find_fallback_pole_for_entity(
     ent: JsonMap,
     surface_occupied: set[GridPos],
     chosen: set[GridPos],
-    forbidden_entities: Sequence[JsonMap],
+    forbidden_grid: Mapping[tuple[int, int], Sequence[JsonMap]],
     cfg: PdnConfig,
 ) -> GridPos | None:
     """Search the local tile neighborhood around ent for a valid covering pole."""
@@ -289,7 +364,7 @@ def _find_fallback_pole_for_entity(
                 cand not in surface_occupied
                 and cand not in chosen
                 and _is_covered(ent, cand, cfg.supply_radius)
-                and not any(_is_covered(fe, cand, cfg.supply_radius) for fe in forbidden_entities)
+                and not _is_forbidden_cand(cand, forbidden_grid, cfg)
             ):
                 return cand
     return None
@@ -301,19 +376,19 @@ def _cover_remaining_entities(
     uncovered: set[int],
     chosen: set[GridPos],
     valid_cands: list[GridPos],
+    valid_cand_set: set[GridPos],
     surface_occupied: set[GridPos],
-    forbidden_entities: Sequence[JsonMap],
+    forbidden_grid: Mapping[tuple[int, int], Sequence[JsonMap]],
     cfg: PdnConfig,
 ) -> None:
     """Cover any entities missed by the coarse candidate grid using a local scan."""
     for i in list(uncovered):
         ent = domain_powered[i]
-        cand = _find_fallback_pole_for_entity(
-            ent, surface_occupied, chosen, forbidden_entities, cfg
-        )
+        cand = _find_fallback_pole_for_entity(ent, surface_occupied, chosen, forbidden_grid, cfg)
         if cand is not None:
             chosen.add(cand)
-            if cand not in valid_cands:
+            if cand not in valid_cand_set:
+                valid_cand_set.add(cand)
                 valid_cands.append(cand)
             uncovered.remove(i)
         else:
@@ -321,13 +396,44 @@ def _cover_remaining_entities(
             sys.stderr.write(f"UNCOVERED {domain_name} {ent.get('name')} at ({px}, {py})\n")
 
 
+def _bucket_poles_by_reach(
+    poles: Sequence[GridPos], wire_reach: float
+) -> dict[tuple[int, int], list[tuple[int, GridPos]]]:
+    """Index poles into spatial buckets of size wire_reach."""
+    buckets: dict[tuple[int, int], list[tuple[int, GridPos]]] = collections.defaultdict(list)
+    for i, pt in enumerate(poles):
+        buckets[(math.floor(pt[0] / wire_reach), math.floor(pt[1] / wire_reach))].append((i, pt))
+    return buckets
+
+
+def _reachable_higher_neighbors(
+    i: int,
+    pt: GridPos,
+    buckets: Mapping[tuple[int, int], Sequence[tuple[int, GridPos]]],
+    wire_reach: float,
+) -> list[tuple[int, float, GridPos]]:
+    """Return sorted (j, dist, p_j) for poles j > i within wire_reach of pt."""
+    bx = math.floor(pt[0] / wire_reach)
+    by = math.floor(pt[1] / wire_reach)
+    matches: list[tuple[int, float, GridPos]] = []
+    for dx, dy in NEIGHBOR_BUCKET_OFFSETS:
+        for j, p_j in buckets.get((sum((bx, dx)), sum((by, dy))), ()):
+            if j > i and (d := math.hypot(pt[0] - p_j[0], pt[1] - p_j[1])) <= wire_reach:
+                matches.append((j, d, p_j))
+    matches.sort()
+    return matches
+
+
 def _build_wire_adjacency(
     cand_list: Sequence[GridPos], wire_reach: float
 ) -> dict[GridPos, list[GridPos]]:
     """Build adjacency lists for candidate poles within wire_reach."""
     cand_adj: dict[GridPos, list[GridPos]] = {c: [] for c in cand_list}
-    for c1, c2 in itertools.combinations(cand_list, COORD_PRECISION):
-        if math.hypot(c1[0] - c2[0], c1[1] - c2[1]) <= wire_reach:
+    if wire_reach <= 0.0:
+        return cand_adj
+    buckets = _bucket_poles_by_reach(cand_list, wire_reach)
+    for i, c1 in enumerate(cand_list):
+        for _j, _d, c2 in _reachable_higher_neighbors(i, c1, buckets, wire_reach):
             cand_adj[c1].append(c2)
             cand_adj[c2].append(c1)
     return cand_adj
@@ -417,10 +523,13 @@ def _collect_mst_edges(
     pole_list: Sequence[GridPos], wire_reach: float
 ) -> list[tuple[float, int, int]]:
     """Collect sorted (distance, u, v) edges for pole pairs within wire_reach."""
+    if wire_reach <= 0.0:
+        return []
+    buckets = _bucket_poles_by_reach(pole_list, wire_reach)
     edges = [
         (d, i, j)
-        for (i, p_i), (j, p_j) in itertools.combinations(enumerate(pole_list), COORD_PRECISION)
-        if (d := math.hypot(p_i[0] - p_j[0], p_i[1] - p_j[1])) <= wire_reach
+        for i, p_i in enumerate(pole_list)
+        for j, d, _p_j in _reachable_higher_neighbors(i, p_i, buckets, wire_reach)
     ]
     edges.sort()
     return edges
@@ -444,7 +553,7 @@ def _build_domain_mst(all_poles: set[GridPos], wire_reach: float) -> list[MstEdg
 def _solve_domain(
     domain_name: str,
     domain_powered: Sequence[JsonMap],
-    forbidden_entities: Sequence[JsonMap],
+    forbidden_grid: Mapping[tuple[int, int], Sequence[JsonMap]],
     extra_terminals: Sequence[GridPos],
     cands: Sequence[GridPos],
     surface_occupied: set[GridPos],
@@ -457,9 +566,9 @@ def _solve_domain(
     valid_cands = [
         c
         for c in cands
-        if c not in surface_occupied
-        and not any(_is_covered(fe, c, cfg.supply_radius) for fe in forbidden_entities)
+        if c not in surface_occupied and not _is_forbidden_cand(c, forbidden_grid, cfg)
     ]
+    valid_cand_set = set(valid_cands)
     cand_covers = _index_candidate_coverage(domain_powered, valid_cands, cfg)
     chosen, uncovered = _greedy_set_cover(len(domain_powered), cand_covers)
     if uncovered:
@@ -469,13 +578,15 @@ def _solve_domain(
             uncovered,
             chosen,
             valid_cands,
+            valid_cand_set,
             surface_occupied,
-            forbidden_entities,
+            forbidden_grid,
             cfg,
         )
     for term in extra_terminals:
         chosen.add(term)
-        if term not in valid_cands:
+        if term not in valid_cand_set:
+            valid_cand_set.add(term)
             valid_cands.append(term)
 
     cand_adj = _build_wire_adjacency(valid_cands, cfg.wire_reach)
@@ -516,26 +627,28 @@ def _solve_multi_domain(
     """Solve AON and switched power domains and return combined MST connections."""
     aon_powered = [e for e in powered if is_aon_entity(e)]
     switched_powered = [e for e in powered if not is_aon_entity(e)]
+    switched_grid = _index_forbidden_entities(switched_powered, cfg)
+    aon_grid = _index_forbidden_entities(aon_powered, cfg)
 
     aon_terminals: list[GridPos] = []
     switched_terminals: list[GridPos] = []
     for ps in power_switch_ents:
         ps_pos = _ent_xy(ps)
-        p_aon = _place_switch_terminal(ps_pos, surface_occupied, switched_powered, cfg)
+        p_aon = _place_switch_terminal(ps_pos, surface_occupied, switched_grid, cfg)
         aon_terminals.append(p_aon)
         surface_occupied.add(p_aon)
 
-        p_sw = _place_switch_terminal(ps_pos, surface_occupied, aon_powered, cfg)
+        p_sw = _place_switch_terminal(ps_pos, surface_occupied, aon_grid, cfg)
         switched_terminals.append(p_sw)
         surface_occupied.add(p_sw)
 
     aon_poles, aon_mst = _solve_domain(
-        "aon", aon_powered, switched_powered, aon_terminals, cands, surface_occupied, cfg
+        "aon", aon_powered, switched_grid, aon_terminals, cands, surface_occupied, cfg
     )
     surface_occupied.update(aon_poles)
 
     switched_poles, switched_mst = _solve_domain(
-        "switched", switched_powered, aon_powered, switched_terminals, cands, surface_occupied, cfg
+        "switched", switched_powered, aon_grid, switched_terminals, cands, surface_occupied, cfg
     )
     surface_occupied.update(switched_poles)
 
@@ -567,7 +680,7 @@ def generate_pdn(
 
     if not power_switch_ents:
         all_poles, mst_connections = _solve_domain(
-            "default", powered, (), (), cands, surface_occupied, config
+            "default", powered, {}, (), cands, surface_occupied, config
         )
         _emit_domain_poles(
             all_poles, "default", entities, pole_entities, surface_occupied, config.pole_name

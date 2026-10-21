@@ -1184,6 +1184,14 @@ def route_unrouted_signal_nets(
 
     Returns the number of nets routed.
     """
+    unrouted_nets = [
+        net
+        for net in def_data.get("nets", [])
+        if not net.get("wires") and len(net.get("connections", [])) == 2
+    ]
+    if not unrouted_nets:
+        return 0
+
     if netlist_data is None:
         netlist_data = def_data.get("_netlist_data")
 
@@ -1201,6 +1209,14 @@ def route_unrouted_signal_nets(
         (c.get("name", ""), *get_component_box(c, units, netlist_data))
         for c in def_data.get("components", [])
     ]
+    comp_by_x_tile: dict[int, list[tuple[str, int, int, int, int]]] = {}
+    comp_by_y_tile: dict[int, list[tuple[str, int, int, int, int]]] = {}
+    for cbox in comp_boxes:
+        _cn, cx, cy, cw, ch = cbox
+        for tx in range(cx // units, (cx + cw) // units + 1):
+            comp_by_x_tile.setdefault(tx, []).append(cbox)
+        for ty in range(cy // units, (cy + ch) // units + 1):
+            comp_by_y_tile.setdefault(ty, []).append(cbox)
 
     def _is_driver(inst: str, pin: str) -> bool:
         if inst in comp_map:
@@ -1240,12 +1256,8 @@ def route_unrouted_signal_nets(
 
     routed_count = 0
 
-    for net in def_data.get("nets", []):
-        if net.get("wires"):
-            continue
+    for net in unrouted_nets:
         conns = net.get("connections", [])
-        if len(conns) != 2:
-            continue
 
         c1, c2 = conns[0], conns[1]
         if _is_driver(c1[0], c1[1]):
@@ -1272,7 +1284,7 @@ def route_unrouted_signal_nets(
                     h_blocked = True
                     break
             if not h_blocked:
-                for c_name, cx, cy, cw, ch in comp_boxes:
+                for c_name, cx, cy, cw, ch in comp_by_y_tile.get(y1 // units, ()):
                     if (
                         c_name not in (inst_src, inst_dst)
                         and cx < h_max
@@ -1324,7 +1336,7 @@ def route_unrouted_signal_nets(
 
             # Check vertical M2 segment
             v_blocked = False
-            for _c_name, cx, cy, cw, ch in comp_boxes:
+            for _c_name, cx, cy, cw, ch in comp_by_x_tile.get(x_mid // units, ()):
                 if cx < x_mid < cx + cw and not (cy + ch <= y_min or cy >= y_max):
                     v_blocked = True
                     break
@@ -1348,7 +1360,7 @@ def route_unrouted_signal_nets(
             if h1_blocked:
                 continue
 
-            for c_name, cx, cy, cw, ch in comp_boxes:
+            for c_name, cx, cy, cw, ch in comp_by_y_tile.get(y1 // units, ()):
                 if (
                     c_name not in (inst_src, inst_dst)
                     and cx < h1_max
@@ -1370,7 +1382,7 @@ def route_unrouted_signal_nets(
             if h2_blocked:
                 continue
 
-            for c_name, cx, cy, cw, ch in comp_boxes:
+            for c_name, cx, cy, cw, ch in comp_by_y_tile.get(y2 // units, ()):
                 if (
                     c_name not in (inst_src, inst_dst)
                     and cx < h2_max

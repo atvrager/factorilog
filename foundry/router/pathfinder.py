@@ -695,9 +695,6 @@ def _a_star_search(
         nodes.append(prev_node)
         curr_s = prev_s
 
-    nodes.reverse()
-    edges.reverse()
-
     if start_at_mouth and source_hood_mouth is not None and nodes:
         h_type, h_dir = grid.active_hood_types.get(net.source, ("output", 0))
         m_dir = h_dir if h_type == "output" else OPPOSITE_DIR.get(h_dir, 0)
@@ -705,9 +702,12 @@ def _a_star_search(
         edge_cost = grid.get_fast_node_cost(
             net.source[0], net.source[1], LAYER_SURFACE, STEP_COST, net_name, lane
         )
-        connecting_edge = RouteEdge(first_node, nodes[0], "straight", tier_name_surface, edge_cost)
-        nodes.insert(0, first_node)
-        edges.insert(0, connecting_edge)
+        connecting_edge = RouteEdge(first_node, nodes[-1], "straight", tier_name_surface, edge_cost)
+        nodes.append(first_node)
+        edges.append(connecting_edge)
+
+    nodes.reverse()
+    edges.reverse()
 
     return RouteResult(
         net_name=net.name,

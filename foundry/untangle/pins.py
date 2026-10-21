@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 from typing import Any
 
 try:
@@ -15,6 +16,15 @@ except ImportError:
     from untangle.spatial import get_component_box
 
 
+def _index_inst_pin_nets(def_data: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Build a (instance_name, pin_name) -> net lookup dictionary."""
+    conn_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for n in def_data.get("nets", []):
+        for inst, pin in n.get("connections", []):
+            conn_map[(inst, pin)] = n
+    return conn_map
+
+
 def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
     """Untangle symmetric splitter outputs whose initial routing segments cross.
 
@@ -23,20 +33,17 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
     swapping the initial segments and net connections eliminates the crossing.
     """
     scale = 1.0 / float(def_data.get("units", 1000))
-    for c in def_data.get("components", []):
+    components = def_data.get("components", [])
+    comp_by_name = {c.get("name", ""): c for c in components}
+    conn_map = _index_inst_pin_nets(def_data)
+    for c in components:
         if c.get("macro") not in ("belt_split2", "belt_balancer2"):
             continue
         name = c.get("name", "")
         gx = c.get("x", 0) * scale
         gy = c.get("y", 0) * scale
-        n_y1 = None
-        n_y2 = None
-        for n in def_data.get("nets", []):
-            for inst, pin in n.get("connections", []):
-                if inst == name and pin == "y1":
-                    n_y1 = n
-                elif inst == name and pin == "y2":
-                    n_y2 = n
+        n_y1 = conn_map.get((name, "y1"))
+        n_y2 = conn_map.get((name, "y2"))
         if not n_y1 or not n_y2:
             continue
         py1 = (round((gx + 0.75) * 1000), round((gy + 0.5) * 1000))
@@ -110,23 +117,14 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                     ((inst, pin) for inst, pin in n_y1.get("connections", []) if inst != name),
                     (None, None),
                 )
-                dst_comp = next(
-                    (comp for comp in def_data.get("components", []) if comp["name"] == dst_inst),
-                    None,
-                )
-                can_swap = False
-                if (
-                    dst_comp
+                dst_comp = comp_by_name.get(dst_inst) if dst_inst is not None else None
+                can_swap = (
+                    bool(dst_comp)
                     and dst_comp.get("macro") in ("belt_split2", "belt_merge2")
                     and dst_comp.get("y") == c.get("y")
                     and dst_pin == "a"
-                ):
-                    b_used = any(
-                        any(inst == dst_inst and p == "b" for inst, p in on.get("connections", []))
-                        for on in def_data.get("nets", [])
-                    )
-                    if not b_used:
-                        can_swap = True
+                    and (dst_inst, "b") not in conn_map
+                )
 
                 if can_swap:
                     blocked = False
@@ -175,6 +173,11 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             else (inst, p)
                             for inst, p in n_y1.get("connections", [])
                         ]
+                        conn_map[(name, "y1")] = n_y2
+                        conn_map[(name, "y2")] = n_y1
+                        if dst_inst is not None:
+                            conn_map.pop((dst_inst, "a"), None)
+                            conn_map[(dst_inst, "b")] = n_y1
                         n_y1["wires"] = merge_collinear_wires(
                             n_y1.get("wires", []), n_y1.get("vias", [])
                         )
@@ -198,23 +201,14 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                     ((inst, pin) for inst, pin in n_y2.get("connections", []) if inst != name),
                     (None, None),
                 )
-                dst_comp = next(
-                    (comp for comp in def_data.get("components", []) if comp["name"] == dst_inst),
-                    None,
-                )
-                can_swap = False
-                if (
-                    dst_comp
+                dst_comp = comp_by_name.get(dst_inst) if dst_inst is not None else None
+                can_swap = (
+                    bool(dst_comp)
                     and dst_comp.get("macro") in ("belt_split2", "belt_merge2")
                     and dst_comp.get("y") == c.get("y")
                     and dst_pin == "b"
-                ):
-                    a_used = any(
-                        any(inst == dst_inst and p == "a" for inst, p in on.get("connections", []))
-                        for on in def_data.get("nets", [])
-                    )
-                    if not a_used:
-                        can_swap = True
+                    and (dst_inst, "a") not in conn_map
+                )
 
                 if can_swap:
                     blocked = False
@@ -263,6 +257,11 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
                             else (inst, p)
                             for inst, p in n_y2.get("connections", [])
                         ]
+                        conn_map[(name, "y2")] = n_y1
+                        conn_map[(name, "y1")] = n_y2
+                        if dst_inst is not None:
+                            conn_map.pop((dst_inst, "b"), None)
+                            conn_map[(dst_inst, "a")] = n_y2
                         n_y1["wires"] = merge_collinear_wires(
                             n_y1.get("wires", []), n_y1.get("vias", [])
                         )
@@ -689,6 +688,10 @@ def untangle_splitter_outputs(def_data: dict[str, Any]) -> None:
         conns2 = [conn for conn in n_y2.get("connections", []) if conn[0] != name]
         n_y1["connections"] = [(name, "y1"), *conns2]
         n_y2["connections"] = [(name, "y2"), *conns1]
+        for dst_inst, dst_pin in conns2:
+            conn_map[(dst_inst, dst_pin)] = n_y1
+        for dst_inst, dst_pin in conns1:
+            conn_map[(dst_inst, dst_pin)] = n_y2
 
 
 def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
@@ -699,6 +702,7 @@ def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
     Removing this segment allows the vertical belt to side-load directly into the
     splitter output.
     """
+    conn_map = _index_inst_pin_nets(def_data)
     for c in def_data.get("components", []):
         macro = c.get("macro", "")
         if macro not in ("belt_merge2", "belt_split2", "belt_balancer2"):
@@ -712,27 +716,27 @@ def fix_reverse_splitter_inputs(def_data: dict[str, Any]) -> None:
                 "a": (gx + 250, gy + 500),
                 "b": (gx + 250, gy + 1500),
             }
-            for n in def_data.get("nets", []):
-                for inst, pin in n.get("connections", []):
-                    if inst == name and pin in pin_coords:
-                        px, py = pin_coords[pin]
-                        n["wires"] = [
-                            w
-                            for w in n.get("wires", [])
-                            if not (
-                                w.get("layer") == "M1"
-                                and (
-                                    (w["x1"] == px and w["y1"] == py and w["x2"] > gx + 1000)
-                                    or (w["x2"] == px and w["y2"] == py and w["x1"] > gx + 1000)
-                                )
+            for pin, (px, py) in pin_coords.items():
+                n = conn_map.get((name, pin))
+                if n is not None:
+                    n["wires"] = [
+                        w
+                        for w in n.get("wires", [])
+                        if not (
+                            w.get("layer") == "M1"
+                            and (
+                                (w["x1"] == px and w["y1"] == py and w["x2"] > gx + 1000)
+                                or (w["x2"] == px and w["y2"] == py and w["x1"] > gx + 1000)
                             )
-                        ]
+                        )
+                    ]
 
 
 def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
     """Untangle symmetric merger and balancer inputs whose routing segments cross."""
     scale = 1.0 / float(def_data.get("units", 1000))
     units = int(def_data.get("units", 1000))
+    conn_map = _index_inst_pin_nets(def_data)
     for c in def_data.get("components", []):
         macro = c.get("macro", "")
         if macro not in ("belt_merge2", "belt_balancer2"):
@@ -742,14 +746,8 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
         name = c.get("name", "")
         gx = c.get("x", 0) * scale
         gy = c.get("y", 0) * scale
-        n_a = None
-        n_b = None
-        for n in def_data.get("nets", []):
-            for inst, pin in n.get("connections", []):
-                if inst == name and pin == pin_a_name:
-                    n_a = n
-                elif inst == name and pin == pin_b_name:
-                    n_b = n
+        n_a = conn_map.get((name, pin_a_name))
+        n_b = conn_map.get((name, pin_b_name))
         if not n_a or not n_b or n_a is n_b:
             continue
         pa = (round((gx + 0.25) * units), round((gy + 0.5) * units))
@@ -946,6 +944,8 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
                     (inst, pin_a_name if inst == name and p == pin_b_name else p)
                     for inst, p in n_b.get("connections", [])
                 ]
+                conn_map[(name, pin_b_name)] = n_a
+                conn_map[(name, pin_a_name)] = n_b
                 continue
 
         # Otherwise, direct pin swap: keep M2 trunks on their tracks, adjust trunk Y-end and stubs
@@ -1019,24 +1019,22 @@ def untangle_merger_inputs(def_data: dict[str, Any]) -> None:
             (inst, pin_a_name if inst == name and p == pin_b_name else p)
             for inst, p in n_b.get("connections", [])
         ]
+        conn_map[(name, pin_b_name)] = n_a
+        conn_map[(name, pin_a_name)] = n_b
 
 
 def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
     """Untangle merger inputs that share the same vertical track to avoid overlap and crossings."""
     units = int(def_data.get("units", 1000))
+    conn_map = _index_inst_pin_nets(def_data)
     for c in def_data.get("components", []):
         if c.get("macro") != "belt_merge2":
             continue
         cname = c.get("name", "")
         gx = c.get("x", 0)
         gy = c.get("y", 0)
-        n_a, n_b = None, None
-        for n in def_data.get("nets", []):
-            for inst, pin in n.get("connections", []):
-                if inst == cname and pin == "a":
-                    n_a = n
-                elif inst == cname and pin == "b":
-                    n_b = n
+        n_a = conn_map.get((cname, "a"))
+        n_b = conn_map.get((cname, "b"))
         if not n_a or not n_b or n_a is n_b:
             continue
         pa = (gx + int(0.25 * units), gy + int(0.5 * units))
@@ -1139,6 +1137,8 @@ def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
                 ]
                 n_a["connections"] = conns_a
                 n_b["connections"] = conns_b
+                conn_map[(cname, "b")] = n_a
+                conn_map[(cname, "a")] = n_b
                 for v in n_a.get("vias", []):
                     if v.get("x") == x_track and v.get("y") == other_ya:
                         v["x"] = x_shift
@@ -1195,6 +1195,8 @@ def untangle_shared_merger_tracks(def_data: dict[str, Any]) -> None:
                 ]
                 n_a["connections"] = conns_a
                 n_b["connections"] = conns_b
+                conn_map[(cname, "b")] = n_a
+                conn_map[(cname, "a")] = n_b
                 for v in n_b.get("vias", []):
                     if v.get("x") == x_track and v.get("y") == other_yb:
                         v["x"] = x_shift
@@ -1220,6 +1222,7 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
     inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
     cell_map = netlist_data.get("cells", {})
     fluids = set(netlist_data.get("fluids", []))
+    conn_map = _index_inst_pin_nets(def_data)
 
     for c in def_data.get("components", []):
         cname = c.get("name", "")
@@ -1241,11 +1244,9 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
         gy = round(c.get("y", 0) * scale * units)
 
         in_slots, _ = get_macro_port_slots(cell)
-        port_to_net: dict[str, dict[str, Any]] = {}
-        for n in def_data.get("nets", []):
-            for iname, pin in n.get("connections", []):
-                if iname == cname and pin in inputs:
-                    port_to_net[pin] = n
+        port_to_net: dict[str, dict[str, Any]] = {
+            pin: n for pin in inputs if (n := conn_map.get((cname, pin))) is not None
+        }
 
         pickup_x = gx - int(0.5 * units)
 
@@ -1312,6 +1313,8 @@ def untangle_machine_inputs(def_data: dict[str, Any], netlist_data: dict[str, An
                     n1["connections"] = [(cname, p0), *conns1]
                     port_to_net[p0] = n1
                     port_to_net[p1] = n0
+                    conn_map[(cname, p0)] = n1
+                    conn_map[(cname, p1)] = n0
 
                     if w_m2_cross["y1"] == py1:
                         w_m2_cross["y1"] = py0
@@ -1347,6 +1350,18 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
     to resolve cleanly.
     """
     units = int(def_data.get("units", 1000))
+    conn_map = _index_inst_pin_nets(def_data)
+    m2_by_x_bucket: dict[int, list[tuple[dict[str, Any], dict[str, Any]]]] = (
+        collections.defaultdict(list)
+    )
+    m1_by_y: dict[int, list[tuple[dict[str, Any], dict[str, Any]]]] = collections.defaultdict(list)
+    for n in def_data.get("nets", []):
+        for w in n.get("wires", []):
+            layer = w.get("layer")
+            if layer == "M2":
+                m2_by_x_bucket[w["x1"] // 250].append((n, w))
+            elif layer == "M1" and w["y1"] == w["y2"]:
+                m1_by_y[w["y1"]].append((n, w))
 
     for c in def_data.get("components", []):
         if c.get("macro") != "belt_split2":
@@ -1362,33 +1377,20 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
         py_b = gy + int(1.5 * units)
         front_x = gx - int(0.5 * units)
 
-        net_a = None
-        net_b = None
-        for n in def_data.get("nets", []):
-            for inst, pin in n.get("connections", []):
-                if inst == cname:
-                    if pin == "a":
-                        net_a = n
-                    elif pin == "b":
-                        net_b = n
+        net_a = conn_map.get((cname, "a"))
+        net_b = conn_map.get((cname, "b"))
 
         if not net_a or net_b is not None:
             continue
 
-        pin_a_blocked = False
-        for other_net in def_data.get("nets", []):
-            if other_net is net_a:
-                continue
-            for w in other_net.get("wires", []):
-                if (
-                    w.get("layer") == "M2"
-                    and abs(w["x1"] - front_x) <= 250
-                    and min(w["y1"], w["y2"]) <= py_a <= max(w["y1"], w["y2"])
-                ):
-                    pin_a_blocked = True
-                    break
-            if pin_a_blocked:
-                break
+        fx_bucket = front_x // 250
+        pin_a_blocked = any(
+            other_net is not net_a
+            and abs(w["x1"] - front_x) <= 250
+            and min(w["y1"], w["y2"]) <= py_a <= max(w["y1"], w["y2"])
+            for bx in (fx_bucket - 1, fx_bucket, fx_bucket + 1)
+            for other_net, w in m2_by_x_bucket.get(bx, ())
+        )
 
         if not pin_a_blocked:
             continue
@@ -1418,42 +1420,24 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
         if not m2_feeder:
             continue
 
-        b_m1_blocked = False
-        for other_net in def_data.get("nets", []):
-            if other_net is net_a:
-                continue
-            for ow in other_net.get("wires", []):
-                if (
-                    ow.get("layer") == "M1"
-                    and ow["y1"] == py_b
-                    and ow["y2"] == py_b
-                    and not (max(ow["x1"], ow["x2"]) <= start_x or min(ow["x1"], ow["x2"]) >= end_x)
-                ):
-                    b_m1_blocked = True
-                    break
-            if b_m1_blocked:
-                break
+        b_m1_blocked = any(
+            other_net is not net_a
+            and ow["y1"] == py_b
+            and ow["y2"] == py_b
+            and not (max(ow["x1"], ow["x2"]) <= start_x or min(ow["x1"], ow["x2"]) >= end_x)
+            for other_net, ow in m1_by_y.get(py_b, ())
+        )
         if b_m1_blocked:
             continue
 
         ext_min_y = min(py_a, py_b)
         ext_max_y = max(py_a, py_b)
-        b_m2_blocked = False
-        for other_net in def_data.get("nets", []):
-            if other_net is net_a:
-                continue
-            for ow in other_net.get("wires", []):
-                if (
-                    ow.get("layer") == "M2"
-                    and ow["x1"] == start_x
-                    and not (
-                        max(ow["y1"], ow["y2"]) <= ext_min_y or min(ow["y1"], ow["y2"]) >= ext_max_y
-                    )
-                ):
-                    b_m2_blocked = True
-                    break
-            if b_m2_blocked:
-                break
+        b_m2_blocked = any(
+            other_net is not net_a
+            and ow["x1"] == start_x
+            and not (max(ow["y1"], ow["y2"]) <= ext_min_y or min(ow["y1"], ow["y2"]) >= ext_max_y)
+            for other_net, ow in m2_by_x_bucket.get(start_x // 250, ())
+        )
         if b_m2_blocked:
             continue
 
@@ -1465,6 +1449,7 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
         for w in incoming_m1:
             w["y1"] = py_b
             w["y2"] = py_b
+            m1_by_y[py_b].append((net_a, w))
 
         for v in net_a.get("vias", []):
             if v.get("y") == py_a and start_x <= v.get("x", 0) <= end_x:
@@ -1477,3 +1462,5 @@ def relocate_blocked_splitter_inputs(def_data: dict[str, Any]) -> None:
             else:
                 new_conns.append((inst, pin))
         net_a["connections"] = new_conns
+        conn_map.pop((cname, "a"), None)
+        conn_map[(cname, "b")] = net_a

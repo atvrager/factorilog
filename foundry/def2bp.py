@@ -844,6 +844,10 @@ def _route_stage1_blocks(
         file=sys.stderr,
         flush=True,
     )
+    obs_by_block: dict[TileCoord, set[TileCoord]] = {}
+    pitch = cfg.block_pitch
+    for pt in obstacles:
+        obs_by_block.setdefault((pt[0] // pitch, pt[1] // pitch), set()).add(pt)
     for (bx, by), blk_nets in sorted(intra_block_specs.items()):
         if not blk_nets:
             continue
@@ -851,8 +855,9 @@ def _route_stage1_blocks(
         b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
             (bx, by), bay_blocks, margin=margin
         )
+        blk_raw_obs = obs_by_block.get((bx, by), set())
         blk_obs = _build_block_core_obstacles(
-            b_min_x, b_min_y, b_max_x, b_max_y, obstacles, blk_nets
+            b_min_x, b_min_y, b_max_x, b_max_y, blk_raw_obs, blk_nets
         )
         blk_router = maze_router_mod.DualLaneMazeRouter(
             min_x=b_min_x,
@@ -1316,15 +1321,14 @@ def _register_chassis_router_obstacles(
 
 
 def _relocate_legacy_input_pin(
-    def_data: MutableJsonMap,
-    net_name: str,
+    net_pins: Sequence[MutableJsonMap],
     ch_x: float,
     dbu: float,
 ) -> None:
-    for pin_obj in _as_list(def_data.get("pins")):
-        if isinstance(pin_obj, dict) and net_name in (pin_obj.get("net"), pin_obj.get("name")):
-            pin_obj["x"] = int(ch_x * dbu - PIN_DBU_SHIFT)
-            pin_obj["y"] = 0
+    new_x = int(ch_x * dbu - PIN_DBU_SHIFT)
+    for pin_obj in net_pins:
+        pin_obj["x"] = new_x
+        pin_obj["y"] = 0
 
 
 def _emit_legacy_l_channel_belts(
@@ -1361,7 +1365,8 @@ def _emit_legacy_l_channel_belts(
 
 def _route_legacy_external_input_net(
     net: MutableJsonMap,
-    def_data: MutableJsonMap,
+    net_pins: Sequence[MutableJsonMap],
+    dbu: float,
     placement: PlacementResult,
     inst_to_block: Mapping[str, TileCoord],
     cfg: Def2BpConfig,
@@ -1379,8 +1384,7 @@ def _route_legacy_external_input_net(
     net["wires"] = []
     net["vias"] = []
     ch_x = target_block[0] * float(cfg.block_pitch) - CHANNEL_IN_OFFSET
-    dbu = _as_float(def_data.get("units"), cfg.default_units)
-    _relocate_legacy_input_pin(def_data, _as_str(net.get("name")), ch_x, dbu)
+    _relocate_legacy_input_pin(net_pins, ch_x, dbu)
 
     sx, sy = _entity_xy(sink_ent)
     is_spl = sink_ent.get("name") == "splitter"
@@ -1430,6 +1434,25 @@ def _classify_interblock_net(
     )
 
 
+def _index_legacy_input_pins(
+    def_data: MutableJsonMap,
+) -> tuple[set[str], dict[str, list[MutableJsonMap]]]:
+    input_pin_nets: set[str] = set()
+    pins_by_key: dict[str, list[MutableJsonMap]] = {}
+    for pin_obj in _as_list(def_data.get("pins")):
+        if not isinstance(pin_obj, dict):
+            continue
+        p_net = _as_str(pin_obj.get("net"))
+        p_name = _as_str(pin_obj.get("name"))
+        if pin_obj.get("direction") == "INPUT":
+            input_pin_nets.add(p_net or p_name)
+        if p_net:
+            pins_by_key.setdefault(p_net, []).append(pin_obj)
+        if p_name and p_name != p_net:
+            pins_by_key.setdefault(p_name, []).append(pin_obj)
+    return input_pin_nets, pins_by_key
+
+
 def _plan_legacy_macro_floorplan(
     def_data: MutableJsonMap,
     netlist_data: JsonMap,
@@ -1460,11 +1483,8 @@ def _plan_legacy_macro_floorplan(
         for i in _as_list(netlist_data.get("instances"))
     }
     cell_table = _as_map(netlist_data.get("cells"))
-    input_pin_nets = {
-        _as_str(_as_map(p).get("net"), _as_str(_as_map(p).get("name")))
-        for p in _as_list(def_data.get("pins"))
-        if _as_map(p).get("direction") == "INPUT"
-    }
+    input_pin_nets, pins_by_key = _index_legacy_input_pins(def_data)
+    dbu = _as_float(def_data.get("units"), cfg.default_units)
     input_channel_entities: list[EntityDict] = []
 
     for net_obj in _as_list(def_data.get("nets")):
@@ -1473,9 +1493,13 @@ def _plan_legacy_macro_floorplan(
         ib_route = _classify_interblock_net(net_obj, inst_to_block, inst_to_cell, cell_table)
         if ib_route is not None:
             floorplan.routes[ib_route.net_name] = ib_route
-        if _as_str(net_obj.get("name")) in input_pin_nets:
+        net_name = _as_str(net_obj.get("name"))
+        if net_name in input_pin_nets:
+            net_pins = pins_by_key.get(net_name, [])
             input_channel_entities.extend(
-                _route_legacy_external_input_net(net_obj, def_data, placement, inst_to_block, cfg)
+                _route_legacy_external_input_net(
+                    net_obj, net_pins, dbu, placement, inst_to_block, cfg
+                )
             )
 
     fabric_entities = floorplan.emit_fabric_entities(placement=placement)

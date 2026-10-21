@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeAlias
@@ -45,6 +46,7 @@ except ImportError:
 
 TileCoord: TypeAlias = tuple[int, int]
 GridCoord: TypeAlias = tuple[float, float]
+BBox4: TypeAlias = tuple[int, int, int, int]
 ConduitNode: TypeAlias = tuple[str, int, int] | tuple[str, int, int, int]
 ConduitGraph: TypeAlias = dict[ConduitNode, set[ConduitNode]]
 EntityRecord: TypeAlias = dict[str, object]
@@ -69,7 +71,7 @@ PASSTHROUGH_OFFSETS: dict[str, TileCoord] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PumpInsertionConfig:
     """Configuration parameters for inline fluid pipeline pump insertion."""
 
@@ -86,7 +88,7 @@ class PumpInsertionConfig:
 DEFAULT_PUMP_CONFIG = PumpInsertionConfig()
 
 
-@dataclass
+@dataclass(slots=True)
 class _UndergroundPipePair:
     """A matched pair of facing underground pipe-to-ground entities."""
 
@@ -102,9 +104,19 @@ class _UndergroundPipePair:
     span_tiles: set[TileCoord]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class _BridgeCutMetrics:
+    """Precomputed split metrics for a directed bridge edge (u_node, v_node)."""
+
+    ext_u: float
+    ext_v: float
+    u_srcs: int
+    u_sinks: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ComponentFlowProfile:
-    """Source/sink weights and BFS distance map for one fluid component."""
+    """Source/sink weights, BFS distances, and bridge cuts for one fluid component."""
 
     sources: set[ConduitNode]
     sinks: set[ConduitNode]
@@ -114,9 +126,10 @@ class _ComponentFlowProfile:
     total_sinks: int
     use_sources: bool
     dist: dict[ConduitNode, int]
+    bridge_cuts: dict[tuple[ConduitNode, ConduitNode], _BridgeCutMetrics]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PumpCandidate:
     """A scored candidate pipe-pair replacement location for an inline pump."""
 
@@ -579,7 +592,7 @@ def _relocate_p2g_hood(
 
 def _evaluate_span_unroll_eligibility(
     pair: _UndergroundPipePair,
-    other_ug_tiles: set[TileCoord],
+    span_tile_counts: Mapping[TileCoord, int],
     protected_tiles: set[TileCoord],
     placement: PlacementResult,
     tile_map: TileEntityMap,
@@ -600,21 +613,21 @@ def _evaluate_span_unroll_eligibility(
                 and (tx, ty) not in tile_map
                 and (tx, ty) not in protected_tiles
             )
-            can_be_hood.append(is_free and (tx, ty) not in other_ug_tiles)
+            can_be_hood.append(is_free and span_tile_counts.get((tx, ty), 0) <= 0)
             can_be_pipe.append(is_free and no_perp)
     return can_be_pipe, can_be_hood
 
 
 def _shrink_single_pair(
     pair: _UndergroundPipePair,
-    other_ug_tiles: set[TileCoord],
+    span_tile_counts: Mapping[TileCoord, int],
     protected_tiles: set[TileCoord],
     placement: PlacementResult,
     tile_map: TileEntityMap,
 ) -> None:
     """Unroll an underground pipe pair completely or partially where surface tiles are free."""
     can_be_pipe, can_be_hood = _evaluate_span_unroll_eligibility(
-        pair, other_ug_tiles, protected_tiles, placement, tile_map
+        pair, span_tile_counts, protected_tiles, placement, tile_map
     )
     if all(can_be_pipe):
         pair.ent_u["name"] = "pipe"
@@ -663,15 +676,6 @@ def _shrink_single_pair(
     pair.span = s_v - s_u
 
 
-def _other_pair_tiles(pairs: Sequence[_UndergroundPipePair], exclude_idx: int) -> set[TileCoord]:
-    """Return all underground span tiles belonging to underground pairs other than exclude_idx."""
-    tiles: set[TileCoord] = set()
-    for j, other in enumerate(pairs):
-        if j != exclude_idx:
-            tiles.update(other.span_tiles)
-    return tiles
-
-
 def _shrink_underground_pipe_spans(
     placement: PlacementResult,
     protected_tiles: set[TileCoord],
@@ -691,23 +695,64 @@ def _shrink_underground_pipe_spans(
 
     max_span = get_underground_span("pipe-to-ground", cfg.default_pipe_span)
     pairs = _match_underground_pipe_pairs(placement.entities, tile_map, max_span)
+    span_tile_counts: collections.Counter[TileCoord] = collections.Counter()
+    for pair in pairs:
+        span_tile_counts.update(pair.span_tiles)
 
-    for idx, pair in enumerate(pairs):
+    for pair in pairs:
         if pair.span >= 2 and ("pipe-to-ground", pair.ux, pair.uy) in overextended_nodes:
-            other_ug_tiles = _other_pair_tiles(pairs, idx)
-            _shrink_single_pair(pair, other_ug_tiles, protected_tiles, placement, tile_map)
+            for t in pair.span_tiles:
+                span_tile_counts[t] -= 1
+            _shrink_single_pair(pair, span_tile_counts, protected_tiles, placement, tile_map)
+            for t in pair.span_tiles:
+                span_tile_counts[t] += 1
 
 
-def _matches_fluid(name: str, fluids: set[str]) -> bool:
-    return name in fluids or any(f in name for f in fluids)
+def _compile_fluid_pattern(fluids: set[str]) -> re.Pattern[str] | None:
+    """Compile a single regex matching any fluid token, or None if fluids is empty."""
+    if not fluids:
+        return None
+    escaped = [re.escape(f) for f in sorted(fluids) if f]
+    if not escaped:
+        return None
+    return re.compile("|".join(escaped))
+
+
+def _matches_fluid_pattern(name: str, fluid_pattern: re.Pattern[str] | None) -> bool:
+    return fluid_pattern is not None and fluid_pattern.search(name) is not None
+
+
+def _precompute_cell_fluid_ports(
+    cell_map: JsonMap,
+    fluid_pattern: re.Pattern[str] | None,
+) -> dict[str, tuple[TileCoord | None, list[GridCoord], list[GridCoord]]]:
+    """Precompute (passthrough_offset, output_offsets, input_offsets) for each macro cell."""
+    cell_ports: dict[str, tuple[TileCoord | None, list[GridCoord], list[GridCoord]]] = {}
+    for cell_id, raw_cell in cell_map.items():
+        cell = _as_map(raw_cell)
+        machine_type = _as_str(cell.get("machine"))
+        passthrough = PASSTHROUGH_OFFSETS.get(machine_type)
+        out_offsets: list[GridCoord] = []
+        for raw_port in _as_list(cell.get("outputs")):
+            port = _as_str(raw_port)
+            if _matches_fluid_pattern(port, fluid_pattern):
+                ax, ay = get_macro_port_geometry(cell, port, is_output=True)["inserter_pos"]
+                out_offsets.append((ax, ay))
+        in_offsets: list[GridCoord] = []
+        for raw_port in _as_list(cell.get("inputs")):
+            port = _as_str(raw_port)
+            if _matches_fluid_pattern(port, fluid_pattern):
+                ax, ay = get_macro_port_geometry(cell, port, is_output=False)["inserter_pos"]
+                in_offsets.append((ax, ay))
+        cell_ports[_as_str(cell_id)] = (passthrough, out_offsets, in_offsets)
+    return cell_ports
 
 
 def _collect_component_fluid_ports(
     comp: JsonMap,
     inst_map: dict[str, JsonMap],
-    cell_map: JsonMap,
+    cell_ports: Mapping[str, tuple[TileCoord | None, list[GridCoord], list[GridCoord]]],
     scale: float,
-    fluids: set[str],
     fluid_source_tiles: set[TileCoord],
     fluid_sink_tiles: set[TileCoord],
     unused_passthrough_tiles: set[TileCoord],
@@ -716,33 +761,23 @@ def _collect_component_fluid_ports(
     cname = _as_str(comp.get("name"))
     inst = inst_map.get(cname, {})
     cell_id = _as_str(inst.get("cell"), _as_str(comp.get("macro")))
-    cell = _as_map(cell_map.get(cell_id))
+    passthrough, out_offsets, in_offsets = cell_ports.get(cell_id, (None, [], []))
     gx = _as_float(comp.get("x")) * scale
     gy = _as_float(comp.get("y")) * scale
-    machine_type = _as_str(cell.get("machine"))
-    if machine_type in PASSTHROUGH_OFFSETS:
-        ox, oy = PASSTHROUGH_OFFSETS[machine_type]
-        unused_passthrough_tiles.add((math.floor(gx + ox), math.floor(gy + oy)))
-
-    for raw_port in _as_list(cell.get("outputs")):
-        port = _as_str(raw_port)
-        if _matches_fluid(port, fluids):
-            geom = get_macro_port_geometry(cell, port, is_output=True)
-            ax, ay = geom["inserter_pos"]
-            fluid_source_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
-
-    for raw_port in _as_list(cell.get("inputs")):
-        port = _as_str(raw_port)
-        if _matches_fluid(port, fluids):
-            geom = get_macro_port_geometry(cell, port, is_output=False)
-            ax, ay = geom["inserter_pos"]
-            fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
+    if passthrough is not None:
+        unused_passthrough_tiles.add(
+            (math.floor(gx + passthrough[0]), math.floor(gy + passthrough[1]))
+        )
+    for ax, ay in out_offsets:
+        fluid_source_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
+    for ax, ay in in_offsets:
+        fluid_sink_tiles.add((math.floor(gx + ax), math.floor(gy + ay)))
 
 
 def _collect_pin_fluid_terminals(
     pins: Sequence[object],
     scale: float,
-    fluids: set[str],
+    fluid_pattern: re.Pattern[str] | None,
 ) -> tuple[set[TileCoord], set[TileCoord]]:
     """Extract (fluid_source_tiles, fluid_sink_tiles) from DEF boundary pins."""
     sources: set[TileCoord] = set()
@@ -750,7 +785,7 @@ def _collect_pin_fluid_terminals(
     for raw_pin in pins:
         pin = _as_map(raw_pin)
         pname = _as_str(pin.get("name"), _as_str(pin.get("net")))
-        if not _matches_fluid(pname, fluids):
+        if not _matches_fluid_pattern(pname, fluid_pattern):
             continue
         pt = (
             math.floor(_as_float(pin.get("x")) * scale),
@@ -781,14 +816,15 @@ def _collect_fluid_terminals_and_protected_tiles(
         | {f.replace("_", "-") for f in raw_fluids}
         | raw_fluids
     )
+    fluid_pattern = _compile_fluid_pattern(fluids)
     inst_map = {
         _as_str(_as_map(inst).get("name")): _as_map(inst)
         for inst in _as_list(netlist_data.get("instances"))
     }
-    cell_map = _as_map(netlist_data.get("cells"))
+    cell_ports = _precompute_cell_fluid_ports(_as_map(netlist_data.get("cells")), fluid_pattern)
 
     fluid_source_tiles, fluid_sink_tiles = _collect_pin_fluid_terminals(
-        _as_list(def_data.get("pins")), scale, fluids
+        _as_list(def_data.get("pins")), scale, fluid_pattern
     )
     unused_passthrough_tiles: set[TileCoord] = set()
 
@@ -796,9 +832,8 @@ def _collect_fluid_terminals_and_protected_tiles(
         _collect_component_fluid_ports(
             _as_map(raw_comp),
             inst_map,
-            cell_map,
+            cell_ports,
             scale,
-            fluids,
             fluid_source_tiles,
             fluid_sink_tiles,
             unused_passthrough_tiles,
@@ -916,6 +951,160 @@ def _record_node_terminals(
         raw_sink[node] = 1
 
 
+def _merge_bbox(a: BBox4, b: BBox4) -> BBox4:
+    """Return the bounding box enclosing both a and b."""
+    ax0, ax1, ay0, ay1 = a
+    bx0, bx1, by0, by1 = b
+    return (
+        ax0 if ax0 < bx0 else bx0,
+        ax1 if ax1 > bx1 else bx1,
+        ay0 if ay0 < by0 else by0,
+        ay1 if ay1 > by1 else by1,
+    )
+
+
+def _bbox_extent(box: BBox4) -> float:
+    """Return max(width, height) of a (min_x, max_x, min_y, max_y) bounding box."""
+    min_x, max_x, min_y, max_y = box
+    return float(max(max_x - min_x, max_y - min_y))
+
+
+def _tarjan_dfs_order(
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+) -> tuple[
+    list[ConduitNode],
+    dict[ConduitNode, int],
+    dict[ConduitNode, int],
+    dict[ConduitNode, ConduitNode | None],
+    dict[ConduitNode, list[ConduitNode]],
+]:
+    """Run iterative DFS over worst_comp and return pre-order, tin, low, parent, and children."""
+    root = next(iter(worst_comp))
+    order: list[ConduitNode] = [root]
+    tin: dict[ConduitNode, int] = {root: 0}
+    low: dict[ConduitNode, int] = {root: 0}
+    parent: dict[ConduitNode, ConduitNode | None] = {root: None}
+    children: dict[ConduitNode, list[ConduitNode]] = {root: []}
+    stack: list[tuple[ConduitNode, list[ConduitNode], int]] = [(root, list(adj.get(root, ())), 0)]
+    while stack:
+        u, nbs, idx = stack[-1]
+        if idx >= len(nbs):
+            stack.pop()
+            p = parent[u]
+            if p is not None:
+                low[p] = min(low[p], low[u])
+            continue
+        stack[-1] = (u, nbs, idx + 1)
+        v = nbs[idx]
+        if v not in tin:
+            t = len(order)
+            order.append(v)
+            tin[v] = t
+            low[v] = t
+            parent[v] = u
+            children[u].append(v)
+            children[v] = []
+            stack.append((v, list(adj.get(v, ())), 0))
+        elif v != parent[u]:
+            low[u] = min(low[u], tin[v])
+    return order, tin, low, parent, children
+
+
+def _build_prefix_suffix_bboxes(
+    order: Sequence[ConduitNode],
+) -> tuple[list[BBox4], list[BBox4]]:
+    """Build prefix and suffix (min_x, max_x, min_y, max_y) tables over DFS pre-order."""
+    n = len(order)
+    node_boxes: list[BBox4] = [
+        (pt[0], pt[0], pt[1], pt[1]) for pt in (_node_tile(u) for u in order)
+    ]
+    pref: list[BBox4] = list(node_boxes)
+    for i in range(1, n):
+        pref[i] = _merge_bbox(pref[i - 1], node_boxes[i])
+    suff: list[BBox4] = list(node_boxes)
+    for i in reversed(range(n - 1)):
+        suff[i] = _merge_bbox(suff[i + 1], node_boxes[i])
+    return pref, suff
+
+
+def _record_bridge_edge_cuts(
+    u: ConduitNode,
+    p: ConduitNode,
+    l_idx: int,
+    sz: int,
+    box: BBox4,
+    r_src: int,
+    r_sink: int,
+    pref: Sequence[BBox4],
+    suff: Sequence[BBox4],
+    total_srcs: int,
+    total_sinks: int,
+    bridge_cuts: dict[tuple[ConduitNode, ConduitNode], _BridgeCutMetrics],
+) -> None:
+    """Record bidirectional _BridgeCutMetrics for a bridge edge between child u and parent p."""
+    r_idx = l_idx + sz
+    rest_box = pref[l_idx - 1] if r_idx >= len(pref) else _merge_bbox(pref[l_idx - 1], suff[r_idx])
+    ext_c = _bbox_extent(box)
+    ext_r = _bbox_extent(rest_box)
+    bridge_cuts[(u, p)] = _BridgeCutMetrics(ext_c, ext_r, r_src, r_sink)
+    bridge_cuts[(p, u)] = _BridgeCutMetrics(ext_r, ext_c, total_srcs - r_src, total_sinks - r_sink)
+
+
+def _build_bridge_cut_metrics(
+    worst_comp: set[ConduitNode],
+    adj: ConduitGraph,
+    raw_src: Mapping[ConduitNode, int],
+    raw_sink: Mapping[ConduitNode, int],
+    total_srcs: int,
+    total_sinks: int,
+) -> dict[tuple[ConduitNode, ConduitNode], _BridgeCutMetrics]:
+    """Precompute O(1) split metrics for all bridge edges in worst_comp."""
+    if len(worst_comp) <= 1:
+        return {}
+    order, tin, low, parent, children = _tarjan_dfs_order(worst_comp, adj)
+    pref, suff = _build_prefix_suffix_bboxes(order)
+    sub_size: dict[ConduitNode, int] = {}
+    sub_box: dict[ConduitNode, BBox4] = {}
+    sub_raw_src: dict[ConduitNode, int] = {}
+    sub_raw_sink: dict[ConduitNode, int] = {}
+    bridge_cuts: dict[tuple[ConduitNode, ConduitNode], _BridgeCutMetrics] = {}
+
+    for u in reversed(order):
+        ux, uy = _node_tile(u)
+        box: BBox4 = (ux, ux, uy, uy)
+        sz = 1
+        r_src = raw_src.get(u, 0)
+        r_sink = raw_sink.get(u, 0)
+        for ch in children[u]:
+            sz += sub_size[ch]
+            box = _merge_bbox(box, sub_box[ch])
+            r_src += sub_raw_src[ch]
+            r_sink += sub_raw_sink[ch]
+        sub_size[u] = sz
+        sub_box[u] = box
+        sub_raw_src[u] = r_src
+        sub_raw_sink[u] = r_sink
+
+        p = parent[u]
+        if p is not None and low[u] > tin[p]:
+            _record_bridge_edge_cuts(
+                u,
+                p,
+                tin[u],
+                sz,
+                box,
+                r_src,
+                r_sink,
+                pref,
+                suff,
+                total_srcs,
+                total_sinks,
+                bridge_cuts,
+            )
+    return bridge_cuts
+
+
 def _compute_component_flow_profile(
     worst_comp: set[ConduitNode],
     adj: ConduitGraph,
@@ -923,7 +1112,7 @@ def _compute_component_flow_profile(
     fluid_source_tiles: set[TileCoord],
     fluid_sink_tiles: set[TileCoord],
 ) -> _ComponentFlowProfile:
-    """Identify sources, sinks, terminal weights, and BFS distances for a component."""
+    """Identify sources, sinks, terminal weights, BFS distances, and bridge cuts for a component."""
     sources: list[ConduitNode] = []
     sinks: list[ConduitNode] = []
     raw_src: dict[ConduitNode, int] = {}
@@ -945,16 +1134,24 @@ def _compute_component_flow_profile(
     use_sources = bool(sources) or not bool(sinks)
     ref_nodes = sources or sinks or [min(worst_comp, key=_node_tile)]
     dist = _bfs_component_distances(ref_nodes, worst_comp, adj)
+    sources_set = set(sources)
+    sinks_set = set(sinks)
+    total_srcs = sum(raw_src.values())
+    total_sinks = sum(raw_sink.values())
+    bridge_cuts = _build_bridge_cut_metrics(
+        worst_comp, adj, raw_src, raw_sink, total_srcs, total_sinks
+    )
 
     return _ComponentFlowProfile(
-        sources=set(sources),
-        sinks=set(sinks),
+        sources=sources_set,
+        sinks=sinks_set,
         raw_src=raw_src,
         raw_sink=raw_sink,
-        total_srcs=sum(raw_src.values()),
-        total_sinks=sum(raw_sink.values()),
+        total_srcs=total_srcs,
+        total_sinks=total_sinks,
         use_sources=use_sources,
         dist=dist,
+        bridge_cuts=bridge_cuts,
     )
 
 
@@ -965,12 +1162,11 @@ def _is_collinear_degree_two_pair(
     uy: int,
     vx: int,
     vy: int,
-    worst_comp: set[ConduitNode],
     adj: ConduitGraph,
 ) -> bool:
-    """Return True if u_node and v_node form a straight degree-2 pipe segment in worst_comp."""
-    u_nbs = [nb for nb in adj.get(u_node, ()) if nb in worst_comp]
-    v_nbs = [nb for nb in adj.get(v_node, ()) if nb in worst_comp]
+    """Return True if u_node and v_node form a straight degree-2 pipe segment."""
+    u_nbs = tuple(adj.get(u_node, ()))
+    v_nbs = tuple(adj.get(v_node, ()))
     if len(u_nbs) != 2 or len(v_nbs) != 2:
         return False
     dx, dy = vx - ux, vy - uy
@@ -979,25 +1175,6 @@ def _is_collinear_degree_two_pair(
     if nb_u[0] not in ("pipe", "pipe-to-ground") or nb_v[0] not in ("pipe", "pipe-to-ground"):
         return False
     return _node_tile(nb_u) == (ux - dx, uy - dy) and _node_tile(nb_v) == (vx + dx, vy + dy)
-
-
-def _partition_without_edge(
-    u_node: ConduitNode,
-    v_node: ConduitNode,
-    worst_comp: set[ConduitNode],
-    adj: ConduitGraph,
-) -> set[ConduitNode]:
-    """Return the connected subset of worst_comp reachable from u_node when (u_node, v_node) is cut."""
-    comp_u: set[ConduitNode] = {u_node}
-    queue: collections.deque[ConduitNode] = collections.deque([u_node])
-    blocked_edges = {(u_node, v_node), (v_node, u_node)}
-    while queue:
-        cur = queue.popleft()
-        for nb in adj.get(cur, ()):
-            if nb in worst_comp and nb not in comp_u and (cur, nb) not in blocked_edges:
-                comp_u.add(nb)
-                queue.append(nb)
-    return comp_u
 
 
 def _determine_cut_flow_direction(
@@ -1021,39 +1198,35 @@ def _determine_cut_flow_direction(
 
 
 def _resolve_split_flow_and_metrics(
-    comp_u: set[ConduitNode],
+    u_node: ConduitNode,
     v_node: ConduitNode,
     u_dist: int,
     v_dist: int,
     worst_extent: float,
-    worst_comp: set[ConduitNode],
     profile: _ComponentFlowProfile,
     max_segment_extent: int,
 ) -> tuple[bool, int, float, float]:
     """Compute (is_u_in, sep_penalty, over_limit, primary_metric) for a candidate edge cut."""
     default_u_in = (u_dist < v_dist) if profile.use_sources else (u_dist > v_dist)
-    if v_node in comp_u:
+    cut = profile.bridge_cuts.get((u_node, v_node))
+    if cut is None:
         return default_u_in, 1, worst_extent, round(worst_extent, 2)
 
-    comp_v = worst_comp - comp_u
-    u_srcs = sum(profile.raw_src.get(n, 0) for n in comp_u)
-    u_sinks = sum(profile.raw_sink.get(n, 0) for n in comp_u)
+    u_srcs = cut.u_srcs
+    u_sinks = cut.u_sinks
     v_srcs = profile.total_srcs - u_srcs
     v_sinks = profile.total_sinks - u_sinks
 
     is_u_in, sep_penalty = _determine_cut_flow_direction(
         u_srcs, u_sinks, v_srcs, v_sinks, default_u_in, bool(profile.sources and profile.sinks)
     )
-    ext_u = component_extent(comp_u)[0]
-    ext_v = component_extent(comp_v)[0]
+    ext_u = cut.ext_u
+    ext_v = cut.ext_v
     split_ext = max(ext_u, ext_v)
     over_limit = max(0.0, split_ext - float(max_segment_extent))
 
-    comp_in, comp_out = (comp_u, comp_v) if is_u_in else (comp_v, comp_u)
     in_sinks, out_srcs = (u_sinks, v_srcs) if is_u_in else (v_sinks, u_srcs)
-    in_has_sink = in_sinks > 0 or bool(comp_in & profile.sinks)
-    out_has_src = out_srcs > 0 or bool(comp_out & profile.sources)
-    use_out_ext = over_limit == 0.0 and in_has_sink and not out_has_src
+    use_out_ext = over_limit == 0.0 and bool(in_sinks) and not bool(out_srcs)
     ext_out = ext_v if is_u_in else ext_u
     primary_metric = round(ext_out if use_out_ext else split_ext, 2)
     return is_u_in, sep_penalty, over_limit, primary_metric
@@ -1081,7 +1254,6 @@ def _score_pipe_pair_candidate(
     vy: int,
     is_vertical: bool,
     worst_extent: float,
-    worst_comp: set[ConduitNode],
     adj: ConduitGraph,
     profile: _ComponentFlowProfile,
     target_dist: int,
@@ -1094,12 +1266,11 @@ def _score_pipe_pair_candidate(
     v_dist = profile.dist.get(v_node)
     if u_dist is None or v_dist is None or u_dist == v_dist:
         return None
-    if not _is_collinear_degree_two_pair(u_node, v_node, ux, uy, vx, vy, worst_comp, adj):
+    if not _is_collinear_degree_two_pair(u_node, v_node, ux, uy, vx, vy, adj):
         return None
 
-    comp_u = _partition_without_edge(u_node, v_node, worst_comp, adj)
     is_u_in, sep_penalty, over_limit, primary_metric = _resolve_split_flow_and_metrics(
-        comp_u, v_node, u_dist, v_dist, worst_extent, worst_comp, profile, max_segment_extent
+        u_node, v_node, u_dist, v_dist, worst_extent, profile, max_segment_extent
     )
     in_t, out_t = ((ux, uy), (vx, vy)) if is_u_in else ((vx, vy), (ux, uy))
     base_dist = u_dist if is_u_in else v_dist
@@ -1152,7 +1323,6 @@ def _find_component_pump_candidates(
                 vy,
                 is_vertical,
                 worst_extent,
-                worst_comp,
                 adj,
                 profile,
                 target_dist,
