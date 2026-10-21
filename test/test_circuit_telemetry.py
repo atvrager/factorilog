@@ -261,7 +261,6 @@ END DESIGN
         self.assertGreater(len(belt_wires), 0, "Sensor belt must have wire connection in wires")
         self.assertGreater(len(disp_wires), 0, "Display panel must have wire connection in wires")
 
-
         # 2. Verify all entity connections are within maximum wire reach (<= 9.0 tiles)
         ent_by_num = {e["entity_number"]: e for e in entities}
         for ent in entities:

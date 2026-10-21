@@ -163,9 +163,7 @@ class TestChassisFloorplan(unittest.TestCase):
                 {"name": "street_inst", "macro": "inserter", "x": 98000, "y": 50000},
             ],
         }
-        violations = self.chassis.verify_cells_in_cores(
-            def_data, grid_w=2, grid_h=2
-        )
+        violations = self.chassis.verify_cells_in_cores(def_data, grid_w=2, grid_h=2)
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0]["component"], "street_inst")
 
@@ -235,5 +233,3 @@ class TestChassisFloorplan(unittest.TestCase):
             def_data, grid_w=3, grid_h=3, netlist_data=netlist_data
         )
         self.assertEqual(len(violations), 0)
-
-

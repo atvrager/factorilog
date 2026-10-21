@@ -60,7 +60,9 @@ class TestDefUntangle(unittest.TestCase):
         self.assertFalse(idx.is_v_clear_staircase(8000, 4000, 9000))
 
         # Same line ignored if net1 is ignored
-        self.assertTrue(idx.is_v_clear_staircase(8000, 4000, 9000, net_to_ignore=def_data["nets"][0]))
+        self.assertTrue(
+            idx.is_v_clear_staircase(8000, 4000, 9000, net_to_ignore=def_data["nets"][0])
+        )
 
     def test_untangle_splitter_outputs_turn_crossing(self) -> None:
         """Verify untangling splitter outputs with downstream crossing turns."""
@@ -220,7 +222,6 @@ class TestDefUntangle(unittest.TestCase):
         # The 4 wire segments simplify to 2 collinear-merged segments
         wires = def_data["nets"][0]["wires"]
         self.assertEqual(len(wires), 2)
-
 
     def test_untangle_balancer_inputs_north_crossing(self) -> None:
         """Verify untangling balancer inputs approaching from the North."""
@@ -396,8 +397,20 @@ def perf_untangle_def_pins_only(
         components.extend(
             [
                 {"name": f"sp_{i}", "macro": "belt_split2", "x": x0, "y": 10000, "orient": "N"},
-                {"name": f"mg_{i}", "macro": "belt_merge2", "x": x0 + 5000, "y": 10000, "orient": "N"},
-                {"name": f"am_{i}", "macro": "asm_cell", "x": x0 + 10000, "y": 10000, "orient": "N"},
+                {
+                    "name": f"mg_{i}",
+                    "macro": "belt_merge2",
+                    "x": x0 + 5000,
+                    "y": 10000,
+                    "orient": "N",
+                },
+                {
+                    "name": f"am_{i}",
+                    "macro": "asm_cell",
+                    "x": x0 + 10000,
+                    "y": 10000,
+                    "orient": "N",
+                },
             ]
         )
         instances.append({"name": f"am_{i}", "cell": "asm_cell"})
@@ -406,22 +419,30 @@ def perf_untangle_def_pins_only(
                 {
                     "name": f"n_sp1_{i}",
                     "connections": [(f"sp_{i}", "y1"), (f"mg_{i}", "a")],
-                    "wires": [{"layer": "M1", "x1": x0 + 750, "y1": 10500, "x2": x0 + 5250, "y2": 10500}],
+                    "wires": [
+                        {"layer": "M1", "x1": x0 + 750, "y1": 10500, "x2": x0 + 5250, "y2": 10500}
+                    ],
                 },
                 {
                     "name": f"n_sp2_{i}",
                     "connections": [(f"sp_{i}", "y2"), (f"mg_{i}", "b")],
-                    "wires": [{"layer": "M1", "x1": x0 + 750, "y1": 11500, "x2": x0 + 5250, "y2": 11500}],
+                    "wires": [
+                        {"layer": "M1", "x1": x0 + 750, "y1": 11500, "x2": x0 + 5250, "y2": 11500}
+                    ],
                 },
                 {
                     "name": f"n_am1_{i}",
                     "connections": [(f"mg_{i}", "y"), (f"am_{i}", "in1")],
-                    "wires": [{"layer": "M1", "x1": x0 + 5750, "y1": 10500, "x2": x0 + 9500, "y2": 10500}],
+                    "wires": [
+                        {"layer": "M1", "x1": x0 + 5750, "y1": 10500, "x2": x0 + 9500, "y2": 10500}
+                    ],
                 },
                 {
                     "name": f"n_am2_{i}",
                     "connections": [(f"sp_{i}", "a"), (f"am_{i}", "in2")],
-                    "wires": [{"layer": "M1", "x1": x0 + 250, "y1": 11500, "x2": x0 + 9500, "y2": 11500}],
+                    "wires": [
+                        {"layer": "M1", "x1": x0 + 250, "y1": 11500, "x2": x0 + 9500, "y2": 11500}
+                    ],
                 },
             ]
         )
@@ -459,7 +480,9 @@ def perf_route_unrouted_signal_nets(
         {
             "name": f"n_{i}",
             "connections": [(f"c_{i}", "y1"), (f"c_{(i + 1) % n}", "a")],
-            "wires": [{"layer": "M1", "x1": i * 10000, "y1": 10500, "x2": i * 10000 + 2000, "y2": 10500}],
+            "wires": [
+                {"layer": "M1", "x1": i * 10000, "y1": 10500, "x2": i * 10000 + 2000, "y2": 10500}
+            ],
         }
         for i in range(n)
     ]

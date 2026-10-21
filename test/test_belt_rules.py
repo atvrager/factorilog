@@ -742,7 +742,9 @@ END DESIGN
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities, wires=wires)
         self.assertTrue(
-            any(v.code == "DRC-12" and "no circuit wire connection" in v.message for v in violations)
+            any(
+                v.code == "DRC-12" and "no circuit wire connection" in v.message for v in violations
+            )
         )
         self.assertTrue(
             any(v.code == "DRC-12" and "missing copper terminal" in v.message for v in violations)
@@ -765,7 +767,9 @@ END DESIGN
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities, wires=wires)
-        circ_violations = [v for v in violations if v.code in ("DRC-09", "DRC-10", "DRC-11", "DRC-12")]
+        circ_violations = [
+            v for v in violations if v.code in ("DRC-09", "DRC-10", "DRC-11", "DRC-12")
+        ]
         self.assertEqual(circ_violations, [])
 
     def test_drc_fluid_mixing_adjacent_pipes(self) -> None:
@@ -794,8 +798,16 @@ END DESIGN
         # Entrance at (0, 0) direction 12 (West) points underground East
         # Exit at (4, 0) direction 4 (East) points underground West
         entities = [
-            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 4.0, "y": 0.0}},
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 0.0, "y": 0.0},
+            },
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 4.0, "y": 0.0},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -805,8 +817,16 @@ END DESIGN
     def test_drc_pipe_to_ground_max_span_ten_passes(self) -> None:
         """Matching pipe-to-ground entities separated by exactly 10 tiles pass DRC."""
         entities = [
-            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 10.0, "y": 0.0}},
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 0.0, "y": 0.0},
+            },
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 10.0, "y": 0.0},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -816,7 +836,11 @@ END DESIGN
     def test_drc_pipe_to_ground_unpaired(self) -> None:
         """Rule DRC-14 flags pipe-to-ground with no matching pair."""
         entities = [
-            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 0.0, "y": 0.0},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -825,8 +849,16 @@ END DESIGN
     def test_drc_pipe_to_ground_span_eleven_exceeded(self) -> None:
         """Rule DRC-14 flags pipe-to-ground pairs separated by 11 tiles."""
         entities = [
-            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 11.0, "y": 0.0}},
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 0.0, "y": 0.0},
+            },
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 11.0, "y": 0.0},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -835,9 +867,21 @@ END DESIGN
     def test_drc_pipe_to_ground_span_overlap(self) -> None:
         """Rule DRC-15 flags pipe-to-ground colliding with active underground pipe span."""
         entities = [
-            {"name": "pipe-to-ground", "direction": DIRECTION_WEST, "position": {"x": 0.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_EAST, "position": {"x": 6.0, "y": 0.0}},
-            {"name": "pipe-to-ground", "direction": DIRECTION_NORTH, "position": {"x": 3.0, "y": 0.0}},
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 0.0, "y": 0.0},
+            },
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 6.0, "y": 0.0},
+            },
+            {
+                "name": "pipe-to-ground",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 3.0, "y": 0.0},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -845,20 +889,14 @@ END DESIGN
 
     def test_drc_pipeline_extent_clean(self) -> None:
         """Rule DRC-16 passes when pipeline extent does not exceed 320 tiles."""
-        entities = [
-            {"name": "pipe", "position": {"x": float(i), "y": 0.0}}
-            for i in range(50)
-        ]
+        entities = [{"name": "pipe", "position": {"x": float(i), "y": 0.0}} for i in range(50)]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
         self.assertFalse(any(v.code == "DRC-16" for v in violations))
 
     def test_drc_pipeline_extent_exceeded(self) -> None:
         """Rule DRC-16 flags pipeline networks exceeding maximum allowed extent (320 tiles)."""
-        entities = [
-            {"name": "pipe", "position": {"x": float(i), "y": 0.0}}
-            for i in range(350)
-        ]
+        entities = [{"name": "pipe", "position": {"x": float(i), "y": 0.0}} for i in range(350)]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
         drc16 = [v for v in violations if v.code == "DRC-16"]
@@ -872,7 +910,9 @@ END DESIGN
         for i in range(175):
             entities.append({"name": "pipe", "position": {"x": float(i) + 0.5, "y": 0.5}})
         # Pump at tiles 175, 176 facing East (direction 4), center = (176.0, 0.5)
-        entities.append({"name": "pump", "position": {"x": 176.0, "y": 0.5}, "direction": DIRECTION_EAST})
+        entities.append(
+            {"name": "pump", "position": {"x": 176.0, "y": 0.5}, "direction": DIRECTION_EAST}
+        )
         # Remaining 175 tiles: x in [177..351], y = 0
         for i in range(177, 352):
             entities.append({"name": "pipe", "position": {"x": float(i) + 0.5, "y": 0.5}})
@@ -952,7 +992,11 @@ END DESIGN
         """Pump facing East or West occupies both (cx - 0.5, cy) and (cx + 0.5, cy) tiles."""
         entities = [
             {"name": "pump", "direction": DIRECTION_EAST, "position": {"x": 5.0, "y": 2.5}},
-            {"name": "transport-belt", "direction": DIRECTION_EAST, "position": {"x": 4.5, "y": 2.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 4.5, "y": 2.5},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -962,7 +1006,11 @@ END DESIGN
         """Input reachability infers root belt sources, traverses underground belts and E/W splitters."""
         # Valid chain from source belt (0, 1) through underground pair and splitter to machine.
         entities = [
-            {"name": "transport-belt", "direction": DIRECTION_EAST, "position": {"x": 0.5, "y": 1.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 0.5, "y": 1.5},
+            },
             {
                 "name": "underground-belt",
                 "type": "input",
@@ -980,9 +1028,17 @@ END DESIGN
                 "direction": DIRECTION_EAST,
                 "position": {"x": 5.5, "y": 1.0},
             },
-            {"name": "transport-belt", "direction": DIRECTION_EAST, "position": {"x": 6.5, "y": 0.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 6.5, "y": 0.5},
+            },
             {"name": "inserter", "direction": DIRECTION_WEST, "position": {"x": 7.5, "y": 0.5}},
-            {"name": "assembling-machine-1", "direction": DIRECTION_NORTH, "position": {"x": 9.5, "y": 1.5}},
+            {
+                "name": "assembling-machine-1",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 9.5, "y": 1.5},
+            },
         ]
         checker = BeltDrcChecker()
         violations = checker.check_entities(entities)
@@ -992,13 +1048,37 @@ END DESIGN
         # Test a closed belt loop that feeds an underground belt and inserter.
         # Every belt tile has an incoming neighbor, so the inferred source set is empty.
         loop_entities = [
-            {"name": "transport-belt", "direction": DIRECTION_EAST, "position": {"x": 0.5, "y": 0.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 0.5, "y": 0.5},
+            },
             {"name": "splitter", "direction": DIRECTION_EAST, "position": {"x": 1.5, "y": 1.0}},
-            {"name": "transport-belt", "direction": DIRECTION_SOUTH, "position": {"x": 2.5, "y": 1.5}},
-            {"name": "transport-belt", "direction": DIRECTION_WEST, "position": {"x": 2.5, "y": 2.5}},
-            {"name": "transport-belt", "direction": DIRECTION_WEST, "position": {"x": 1.5, "y": 2.5}},
-            {"name": "transport-belt", "direction": DIRECTION_NORTH, "position": {"x": 0.5, "y": 2.5}},
-            {"name": "transport-belt", "direction": DIRECTION_NORTH, "position": {"x": 0.5, "y": 1.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_SOUTH,
+                "position": {"x": 2.5, "y": 1.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 2.5, "y": 2.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_WEST,
+                "position": {"x": 1.5, "y": 2.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 0.5, "y": 2.5},
+            },
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 0.5, "y": 1.5},
+            },
             {
                 "name": "underground-belt",
                 "type": "input",
@@ -1017,9 +1097,17 @@ END DESIGN
                 "direction": DIRECTION_EAST,
                 "position": {"x": 4.5, "y": 0.5},
             },
-            {"name": "transport-belt", "direction": DIRECTION_EAST, "position": {"x": 5.5, "y": 0.5}},
+            {
+                "name": "transport-belt",
+                "direction": DIRECTION_EAST,
+                "position": {"x": 5.5, "y": 0.5},
+            },
             {"name": "inserter", "direction": DIRECTION_WEST, "position": {"x": 6.5, "y": 0.5}},
-            {"name": "assembling-machine-1", "direction": DIRECTION_NORTH, "position": {"x": 8.5, "y": 1.5}},
+            {
+                "name": "assembling-machine-1",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 8.5, "y": 1.5},
+            },
         ]
         loop_violations = checker.check_entities(loop_entities)
         drc05_loop = [v for v in loop_violations if v.code == "DRC-05"]
@@ -1030,7 +1118,11 @@ END DESIGN
     def test_drc_output_reachability_splitter_and_underground(self) -> None:
         """Output inserter drops onto E/W splitter top half and traverses underground belt to sink."""
         entities = [
-            {"name": "assembling-machine-1", "direction": DIRECTION_NORTH, "position": {"x": 1.5, "y": 1.5}},
+            {
+                "name": "assembling-machine-1",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 1.5, "y": 1.5},
+            },
             # Output inserter at (3, 0) facing West (picks up from (2, 0), drops at (4, 0))
             {"name": "inserter", "direction": DIRECTION_WEST, "position": {"x": 3.5, "y": 0.5}},
             # E/W splitter at (4.5, 1.0) occupies (4, 0) and (4, 1)
@@ -1050,7 +1142,11 @@ END DESIGN
             },
             {"name": "iron-chest", "position": {"x": 9.5, "y": 0.5}},
             # Second output inserter drops onto an underground output at (8, 5).
-            {"name": "assembling-machine-1", "direction": DIRECTION_NORTH, "position": {"x": 5.5, "y": 5.5}},
+            {
+                "name": "assembling-machine-1",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 5.5, "y": 5.5},
+            },
             {"name": "inserter", "direction": DIRECTION_WEST, "position": {"x": 7.5, "y": 5.5}},
             {
                 "name": "underground-belt",
@@ -1066,7 +1162,11 @@ END DESIGN
             },
             {"name": "iron-chest", "position": {"x": 9.5, "y": 5.5}},
             # Third output inserter drops onto underground input at (5, 12) with sink at (8, 12).
-            {"name": "assembling-machine-1", "direction": DIRECTION_NORTH, "position": {"x": 2.5, "y": 12.5}},
+            {
+                "name": "assembling-machine-1",
+                "direction": DIRECTION_NORTH,
+                "position": {"x": 2.5, "y": 12.5},
+            },
             {"name": "inserter", "direction": DIRECTION_WEST, "position": {"x": 4.5, "y": 12.5}},
             {
                 "name": "underground-belt",

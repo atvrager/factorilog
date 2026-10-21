@@ -375,6 +375,7 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         import math
         import os
         from pathlib import Path
+
         def_path = None
         netlist_path = None
         for base in [
@@ -384,8 +385,16 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             Path(os.environ.get("RUNFILES_DIR", "")) / "_main/flow",
             Path(os.environ.get("TEST_SRCDIR", "")) / "_main/flow",
         ]:
-            c_def = base / "logistic_science.def" if base.name != "flow" else base.parent / "flow/logistic_science.def"
-            c_net = base / "logistic_science_netlist.json" if base.name != "flow" else base.parent / "flow/logistic_science_netlist.json"
+            c_def = (
+                base / "logistic_science.def"
+                if base.name != "flow"
+                else base.parent / "flow/logistic_science.def"
+            )
+            c_net = (
+                base / "logistic_science_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/logistic_science_netlist.json"
+            )
             if c_def.exists() and c_net.exists():
                 def_path = c_def
                 netlist_path = c_net
@@ -395,23 +404,40 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             self.skipTest(f"logistic_science build artifacts not present (searched {base})")
 
         from foundry.def2bp import parse_def, build_entities
+
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
 
         try:
-            entities, wires = build_entities(def_data, netlist_data, strict_drc=True, use_maze_router=True)
+            entities, wires = build_entities(
+                def_data, netlist_data, strict_drc=True, use_maze_router=True
+            )
             print(f"build_entities succeeded! Total entities: {len(entities)}, wires: {len(wires)}")
 
             scale = 1.0 / float(def_data.get("units", 1000))
-            drc_in = [(p["x"] * scale, p["y"] * scale) for p in def_data.get("pins", []) if p.get("direction") == "INPUT"]
-            drc_out = [(p["x"] * scale, p["y"] * scale) for p in def_data.get("pins", []) if p.get("direction") == "OUTPUT"]
+            drc_in = [
+                (p["x"] * scale, p["y"] * scale)
+                for p in def_data.get("pins", [])
+                if p.get("direction") == "INPUT"
+            ]
+            drc_out = [
+                (p["x"] * scale, p["y"] * scale)
+                for p in def_data.get("pins", [])
+                if p.get("direction") == "OUTPUT"
+            ]
             from foundry.belt_drc import BeltDrcChecker
+
             drc = BeltDrcChecker()
-            violations = drc.check_entities(entities, input_pins=drc_in, output_pins=drc_out, wires=wires)
-            self.assertEqual(len(violations), 0, f"DRC violations remain: {[v.message for v in violations]}")
+            violations = drc.check_entities(
+                entities, input_pins=drc_in, output_pins=drc_out, wires=wires
+            )
+            self.assertEqual(
+                len(violations), 0, f"DRC violations remain: {[v.message for v in violations]}"
+            )
             self.assertGreater(len(entities), 0)
         except Exception as e:
             import traceback
+
             raise
 
     def test_military_science_factory(self) -> None:
@@ -424,8 +450,16 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             Path(__file__).parent.parent / "flow",
             Path(__file__).parent.parent / "bazel-bin/flow",
         ]:
-            c_def = base / "military_science.def" if base.name != "flow" else base.parent / "flow/military_science.def"
-            c_net = base / "military_science_netlist.json" if base.name != "flow" else base.parent / "flow/military_science_netlist.json"
+            c_def = (
+                base / "military_science.def"
+                if base.name != "flow"
+                else base.parent / "flow/military_science.def"
+            )
+            c_net = (
+                base / "military_science_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/military_science_netlist.json"
+            )
             if c_def.exists() and c_net.exists():
                 def_path = c_def
                 netlist_path = c_net
@@ -434,7 +468,13 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         if not def_path or not netlist_path:
             self.skipTest(f"military_science build artifacts not present")
 
-        from foundry.def2bp import parse_def, build_entities, place_components, route_with_maze_router
+        from foundry.def2bp import (
+            parse_def,
+            build_entities,
+            place_components,
+            route_with_maze_router,
+        )
+
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
 
@@ -452,10 +492,10 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             pos = e.get("position", {})
             ex, ey = float(pos.get("x", 0)), float(pos.get("y", 0))
             if 168 <= ex <= 173 and 195 <= ey <= 200:
-                sys.stderr.write(f"  {e.get('name')} at ({ex}, {ey}) dir={e.get('direction')} type={e.get('type')}\n")
+                sys.stderr.write(
+                    f"  {e.get('name')} at ({ex}, {ey}) dir={e.get('direction')} type={e.get('type')}\n"
+                )
         self.assertGreater(len(entities), 0)
-
-
 
     def test_automation_science_factory(self) -> None:
         """Route the automation science factory and diagnose machine starvation."""
@@ -469,8 +509,16 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             Path(__file__).parent.parent / "flow",
             Path(__file__).parent.parent / "bazel-bin/flow",
         ]:
-            c_def = base / "automation_science.def" if base.name != "flow" else base.parent / "flow/automation_science.def"
-            c_net = base / "automation_science_netlist.json" if base.name != "flow" else base.parent / "flow/automation_science_netlist.json"
+            c_def = (
+                base / "automation_science.def"
+                if base.name != "flow"
+                else base.parent / "flow/automation_science.def"
+            )
+            c_net = (
+                base / "automation_science_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/automation_science_netlist.json"
+            )
             if c_def.exists() and c_net.exists():
                 def_path = c_def
                 netlist_path = c_net
@@ -480,6 +528,7 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             self.skipTest("automation_science build artifacts not present")
 
         from foundry.def2bp import parse_def, build_entities
+
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
 
@@ -491,7 +540,6 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         self.assertEqual(len(failed), 0, f"Router failed for nets: {list(failed.keys())}")
         self.assertTrue(placement.router_verif_res.is_valid)
         self.assertGreater(len(entities), 0)
-
 
     def test_chemical_science_factory(self) -> None:
         """Route the chemical science factory and diagnose any routing failures."""
@@ -505,8 +553,16 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             Path(__file__).parent.parent / "flow",
             Path(__file__).parent.parent / "bazel-bin/flow",
         ]:
-            c_def = base / "chemical_science.def" if base.name != "flow" else base.parent / "flow/chemical_science.def"
-            c_net = base / "chemical_science_netlist.json" if base.name != "flow" else base.parent / "flow/chemical_science_netlist.json"
+            c_def = (
+                base / "chemical_science.def"
+                if base.name != "flow"
+                else base.parent / "flow/chemical_science.def"
+            )
+            c_net = (
+                base / "chemical_science_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/chemical_science_netlist.json"
+            )
             if c_def.exists() and c_net.exists():
                 def_path = c_def
                 netlist_path = c_net
@@ -516,6 +572,7 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             self.skipTest("chemical_science build artifacts not present")
 
         from foundry.def2bp import parse_def, build_entities
+
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
 
@@ -541,8 +598,16 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             Path(__file__).parent.parent / "flow",
             Path(__file__).parent.parent / "bazel-bin/flow",
         ]:
-            c_def = base / "production_science.def" if base.name != "flow" else base.parent / "flow/production_science.def"
-            c_net = base / "production_science_netlist.json" if base.name != "flow" else base.parent / "flow/production_science_netlist.json"
+            c_def = (
+                base / "production_science.def"
+                if base.name != "flow"
+                else base.parent / "flow/production_science.def"
+            )
+            c_net = (
+                base / "production_science_netlist.json"
+                if base.name != "flow"
+                else base.parent / "flow/production_science_netlist.json"
+            )
             if c_def.exists() and c_net.exists():
                 def_path = c_def
                 netlist_path = c_net
@@ -552,6 +617,7 @@ class TestDualLaneMazeRouter(unittest.TestCase):
             self.skipTest("production_science build artifacts not present")
 
         from foundry.def2bp import parse_def, build_entities
+
         t0 = time.perf_counter()
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
@@ -565,7 +631,9 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         for rn, r in list(failed.items())[:25]:
             sys.stderr.write(f"  FAILED: {rn}: {r.error_message}\n")
 
-        self.assertEqual(len(failed), 0, f"Router failed for {len(failed)} nets: {list(failed.keys())[:20]}")
+        self.assertEqual(
+            len(failed), 0, f"Router failed for {len(failed)} nets: {list(failed.keys())[:20]}"
+        )
         self.assertTrue(placement.router_verif_res.is_valid)
 
     def test_science_chassis_factory(self) -> None:
@@ -657,6 +725,3 @@ if __name__ == "__main__":
         unittest.main(defaultTest=f"TestDualLaneMazeRouter.{filt.strip('*')}")
     else:
         unittest.main()
-
-
-

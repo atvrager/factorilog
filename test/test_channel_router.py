@@ -38,9 +38,7 @@ class TestChannelRouter(unittest.TestCase):
             ChannelLane(2, "X", DIRECTION_EAST)
 
         # Fluid lane property
-        fluid_lane = ChannelLane(
-            1, "V", DIRECTION_SOUTH, tier="pipe-to-ground"
-        )
+        fluid_lane = ChannelLane(1, "V", DIRECTION_SOUTH, tier="pipe-to-ground")
         self.assertTrue(fluid_lane.is_fluid)
 
     def test_street_channel_allocation(self) -> None:
@@ -199,10 +197,7 @@ class TestChannelRouter(unittest.TestCase):
         self.assertEqual(collisions, [])
 
         # Corner entity is at (97.5, 97.5) with direction South
-        corner = next(
-            e for e in ents
-            if e["position"]["x"] == 97.5 and e["position"]["y"] == 97.5
-        )
+        corner = next(e for e in ents if e["position"]["x"] == 97.5 and e["position"]["y"] == 97.5)
         self.assertEqual(corner["direction"], DIRECTION_SOUTH)
 
     def test_router_intersection_switches(self) -> None:
@@ -344,4 +339,3 @@ class TestChannelRouter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

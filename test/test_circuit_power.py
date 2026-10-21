@@ -36,7 +36,6 @@ import solve
 from test_routing_primitives import run_factorio_simulation
 
 
-
 class TestCircuitPower(unittest.TestCase):
     """Test circuit networks, multi-color clocks, and power switches."""
 
@@ -597,7 +596,9 @@ class TestCircuitPower(unittest.TestCase):
                 else (
                     "power-switch"
                     if "switch" in c.cell
-                    else ("arithmetic-combinator" if "arithmetic" in c.cell else "decider-combinator")
+                    else (
+                        "arithmetic-combinator" if "arithmetic" in c.cell else "decider-combinator"
+                    )
                 )
             )
             extra: dict[str, Any] = {}
@@ -654,13 +655,19 @@ class TestCircuitPower(unittest.TestCase):
 
         # Python-level assertions: wires must include combinators, switches, and poles
         comb_wires = [
-            w for w in wires if any("combinator" in entities[num - 1]["name"] for num in (w[0], w[2]))
+            w
+            for w in wires
+            if any("combinator" in entities[num - 1]["name"] for num in (w[0], w[2]))
         ]
         switch_wires = [
             w for w in wires if any("switch" in entities[num - 1]["name"] for num in (w[0], w[2]))
         ]
-        self.assertGreater(len(comb_wires), 5, "Combinators must have multiple wires in wires array")
-        self.assertEqual(len(switch_wires), 3, "Power switch must have 1 circuit and 2 copper wires")
+        self.assertGreater(
+            len(comb_wires), 5, "Combinators must have multiple wires in wires array"
+        )
+        self.assertEqual(
+            len(switch_wires), 3, "Power switch must have 1 circuit and 2 copper wires"
+        )
 
         bp_str = blueprint.encode(entities, "test_synth_circuit", wires=wires)
 
@@ -1023,7 +1030,9 @@ class TestCircuitPower(unittest.TestCase):
                         q.append(nbr)
             components.append(comp)
 
-        self.assertEqual(len(components), 2, "Must partition into exactly 2 isolated copper domains")
+        self.assertEqual(
+            len(components), 2, "Must partition into exactly 2 isolated copper domains"
+        )
 
         bp_str = blueprint.encode(entities, "test_multi_domain_pdn", wires=wires)
         lua = bp2save.generate_control_lua(bp_str, {"inputs": [], "outputs": []})
@@ -1044,8 +1053,12 @@ class TestCircuitPower(unittest.TestCase):
         end
         """
 
-        init_header = lua[:lua.find("script.on_init(function()")]
-        init_body = lua[lua.find("script.on_init(function()") + len("script.on_init(function()"):lua.rfind("end)")]
+        init_header = lua[: lua.find("script.on_init(function()")]
+        init_body = lua[
+            lua.find("script.on_init(function()") + len("script.on_init(function()") : lua.rfind(
+                "end)"
+            )
+        ]
 
         results = run_factorio_simulation(init_header + "\n" + init_body, probe_code, ticks=20)
         self.assertGreater(len(results), 0)
@@ -1102,8 +1115,12 @@ class TestCircuitPower(unittest.TestCase):
         end
         """
 
-        init_header = lua[:lua.find("script.on_init(function()")]
-        init_body = lua[lua.find("script.on_init(function()") + len("script.on_init(function()"):lua.rfind("end)")]
+        init_header = lua[: lua.find("script.on_init(function()")]
+        init_body = lua[
+            lua.find("script.on_init(function()") + len("script.on_init(function()") : lua.rfind(
+                "end)"
+            )
+        ]
 
         results = run_factorio_simulation(init_header + "\n" + init_body, probe_code, ticks=70)
         self.assertGreater(len(results), 0)
@@ -1127,4 +1144,3 @@ class TestCircuitPower(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

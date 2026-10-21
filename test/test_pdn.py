@@ -352,10 +352,7 @@ def perf_pdn_greedy_set_cover(
     _rounds: int = 3,
 ) -> Iterator[None]:
     """Scale benchmark for PDN greedy set cover pole selection."""
-    cand_covers = {
-        (float(i * 6 + 0.5), 0.5): {i, (i + 1) % n}
-        for i in range(n)
-    }
+    cand_covers = {(float(i * 6 + 0.5), 0.5): {i, (i + 1) % n} for i in range(n)}
     yield
     pdn._greedy_set_cover(n, cand_covers)
 

@@ -244,7 +244,9 @@ class TestLayoutVerifier(unittest.TestCase):
 
         res = self.verifier.verify_blueprint(entities, nets=[net], ticks=60)
         self.assertFalse(res.is_valid)
-        self.assertTrue(any("No continuous belt path found" in err.message for err in res.lvs_errors))
+        self.assertTrue(
+            any("No continuous belt path found" in err.message for err in res.lvs_errors)
+        )
 
     def test_verifier_real_blueprint_file(self) -> None:
         """Verify that real blueprint files from the repository parse and pass DRC."""
@@ -320,12 +322,42 @@ class TestLayoutVerifier(unittest.TestCase):
         # Fast (red) belt pair: input (1,0) -> output (5,0)
         # Express (blue) belt pair: input (2,0) -> output (6,0)
         entities = [
-            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "fast-underground-belt", "position": {"x": 1.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "express-underground-belt", "position": {"x": 2.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
-            {"name": "fast-underground-belt", "position": {"x": 5.5, "y": 0.5}, "direction": 4, "type": "output"},
-            {"name": "express-underground-belt", "position": {"x": 6.5, "y": 0.5}, "direction": 4, "type": "output"},
+            {
+                "name": "underground-belt",
+                "position": {"x": 0.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
+            {
+                "name": "fast-underground-belt",
+                "position": {"x": 1.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
+            {
+                "name": "express-underground-belt",
+                "position": {"x": 2.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
+            {
+                "name": "underground-belt",
+                "position": {"x": 4.5, "y": 0.5},
+                "direction": 4,
+                "type": "output",
+            },
+            {
+                "name": "fast-underground-belt",
+                "position": {"x": 5.5, "y": 0.5},
+                "direction": 4,
+                "type": "output",
+            },
+            {
+                "name": "express-underground-belt",
+                "position": {"x": 6.5, "y": 0.5},
+                "direction": 4,
+                "type": "output",
+            },
         ]
 
         violations = self.verifier.check_drc(entities)
@@ -349,10 +381,20 @@ class TestLayoutVerifier(unittest.TestCase):
         # Yellow belt pair: input (0,0) -> output (4,0)
         # Pipe pair: input (1,0) -> output (3,0)
         entities = [
-            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
+            {
+                "name": "underground-belt",
+                "position": {"x": 0.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
             {"name": "pipe-to-ground", "position": {"x": 1.5, "y": 0.5}, "direction": 12},
             {"name": "pipe-to-ground", "position": {"x": 3.5, "y": 0.5}, "direction": 4},
-            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
+            {
+                "name": "underground-belt",
+                "position": {"x": 4.5, "y": 0.5},
+                "direction": 4,
+                "type": "output",
+            },
         ]
 
         violations = self.verifier.check_drc(entities)
@@ -370,16 +412,31 @@ class TestLayoutVerifier(unittest.TestCase):
         # Yellow input (0,0), Yellow input (2,0), Yellow output (4,0)
         # The input at (2,0) pairs with (4,0). The input at (0,0) remains unpaired.
         entities = [
-            {"name": "underground-belt", "position": {"x": 0.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "underground-belt", "position": {"x": 2.5, "y": 0.5}, "direction": 4, "type": "input"},
-            {"name": "underground-belt", "position": {"x": 4.5, "y": 0.5}, "direction": 4, "type": "output"},
+            {
+                "name": "underground-belt",
+                "position": {"x": 0.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
+            {
+                "name": "underground-belt",
+                "position": {"x": 2.5, "y": 0.5},
+                "direction": 4,
+                "type": "input",
+            },
+            {
+                "name": "underground-belt",
+                "position": {"x": 4.5, "y": 0.5},
+                "direction": 4,
+                "type": "output",
+            },
         ]
 
         violations = self.verifier.check_drc(entities)
-        self.assertTrue(any(v.code == "DRC_UG_UNPAIRED" and v.position == (0, 0) for v in violations))
+        self.assertTrue(
+            any(v.code == "DRC_UG_UNPAIRED" and v.position == (0, 0) for v in violations)
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-
-

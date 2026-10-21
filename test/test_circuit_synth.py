@@ -73,8 +73,7 @@ class TestCircuitSynth(unittest.TestCase):
 
         # Check power switch enable control connection
         ps_ctrl = any(
-            conn.source == "u_out_power_switch"
-            and conn.target == "u_main_power_switch"
+            conn.source == "u_out_power_switch" and conn.target == "u_main_power_switch"
             for conn in result.connections
         )
         self.assertTrue(ps_ctrl, "Power switch control wire must exist")

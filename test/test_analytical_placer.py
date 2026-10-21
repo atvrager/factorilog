@@ -156,9 +156,7 @@ class TestAnalyticalPlacer(unittest.TestCase):
             self.balancer_plans,
         )
         netlist_data = {
-            "cells": {
-                nd.macro: {"width": nd.width, "height": nd.height} for nd in nodes.values()
-            }
+            "cells": {nd.macro: {"width": nd.width, "height": nd.height} for nd in nodes.values()}
         }
 
         for gw, gh in ((1, 1), (2, 2), (3, 3)):
@@ -389,14 +387,10 @@ class TestAnalyticalPlacer(unittest.TestCase):
         mp = netlist.merge_plans_of(nl)
         sp = netlist.split_plans_of(nl, synthesize_trees=True)
         bp = netlist.balancer_plans_of(nl)
-        res = self.placer.place_netlist(
-            nl, mp, sp, bp, use_chassis=True, grid_w=6, grid_h=6
-        )
+        res = self.placer.place_netlist(nl, mp, sp, bp, use_chassis=True, grid_w=6, grid_h=6)
         # All 6 input balancers must be placed on the West boundary column (bx == 0), 1 per block
         bal_blocks = {
-            (x // 100, y // 100)
-            for name, (x, y) in res.coords.items()
-            if name.startswith("u_bal_")
+            (x // 100, y // 100) for name, (x, y) in res.coords.items() if name.startswith("u_bal_")
         }
         self.assertEqual(bal_blocks, {(0, by) for by in range(6)})
         # All 6 oil refineries must be placed together in the same West boundary block (bx == 0)
@@ -416,4 +410,3 @@ class TestAnalyticalPlacer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
