@@ -6,8 +6,6 @@ All docstrings follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
-from typing import Any
-
 from foundry.native_engine.engine import FactorioNativeEngine
 from foundry.native_engine.verifier import (
     NativeLayoutVerifier,
@@ -17,7 +15,16 @@ from foundry.native_engine.verifier import (
 from foundry.router.blueprint_builder import build_blueprint_entities
 from foundry.router.grid import RoutingGrid
 from foundry.router.pathfinder import route_all_nets
-from foundry.router.types import RouteResult, RouterNetSpec
+from foundry.router.types import (
+    TILE_CENTER_OFFSET,
+    EntityDict,
+    PrototypeMap,
+    RouteResult,
+    RouterNetSpec,
+)
+
+DEFAULT_MAX_ITERATIONS = 80
+DEFAULT_VERIFICATION_TICKS = 60
 
 
 class DualLaneMazeRouter:
@@ -30,7 +37,7 @@ class DualLaneMazeRouter:
         min_y: int,
         max_y: int,
         engine: FactorioNativeEngine | None = None,
-        prototypes: dict[str, Any] | None = None,
+        prototypes: PrototypeMap | None = None,
         obstacles: set[tuple[int, int]] | None = None,
         component_headings: dict[tuple[int, int], int] | None = None,
         no_hood_tiles: set[tuple[int, int]] | None = None,
@@ -42,7 +49,7 @@ class DualLaneMazeRouter:
         self.min_y = min_y
         self.max_y = max_y
         self.engine = engine
-        self.prototypes = prototypes
+        self.prototypes = dict(prototypes) if prototypes is not None else None
         self.obstacles = set(obstacles) if obstacles else set()
         self.component_headings = dict(component_headings) if component_headings else {}
         self.no_hood_tiles = set(no_hood_tiles) if no_hood_tiles else set()
@@ -53,10 +60,10 @@ class DualLaneMazeRouter:
     def route(
         self,
         nets: list[RouterNetSpec],
-        max_iterations: int = 80,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
         verify: bool = True,
-        ticks: int = 60,
-    ) -> tuple[dict[str, RouteResult], list[dict[str, Any]], VerificationResult | None]:
+        ticks: int = DEFAULT_VERIFICATION_TICKS,
+    ) -> tuple[dict[str, RouteResult], list[EntityDict], VerificationResult | None]:
         """Route all specified nets and verify the resulting blueprint."""
         grid = RoutingGrid(
             min_x=self.min_x,
@@ -71,10 +78,7 @@ class DualLaneMazeRouter:
         )
         grid.register_terminals(nets)
 
-        # Execute PathFinder routing
         routes = route_all_nets(nets, grid, max_iterations=max_iterations)
-
-        # Assemble physical blueprint entities
         entities = build_blueprint_entities(routes, nets)
 
         verification_result: VerificationResult | None = None
@@ -84,8 +88,14 @@ class DualLaneMazeRouter:
                 NetSpec(
                     name=n.name,
                     commodity=n.commodity,
-                    source_pos=(n.source[0] + 0.5, n.source[1] + 0.5),
-                    sink_pos=(n.sink[0] + 0.5, n.sink[1] + 0.5),
+                    source_pos=(
+                        n.source[0] + TILE_CENTER_OFFSET,
+                        n.source[1] + TILE_CENTER_OFFSET,
+                    ),
+                    sink_pos=(
+                        n.sink[0] + TILE_CENTER_OFFSET,
+                        n.sink[1] + TILE_CENTER_OFFSET,
+                    ),
                     is_fluid=n.is_fluid,
                 )
                 for n in nets

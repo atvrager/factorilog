@@ -112,11 +112,34 @@ py_binary(
     deps = [":pdk_lib"],
 )
 
+py_library(
+    name = "netbuild_lib",
+    srcs = [
+        "blueprint.py",
+        "channel_router.py",
+        "chassis.py",
+        "circuit_synth.py",
+        "entity_helpers.py",
+        "lef.py",
+        "liberty.py",
+        "netbuild.py",
+        "netlist.py",
+        "pdk.py",
+        "solve.py",
+    ],
+    imports = ["."],
+    deps = [
+        "@pip//numpy",
+        "@pip//pyslang",
+        "@pip//scipy",
+    ],
+)
+
 py_binary(
     name = "netbuild",
     srcs = ["netbuild.py"],
     main = "netbuild.py",
-    deps = [":pdk_lib"],
+    deps = [":netbuild_lib"],
 )
 
 py_binary(

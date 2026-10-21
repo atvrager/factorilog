@@ -6,10 +6,13 @@ All docstrings follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from foundry.router.grid import RoutingGrid
 from foundry.router.types import (
     DIR_STEPS,
     LAYER_SURFACE,
+    PERPENDICULAR_DIRS,
     RouteNode,
     RouterNetSpec,
 )
@@ -78,13 +81,8 @@ def _add_surface_turns(
     if not grid.is_in_bounds(nxt_x, nxt_y):
         return
 
-    turn_headings = [
-        (node.heading + 4) % 16,
-        (node.heading + 12) % 16,
-    ]
-
     tier_name = "pipe" if net.is_fluid else "transport-belt"
-    for new_h in turn_headings:
+    for new_h in PERPENDICULAR_DIRS[node.heading]:
         if not grid.can_occupy_surface((nxt_x, nxt_y), net.name, node.lane, heading=new_h):
             continue
         nxt_node = RouteNode(nxt_x, nxt_y, LAYER_SURFACE, new_h, node.lane)
@@ -113,16 +111,39 @@ def _add_underground_dives(
     if not grid.can_place_hood((node.x, node.y), net.name, heading=node.heading, is_output=False):
         return
 
+    tiers = grid.pipe_tiers if net.is_fluid else grid.belt_tiers
     for target_z in target_layers:
         tier_cost = grid.get_tier_cost(target_z)
         dive_node = RouteNode(node.x, node.y, target_z, node.heading, node.lane)
-        base_cost = HOOD_PENALTY + tier_cost
-        cost = grid.get_node_cost(dive_node, base_cost)
-        if net.is_fluid:
-            tier_name = grid.pipe_tiers[target_z]["name"]
-        else:
-            tier_name = grid.belt_tiers[target_z]["name"]
-        transitions.append((dive_node, cost, "dive", tier_name))
+        cost = grid.get_node_cost(dive_node, HOOD_PENALTY + tier_cost)
+        transitions.append((dive_node, cost, "dive", tiers[target_z]["name"]))
+
+
+def _is_leap_tunnel_blocked(
+    node: RouteNode,
+    step: int,
+    dx: int,
+    dy: int,
+    pt: tuple[int, int],
+    net_name: str,
+    grid: RoutingGrid,
+    occ: Mapping[tuple[int, int], str],
+    axis_spans: Mapping[tuple[int, int], str],
+) -> bool:
+    """Return True if a subterranean leap tunnel cannot reach or pass through pt."""
+    if not grid.is_in_bounds(pt[0], pt[1]):
+        return True
+    existing = occ.get(pt)
+    if existing is not None and existing != net_name:
+        return True
+    if step <= 1:
+        return False
+    prev_pt = (node.x + dx * (step - 1), node.y + dy * (step - 1))
+    hood_owner = grid.active_hoods.get(prev_pt)
+    if hood_owner is not None and hood_owner != net_name:
+        return True
+    span_owner = axis_spans.get(prev_pt)
+    return span_owner is not None and span_owner != net_name
 
 
 def _add_subterranean_leaps(
@@ -134,9 +155,8 @@ def _add_subterranean_leaps(
     """Generate leaps across subterranean spans to surface exits."""
     dx, dy = DIR_STEPS[node.heading]
     max_span = grid.get_tier_span(node.z)
-    is_horiz = dx != 0
     occ = grid.layer_occupancy.get(node.z, {})
-    axis_spans = grid.active_horiz_spans if is_horiz else grid.active_vert_spans
+    axis_spans = grid.active_horiz_spans if dx != 0 else grid.active_vert_spans
     tier_name = (
         grid.pipe_tiers.get(node.z, {}).get("name", "pipe-to-ground")
         if net.is_fluid
@@ -144,37 +164,13 @@ def _add_subterranean_leaps(
     )
 
     for step in range(1, max_span + 1):
-        exit_x = node.x + dx * step
-        exit_y = node.y + dy * step
-
-        if not (grid.min_x <= exit_x <= grid.max_x and grid.min_y <= exit_y <= grid.max_y):
+        pt = (node.x + dx * step, node.y + dy * step)
+        if _is_leap_tunnel_blocked(node, step, dx, dy, pt, net.name, grid, occ, axis_spans):
             break
-        if grid.active_bbox is not None:
-            bx0, by0, bx1, by1 = grid.active_bbox
-            if not (bx0 <= exit_x <= bx1 and by0 <= exit_y <= by1):
-                break
-
-        pt = (exit_x, exit_y)
-
-        # Check subterranean layer clearance on this tile
-        existing = occ.get(pt)
-        if existing is not None and existing != net.name:
-            break
-
-        # Check span collision for intermediate tile
-        if step > 1:
-            prev_pt = (node.x + dx * (step - 1), node.y + dy * (step - 1))
-            if prev_pt in grid.active_hoods and grid.active_hoods[prev_pt] != net.name:
-                break
-            if prev_pt in axis_spans and axis_spans[prev_pt] != net.name:
-                break
-
         if not grid.can_place_hood(pt, net.name, heading=node.heading, is_output=True):
             continue
-
         if grid.can_occupy_surface(pt, net.name, node.lane, heading=node.heading, is_hood=True):
-            exit_node = RouteNode(exit_x, exit_y, LAYER_SURFACE, node.heading, node.lane)
+            exit_node = RouteNode(pt[0], pt[1], LAYER_SURFACE, node.heading, node.lane)
             base_cost = step * UNDERGROUND_STEP_COST + HOOD_PENALTY
             cost = grid.get_node_cost(exit_node, base_cost)
-
             transitions.append((exit_node, cost, "leap", tier_name))

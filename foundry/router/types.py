@@ -6,7 +6,9 @@ All docstrings follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 # Factorio entity direction constants
 DIRECTION_NORTH = 0
@@ -30,6 +32,13 @@ OPPOSITE_DIR: dict[int, int] = {
     DIRECTION_WEST: DIRECTION_EAST,
 }
 
+PERPENDICULAR_DIRS: dict[int, tuple[int, int]] = {
+    DIRECTION_NORTH: (DIRECTION_EAST, DIRECTION_WEST),
+    DIRECTION_EAST: (DIRECTION_SOUTH, DIRECTION_NORTH),
+    DIRECTION_SOUTH: (DIRECTION_WEST, DIRECTION_EAST),
+    DIRECTION_WEST: (DIRECTION_NORTH, DIRECTION_SOUTH),
+}
+
 # Belt lane identifiers
 LANE_LEFT = 0
 LANE_RIGHT = 1
@@ -37,6 +46,12 @@ LANE_BOTH = 2
 
 # Layer identifiers
 LAYER_SURFACE = 0
+
+# Tile center coordinate offset
+TILE_CENTER_OFFSET = 0.5
+
+PrototypeMap = Mapping[str, Any]
+EntityDict = dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +81,7 @@ class RouteEdge:
     cost: float
 
 
-@dataclass
+@dataclass(slots=True)
 class RouterNetSpec:
     """A logical net to route between source and sink."""
 
@@ -85,7 +100,7 @@ class RouterNetSpec:
     corridor_bbox: tuple[int, int, int, int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RouteResult:
     """Result of routing a single net."""
 

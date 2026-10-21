@@ -6,113 +6,116 @@ All docstrings follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping, Sequence
 
 from foundry.router.types import (
     OPPOSITE_DIR,
+    TILE_CENTER_OFFSET,
+    EntityDict,
+    RouteEdge,
     RouteResult,
     RouterNetSpec,
 )
 
 
-def build_blueprint_entities(
-    routes: dict[str, RouteResult],
-    net_specs: list[RouterNetSpec] | None = None,
-) -> list[dict[str, Any]]:
-    """Convert routed paths into a list of Factorio blueprint entities."""
-    net_map: dict[str, RouterNetSpec] = {}
-    if net_specs:
-        for net in net_specs:
-            net_map[net.name] = net
+def _make_tile_entity(
+    name: str,
+    pos: tuple[int, int],
+    direction: int,
+    ug_type: str | None = None,
+) -> EntityDict:
+    """Create a blueprint entity dictionary centered at tile pos."""
+    ent: EntityDict = {
+        "name": name,
+        "position": {
+            "x": pos[0] + TILE_CENTER_OFFSET,
+            "y": pos[1] + TILE_CENTER_OFFSET,
+        },
+        "direction": direction,
+    }
+    if ug_type is not None:
+        ent["type"] = ug_type
+    return ent
 
-    entities_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
+
+def _is_protected_hood_tile(existing: EntityDict | None) -> bool:
+    """Return True if existing entity is an underground output hood or pipe-to-ground."""
+    if existing is None:
+        return False
+    return existing.get("type") == "output" or "pipe-to-ground" in existing.get("name", "")
+
+
+def _place_route_edge(
+    edge: RouteEdge,
+    is_fluid: bool,
+    entities_by_pos: dict[tuple[int, int], EntityDict],
+) -> None:
+    """Convert one RouteEdge into a physical tile entity in entities_by_pos."""
+    start = edge.start
+    end = edge.end
+    move = edge.move_type
+
+    if move in ("straight", "turn"):
+        pos = (start.x, start.y)
+        if _is_protected_hood_tile(entities_by_pos.get(pos)):
+            return
+        entities_by_pos[pos] = _make_tile_entity(edge.tier_name, pos, start.heading)
+        return
+
+    if move == "dive":
+        pos = (end.x, end.y)
+        direction = OPPOSITE_DIR.get(start.heading, 0) if is_fluid else start.heading
+        ug_type = None if is_fluid else "input"
+        entities_by_pos[pos] = _make_tile_entity(edge.tier_name, pos, direction, ug_type=ug_type)
+        return
+
+    if move == "leap":
+        pos = (end.x, end.y)
+        ug_type = None if is_fluid else "output"
+        entities_by_pos[pos] = _make_tile_entity(edge.tier_name, pos, end.heading, ug_type=ug_type)
+
+
+def _place_single_route(
+    res: RouteResult,
+    is_fluid: bool,
+    entities_by_pos: dict[tuple[int, int], EntityDict],
+) -> None:
+    """Populate entities_by_pos with the entities along a single routed path."""
+    surface_name = "pipe" if is_fluid else "transport-belt"
+    if not res.edges:
+        goal = res.nodes[0]
+        pos = (goal.x, goal.y)
+        if pos not in entities_by_pos:
+            entities_by_pos[pos] = _make_tile_entity(surface_name, pos, goal.heading)
+        return
+
+    for edge in res.edges:
+        _place_route_edge(edge, is_fluid, entities_by_pos)
+
+    if res.edges[-1].move_type != "leap":
+        goal = res.nodes[-1]
+        pos = (goal.x, goal.y)
+        if pos not in entities_by_pos:
+            entities_by_pos[pos] = _make_tile_entity(surface_name, pos, goal.heading)
+
+
+def build_blueprint_entities(
+    routes: Mapping[str, RouteResult],
+    net_specs: Sequence[RouterNetSpec] | None = None,
+) -> list[EntityDict]:
+    """Convert routed paths into a list of Factorio blueprint entities."""
+    net_map: dict[str, RouterNetSpec] = {net.name: net for net in net_specs} if net_specs else {}
+    entities_by_pos: dict[tuple[int, int], EntityDict] = {}
 
     for net_name, res in routes.items():
         if not res.is_success or not res.nodes:
             continue
-
         net = net_map.get(net_name)
-        is_fluid = net.is_fluid if net else False
+        is_fluid = net.is_fluid if net is not None else False
+        _place_single_route(res, is_fluid, entities_by_pos)
 
-        if not res.edges:
-            goal = res.nodes[0]
-            pos = (goal.x, goal.y)
-            if pos not in entities_by_pos:
-                name = "pipe" if is_fluid else "transport-belt"
-                entities_by_pos[pos] = {
-                    "name": name,
-                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": goal.heading,
-                }
-            continue
-
-        for edge in res.edges:
-            start = edge.start
-            end = edge.end
-            move = edge.move_type
-
-            if move in ("straight", "turn"):
-                pos = (start.x, start.y)
-                if pos in entities_by_pos:
-                    existing = entities_by_pos[pos]
-                    if existing.get("type") == "output" or "pipe-to-ground" in existing.get(
-                        "name", ""
-                    ):
-                        continue
-                heading = start.heading
-                name = edge.tier_name
-                entities_by_pos[pos] = {
-                    "name": name,
-                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": heading,
-                }
-            elif move == "dive":
-                # Entrance hood
-                pos = (
-                    (end.x, end.y) if (start.x != end.x or start.y != end.y) else (start.x, start.y)
-                )
-                name = edge.tier_name
-                ent: dict[str, Any] = {
-                    "name": name,
-                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": OPPOSITE_DIR.get(start.heading, 0) if is_fluid else start.heading,
-                }
-                if not is_fluid:
-                    ent["type"] = "input"
-                entities_by_pos[pos] = ent
-
-            elif move == "leap":
-                # Exit hood
-                pos = (end.x, end.y)
-                name = edge.tier_name
-                ent = {
-                    "name": name,
-                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": end.heading,
-                }
-                if not is_fluid:
-                    ent["type"] = "output"
-                entities_by_pos[pos] = ent
-
-        # Check final node placement
-        last_edge = res.edges[-1]
-        if last_edge.move_type not in ("leap",):
-            goal = res.nodes[-1]
-            pos = (goal.x, goal.y)
-            if pos not in entities_by_pos:
-                name = "pipe" if is_fluid else "transport-belt"
-                entities_by_pos[pos] = {
-                    "name": name,
-                    "position": {"x": pos[0] + 0.5, "y": pos[1] + 0.5},
-                    "direction": goal.heading,
-                }
-
-    # Assign entity_number indices
-    entity_list: list[dict[str, Any]] = []
-    idx = 1
-    for ent in entities_by_pos.values():
+    entity_list: list[EntityDict] = []
+    for idx, ent in enumerate(entities_by_pos.values(), start=1):
         ent["entity_number"] = idx
         entity_list.append(ent)
-        idx += 1
-
     return entity_list
