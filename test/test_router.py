@@ -11,6 +11,7 @@ import math
 import os
 import sys
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 from foundry.native_engine.engine import FactorioNativeEngine
@@ -21,6 +22,8 @@ from foundry.router import (
     LANE_RIGHT,
     RouterNetSpec,
 )
+from foundry.router.grid import RoutingGrid
+from foundry.router.pathfinder import route_single_net
 
 
 class TestDualLaneMazeRouter(unittest.TestCase):
@@ -619,6 +622,33 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         )
         self.assertTrue(placement.router_verif_res.is_valid)
         self.assertGreater(len(entities), 0)
+
+    def test_perf_cases_smoke(self) -> None:
+        """Smoke-test router pathfinder perf_* generator benchmark."""
+        for _ in perf_pathfinder_astar_leaps(32):
+            pass
+
+
+def perf_pathfinder_astar_leaps(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for 3D A* pathfinding across obstacle-interrupted corridors."""
+    obstacles = {(x, 12) for x in range(14, n + 10, 4)}
+    grid = RoutingGrid(min_x=10, max_x=n + 16, min_y=10, max_y=16, obstacles=obstacles)
+    net = RouterNetSpec(
+        name="perf_corridor",
+        source=(10, 12),
+        sink=(n + 10, 12),
+        commodity="iron-plate",
+        start_heading=4,
+        end_heading=4,
+    )
+    yield
+    route_single_net(net, grid)
 
 
 if __name__ == "__main__":

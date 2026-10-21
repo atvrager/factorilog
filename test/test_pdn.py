@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Iterator
 
 from foundry import entity_helpers as eh
 from foundry import pdn
@@ -302,6 +303,81 @@ class TestPdn(unittest.TestCase):
                 set(),
                 set(),
             )
+
+    def test_perf_cases_smoke(self) -> None:
+        """Smoke-test all PDN perf_* generator benchmarks."""
+        for perf_fn in (
+            perf_pdn_build_wire_adjacency,
+            perf_pdn_build_domain_mst,
+            perf_pdn_greedy_set_cover,
+            perf_pdn_generate_multi_domain,
+        ):
+            for _ in perf_fn(16):
+                pass
+
+
+def perf_pdn_build_wire_adjacency(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for PDN candidate pole wire adjacency construction."""
+    cands = [(float((i % 32) * 6 + 0.5), float((i // 32) * 6 + 0.5)) for i in range(n)]
+    reach = pdn.DEFAULT_PDN_CONFIG.wire_reach
+    yield
+    pdn._build_wire_adjacency(cands, reach)
+
+
+def perf_pdn_build_domain_mst(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for PDN domain minimum spanning tree construction."""
+    poles = {(float((i % 32) * 6 + 0.5), float((i // 32) * 6 + 0.5)) for i in range(n)}
+    reach = pdn.DEFAULT_PDN_CONFIG.wire_reach
+    yield
+    pdn._build_domain_mst(poles, reach)
+
+
+def perf_pdn_greedy_set_cover(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for PDN greedy set cover pole selection."""
+    cand_covers = {
+        (float(i * 6 + 0.5), 0.5): {i, (i + 1) % n}
+        for i in range(n)
+    }
+    yield
+    pdn._greedy_set_cover(n, cand_covers)
+
+
+def perf_pdn_generate_multi_domain(
+    n: int = 32,
+    *,
+    _scales: tuple[int, ...] = (16, 32, 64, 128),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for multi-domain PDN synthesis with forbidden-entity checks."""
+    entities: list[dict[str, object]] = [
+        {"name": "power-switch", "position": {"x": 2.0, "y": 2.0}},
+    ]
+    for i in range(n):
+        gx = float((i % 16) * 6 + 10.5)
+        gy = float((i // 16) * 12 + 10.5)
+        entities.append({"name": "fast-inserter", "position": {"x": gx, "y": gy}})
+        entities.append({"name": "arithmetic-combinator", "position": {"x": gx, "y": gy + 6.0}})
+    yield
+    pdn.generate_pdn(list(entities), set(), set(), set(), set())
 
 
 if __name__ == "__main__":

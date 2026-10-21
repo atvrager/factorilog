@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Iterator
+from typing import Any
 
 from foundry.belt_drc import BeltDrcChecker
 from foundry.entity_helpers import (
@@ -13,8 +15,11 @@ from foundry.entity_helpers import (
 )
 from foundry.placement import PlacementResult, RouteResult
 from foundry.pump_insertion import (
+    DEFAULT_PUMP_CONFIG,
     PumpInsertionConfig,
+    _collect_fluid_terminals_and_protected_tiles,
     _compress_straight_pipes,
+    _find_component_pump_candidates,
     _get_pump_tiles,
     _shrink_underground_pipe_spans,
     build_conduit_graph,
@@ -895,6 +900,121 @@ class TestPumpInsertion(unittest.TestCase):
         self.assertEqual(pumps_sep[0]["position"], {"x": 91.0, "y": 0.5})
         self.assertEqual(pumps_sep[0]["direction"], DIRECTION_EAST)
 
+    def test_perf_cases_smoke(self) -> None:
+        """Smoke-test all pump insertion perf_* generator benchmarks."""
+        for perf_fn in (
+            perf_pump_find_candidates,
+            perf_pump_shrink_underground_spans,
+            perf_pump_collect_fluid_terminals,
+        ):
+            for _ in perf_fn(16):
+                pass
+
+
+def perf_pump_find_candidates(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for scoring inline pump candidates across a conduit component."""
+    entities: list[dict[str, Any]] = [
+        {"name": "pipe", "position": {"x": float(x) + 0.5, "y": 0.5}} for x in range(n)
+    ]
+    adj, _tile_map, pipe_entities = build_conduit_graph(entities)
+    comp = {("pipe", x, 0) for x in range(n)}
+    ext = float(n - 1)
+    src_tiles = {(0, 0)}
+    sink_tiles = {(n - 1, 0)}
+    yield
+    _find_component_pump_candidates(
+        ext,
+        comp,
+        adj,
+        adj,
+        pipe_entities,
+        set(),
+        src_tiles,
+        sink_tiles,
+        30,
+        DEFAULT_PUMP_CONFIG,
+    )
+
+
+def perf_pump_shrink_underground_spans(
+    n: int = 32,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for shrinking underground pipe spans in overextended components."""
+    entities: list[dict[str, Any]] = []
+    for i in range(n):
+        x0 = i * 6
+        entities.append(
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": float(x0) + 0.5, "y": 0.5},
+                "direction": DIRECTION_WEST,
+            }
+        )
+        entities.append(
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": float(x0 + 4) + 0.5, "y": 0.5},
+                "direction": DIRECTION_EAST,
+            }
+        )
+        entities.append({"name": "pipe", "position": {"x": float(x0 + 5) + 0.5, "y": 0.5}})
+    occ = {(float(e["position"]["x"]), 0.5) for e in entities}
+    for i in range(n):
+        occ.add((float(i * 6 + 2) + 0.5, 0.5))
+    grid = {(float(e["position"]["x"]), 0.5): e for e in entities}
+    placement = PlacementResult(entities, occ, grid, {}, {"water"}, True)
+    yield
+    _shrink_underground_pipe_spans(placement, set(), max_segment_extent=10)
+
+
+def perf_pump_collect_fluid_terminals(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for collecting fluid terminals and protected tiles across components."""
+    placement = PlacementResult([], set(), {}, {}, {f"fluid_{i % 16}" for i in range(16)}, True)
+    routes = RouteResult({}, {}, set(), {(0.5, 0.5)}, set(), set())
+    def_data = {
+        "units": 1000,
+        "pins": [
+            {"name": f"fluid_{i % 16}", "direction": "INPUT", "x": i * 1000, "y": 500}
+            for i in range(n)
+        ],
+        "components": [
+            {"name": f"c_{i}", "macro": "chem_cell", "x": i * 5000, "y": 5000}
+            for i in range(n)
+        ],
+    }
+    netlist_data = {
+        "fluids": [f"fluid_{i}" for i in range(16)],
+        "instances": [{"name": f"c_{i}", "cell": "chem_cell"} for i in range(n)],
+        "cells": {
+            "chem_cell": {
+                "machine": "chemical-plant",
+                "width": 3,
+                "height": 3,
+                "inputs": ["fluid_0", "iron-plate"],
+                "outputs": ["fluid_1"],
+            }
+        },
+    }
+    yield
+    _collect_fluid_terminals_and_protected_tiles(
+        placement, routes, def_data, netlist_data, DEFAULT_PUMP_CONFIG
+    )
 
 
 if __name__ == "__main__":

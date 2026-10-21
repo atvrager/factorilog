@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import builtins
 import io
 import json
 import sys
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -15,12 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import blueprint
 import def2bp
 from placement import PlacementResult, RouteResult
-
-perf_case = getattr(
-    builtins,
-    "perf_case",
-    lambda *_args, **_kwargs: lambda fn: fn,
-)
 
 MINI_DEF = """
 VERSION 5.8 ;
@@ -1304,36 +1298,47 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(ch_2x2.channel_width, 8)
 
     def test_perf_cases_smoke(self) -> None:
-        """Smoke-test all @perf_case scale benchmark functions at small scale."""
-        self.assertEqual(len(perf_build_fluid_mst_specs(_setup_fluid_mst_terms(8))), 7)
-        big_p, med_p = perf_wire_chassis_big_and_medium_poles(_setup_chassis_poles(8))
-        self.assertEqual(len(big_p), 8)
-        self.assertEqual(len(med_p), 8)
-        self.assertGreater(perf_bridge_disconnected_chassis_poles(_setup_disconnected_poles(8)), 0)
-        self.assertGreater(
-            perf_register_chassis_router_obstacles(_setup_chassis_obstacles_and_pins(8)), 0
-        )
-        self.assertGreater(perf_merge_chassis_base_entities(_setup_merge_chassis_entities(8)), 8)
-        self.assertEqual(len(perf_jumper_belts_across_chassis_poles(_setup_jumper_belts(8))), 16)
+        """Smoke-test all perf_* scale benchmark generators at small scale."""
+        for perf_fn in (
+            perf_build_fluid_mst_specs,
+            perf_wire_chassis_big_and_medium_poles,
+            perf_bridge_disconnected_chassis_poles,
+            perf_register_chassis_router_obstacles,
+            perf_merge_chassis_base_entities,
+            perf_jumper_belts_across_chassis_poles,
+            perf_route_stage1_blocks,
+            perf_plan_legacy_macro_floorplan,
+            perf_build_highway_obstacles,
+            perf_collect_router_constraints,
+            perf_build_surface_tile_maps,
+        ):
+            for _ in perf_fn(8):
+                pass
 
 
-def _setup_fluid_mst_terms(
-    n: int,
-) -> list[tuple[tuple[int, int], int | None, int | None]]:
-    return [
+def perf_build_fluid_mst_specs(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for fluid terminal Manhattan MST construction."""
+    terms = [
         ((i * 3, (i * 17) % 97), def2bp.DIRECTION_EAST, def2bp.DIRECTION_WEST) for i in range(n)
     ]
+    yield
+    def2bp._build_fluid_mst_specs("water__1", "water", terms)
 
 
-@perf_case(scales=(32, 64, 128, 256), setup=_setup_fluid_mst_terms, rounds=3)
-def perf_build_fluid_mst_specs(
-    terms: list[tuple[tuple[int, int], int | None, int | None]],
-) -> list[Any]:
-    """Scale benchmark for fluid terminal Manhattan MST construction."""
-    return def2bp._build_fluid_mst_specs("water__1", "water", terms)
-
-
-def _setup_chassis_poles(n: int) -> list[dict[str, Any]]:
+def perf_wire_chassis_big_and_medium_poles(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512, 1024),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for chassis big and medium electric pole wiring."""
     entities: list[dict[str, Any]] = []
     for i in range(n):
         gx = float((i % 16) * 30 + 5)
@@ -1352,20 +1357,19 @@ def _setup_chassis_poles(n: int) -> list[dict[str, Any]]:
                 "entity_number": i * 2 + 2,
             }
         )
-    return entities
+    wires: list[list[int]] = []
+    yield
+    def2bp._wire_chassis_big_and_medium_poles(entities, wires, def2bp.DEFAULT_DEF2BP_CONFIG)
 
 
-@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_chassis_poles, rounds=3)
-def perf_wire_chassis_big_and_medium_poles(
-    entities: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Scale benchmark for chassis big and medium electric pole wiring."""
-    return def2bp._wire_chassis_big_and_medium_poles(entities, [], def2bp.DEFAULT_DEF2BP_CONFIG)
-
-
-def _setup_disconnected_poles(
-    n: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], RouteResult, int]:
+def perf_bridge_disconnected_chassis_poles(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for bridging disconnected chassis electric pole components."""
     med_poles: list[dict[str, Any]] = [
         {
             "name": "medium-electric-pole",
@@ -1374,28 +1378,24 @@ def _setup_disconnected_poles(
         }
         for i in range(n)
     ]
+    entities = list(med_poles)
     routes = RouteResult({}, {}, set(), set(), set(), set())
-    return list(med_poles), med_poles, routes, len(med_poles)
-
-
-@perf_case(scales=(32, 64, 128, 256), setup=_setup_disconnected_poles, rounds=3)
-def perf_bridge_disconnected_chassis_poles(
-    data: tuple[list[dict[str, Any]], list[dict[str, Any]], RouteResult, int],
-) -> int:
-    """Scale benchmark for bridging disconnected chassis electric pole components."""
-    entities, med_poles, routes, base_len = data
-    del entities[base_len:]
     wires: list[list[int]] = [[1, 5, 2, 5]]
     occupied: set[tuple[float, float]] = set()
+    yield
     def2bp._bridge_disconnected_chassis_poles(
         entities, wires, [], med_poles, routes, occupied, def2bp.DEFAULT_DEF2BP_CONFIG
     )
-    return len(wires)
 
 
-def _setup_chassis_obstacles_and_pins(
-    n: int,
-) -> tuple[dict[str, Any], PlacementResult, list[dict[str, Any]], int, int, float, float]:
+def perf_register_chassis_router_obstacles(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512, 1024),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for chassis obstacle registration against pin clearance zones."""
     pins = [
         {"name": f"p_{i}", "net": f"n_{i}", "direction": "INPUT", "x": (i * 13) * 1000, "y": 0}
         for i in range(n)
@@ -1408,37 +1408,29 @@ def _setup_chassis_obstacles_and_pins(
         for i in range(n)
     ]
     placement = PlacementResult([], set(), {}, {}, set(), False)
-    return {"pins": pins}, placement, chassis_ents, 4, 4, 400.0, 400.0
-
-
-@perf_case(
-    scales=(64, 128, 256, 512, 1024),
-    setup=_setup_chassis_obstacles_and_pins,
-    rounds=3,
-)
-def perf_register_chassis_router_obstacles(
-    data: tuple[dict[str, Any], PlacementResult, list[dict[str, Any]], int, int, float, float],
-) -> int:
-    """Scale benchmark for chassis obstacle registration against pin clearance zones."""
-    def_data, placement, chassis_ents, gw, gh, dw, dh = data
-    placement.occupied_positions.clear()
+    def_data = {"pins": pins}
+    yield
     def2bp._register_chassis_router_obstacles(
         def_data,
         placement,
         chassis_ents,
-        gw,
-        gh,
-        dw,
-        dh,
+        4,
+        4,
+        400.0,
+        400.0,
         0.001,
         def2bp.DEFAULT_DEF2BP_CONFIG,
     )
-    return len(placement.occupied_positions)
 
 
-def _setup_merge_chassis_entities(
-    n: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+def perf_merge_chassis_base_entities(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512, 1024),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for merging chassis base entities and spatial lamp filtering."""
     entities: list[dict[str, Any]] = [
         {
             "name": "medium-electric-pole",
@@ -1454,25 +1446,18 @@ def _setup_merge_chassis_entities(
         }
         for i in range(n)
     ]
-    return entities, chassis_base, len(entities)
+    yield
+    def2bp._merge_chassis_base_entities(entities, chassis_base, True, def2bp.DEFAULT_DEF2BP_CONFIG)
 
 
-@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_merge_chassis_entities, rounds=3)
-def perf_merge_chassis_base_entities(
-    data: tuple[list[dict[str, Any]], list[dict[str, Any]], int],
-) -> int:
-    """Scale benchmark for merging chassis base entities and spatial lamp filtering."""
-    entities, chassis_base, base_len = data
-    del entities[base_len:]
-    merged, _ = def2bp._merge_chassis_base_entities(
-        entities, chassis_base, True, def2bp.DEFAULT_DEF2BP_CONFIG
-    )
-    return len(merged)
-
-
-def _setup_jumper_belts(
-    n: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def perf_jumper_belts_across_chassis_poles(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512, 1024),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for converting pole-colliding belts into underground jumpers."""
     belts: list[dict[str, Any]] = []
     poles: list[dict[str, Any]] = []
     for i in range(n):
@@ -1487,16 +1472,193 @@ def _setup_jumper_belts(
             }
             for dy in (-1.5, -0.5, 0.5, 1.5)
         )
-    return belts, poles
+    yield
+    def2bp.jumper_belts_across_chassis_poles(belts, poles, cfg=def2bp.DEFAULT_DEF2BP_CONFIG)
 
 
-@perf_case(scales=(64, 128, 256, 512, 1024), setup=_setup_jumper_belts, rounds=3)
-def perf_jumper_belts_across_chassis_poles(
-    data: tuple[list[dict[str, Any]], list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    """Scale benchmark for converting pole-colliding belts into underground jumpers."""
-    belts, poles = data
-    return def2bp.jumper_belts_across_chassis_poles(belts, poles, cfg=def2bp.DEFAULT_DEF2BP_CONFIG)
+def perf_route_stage1_blocks(
+    n: int = 32,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for Stage 1 intra-block routing and obstacle partitioning."""
+    pitch = def2bp.DEFAULT_DEF2BP_CONFIG.block_pitch
+    chassis = def2bp.CityBlockChassis(pitch=pitch, channel_width=8, programmatic=True)
+    planner = def2bp.MacroFloorplanner(chassis=chassis)
+    intra_specs: dict[tuple[int, int], list[def2bp.RouterNetSpec]] = {}
+    obstacles: set[tuple[int, int]] = set()
+    for bx in range(n):
+        ox = bx * pitch
+        intra_specs[(bx, 0)] = [
+            def2bp.RouterNetSpec(
+                name=f"intra_{bx}",
+                source=(ox + 10, 10),
+                sink=(ox + 10, 10),
+                commodity="iron-plate",
+                start_heading=def2bp.DIRECTION_EAST,
+                end_heading=def2bp.DIRECTION_EAST,
+            )
+        ]
+        for k in range(64):
+            obstacles.add((ox + 15 + (k % 60), 15 + (k // 60)))
+    prototypes = def2bp.verifier_mod.load_game_prototypes()
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        yield
+        def2bp._route_stage1_blocks(
+            intra_specs,
+            planner,
+            set(),
+            4,
+            obstacles,
+            prototypes,
+            {},
+            set(),
+            {},
+            False,
+            def2bp.DEFAULT_DEF2BP_CONFIG,
+        )
+    finally:
+        sys.stderr = old_stderr
+
+
+def perf_plan_legacy_macro_floorplan(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for legacy macro floorplanning and external input pin relocation."""
+    pins = [
+        {"name": f"in_{i}", "net": f"net_{i}", "direction": "INPUT", "x": i * 1000, "y": 0}
+        for i in range(n)
+    ]
+    nets = [
+        {
+            "name": f"net_{i}",
+            "connections": [("PIN", f"in_{i}"), (f"inst_{i}", "in")],
+            "wires": [],
+            "vias": [],
+        }
+        for i in range(n)
+    ]
+    inst_to_entity: dict[str, dict[str, Any]] = {
+        f"inst_{i}": {
+            "name": "assembling-machine-1",
+            "position": {"x": 100.5, "y": 1.5},
+        }
+        for i in range(n)
+    }
+    placement = PlacementResult([], set(), {}, inst_to_entity, set(), False)
+    def_data: dict[str, Any] = {"units": 1000, "pins": pins, "nets": nets}
+    netlist_data: dict[str, Any] = {
+        "instances": [{"name": f"inst_{i}", "cell": "c1"} for i in range(n)],
+        "cells": {"c1": {"inputs": ["in"], "outputs": ["out"]}},
+    }
+    chassis = def2bp.CityBlockChassis(pitch=100, channel_width=8, programmatic=True)
+    yield
+    def2bp._plan_legacy_macro_floorplan(
+        def_data, netlist_data, placement, chassis, 2, 1, def2bp.DEFAULT_DEF2BP_CONFIG
+    )
+
+
+def perf_build_highway_obstacles(
+    n: int = 16,
+    *,
+    _scales: tuple[int, ...] = (8, 16, 32, 64),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for highway obstacle mask construction across blocks."""
+    pitch = def2bp.DEFAULT_DEF2BP_CONFIG.block_pitch
+    comps = [{"x": (bx * pitch + 10) * 1000, "y": 10 * 1000} for bx in range(n)]
+    specs = [
+        def2bp.RouterNetSpec(
+            name=f"hwy_{bx}",
+            source=(bx * pitch + 2, 2),
+            sink=(bx * pitch + 3, 2),
+            commodity="iron-plate",
+        )
+        for bx in range(n)
+    ]
+    obstacles = {(bx * pitch + 1, 1) for bx in range(n)}
+    yield
+    bay_blocks = def2bp._find_bay_blocks(comps, 0.001, n, 1, pitch)
+    def2bp._build_highway_obstacles(n, 1, 4, pitch, bay_blocks, obstacles, specs)
+
+
+def perf_collect_router_constraints(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for router terminal extraction and constraint collection."""
+    comps = [
+        {"name": f"u_{i}", "macro": "belt_merge2", "x": (i * 10) * 1000, "y": 10000, "orient": "N"}
+        for i in range(n)
+    ]
+    pins = [
+        {"name": f"p_{i}", "net": f"n_{i}", "direction": "INPUT", "x": (i * 10) * 1000, "y": 0}
+        for i in range(n)
+    ]
+    nets = [
+        {"name": f"iron_plate__{i}", "connections": [("PIN", f"p_{i}"), (f"u_{i}", "a")]}
+        for i in range(n)
+    ]
+    entities: list[dict[str, Any]] = [
+        {
+            "name": "splitter" if i % 3 == 0 else ("pipe" if i % 3 == 1 else "transport-belt"),
+            "position": {"x": float(i * 4 + 0.5), "y": 5.5},
+            "direction": def2bp.DIRECTION_NORTH,
+            "fluid": "water" if i % 3 == 1 else "",
+        }
+        for i in range(n)
+    ]
+    def_data: dict[str, Any] = {"units": 1000, "components": comps, "pins": pins, "nets": nets}
+    netlist_data: dict[str, Any] = {
+        "fluids": ["water"],
+        "instances": [{"name": f"u_{i}", "cell": "belt_merge2"} for i in range(n)],
+        "cells": {"belt_merge2": {"inputs": ["a", "b"], "outputs": ["y"]}},
+    }
+    placement = PlacementResult(entities, set(), {}, {}, {"water"}, True)
+    yield
+    _obs, pin_dict, val_in, val_out = def2bp._extract_pins_and_obstacles(def_data, placement, 0.001)
+    clean_fluids = def2bp._extract_clean_fluids(netlist_data, placement)
+    comp_map, inst_map, cell_map = def2bp._extract_lookup_maps(def_data, netlist_data)
+    specs: list[def2bp.RouterNetSpec] = []
+    for net_obj in nets:
+        specs.extend(
+            def2bp._build_net_specs_for_net(
+                net_obj, comp_map, inst_map, cell_map, pin_dict, val_in, 0.001, clean_fluids
+            )
+        )
+    def2bp._collect_router_constraints(specs, entities, val_in, val_out)
+
+
+def perf_build_surface_tile_maps(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (64, 128, 256, 512),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for surface tile map extraction from routed net results."""
+    from router.types import RouteNode
+
+    routes = {
+        f"iron_plate__mst_{i}": mock.Mock(
+            nodes=[RouteNode(i * 2 + k, 10, 0, def2bp.DIRECTION_EAST, 0) for k in range(4)]
+        )
+        for i in range(n)
+    }
+    yield
+    def2bp._build_surface_tile_maps(routes)
 
 
 if __name__ == "__main__":

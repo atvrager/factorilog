@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "foundry"))
 
 from foundry.def_untangle import (
     SpatialWireIndex,
     eliminate_staircase_jogs,
     route_unrouted_signal_nets,
     untangle_congested_turn_crossings,
+    untangle_def,
     untangle_merger_inputs,
     untangle_splitter_outputs,
 )
@@ -366,6 +372,100 @@ class TestDefUntangle(unittest.TestCase):
         self.assertEqual(wires[2]["layer"], "M1")
         self.assertEqual(wires[2]["x2"], 1080250)
         self.assertEqual(wires[2]["y2"], 1644500)
+
+    def test_perf_cases_smoke(self) -> None:
+        """Smoke-test all def_untangle perf_* generator benchmarks."""
+        for perf_fn in (perf_untangle_def_pins_only, perf_route_unrouted_signal_nets):
+            for _ in perf_fn(8):
+                pass
+
+
+def perf_untangle_def_pins_only(
+    n: int = 32,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for untangle_def in pins_only mode across splitters, mergers, and machines."""
+    components: list[dict[str, Any]] = []
+    nets: list[dict[str, Any]] = []
+    instances: list[dict[str, Any]] = []
+    for i in range(n):
+        x0 = i * 20000
+        components.extend(
+            [
+                {"name": f"sp_{i}", "macro": "belt_split2", "x": x0, "y": 10000, "orient": "N"},
+                {"name": f"mg_{i}", "macro": "belt_merge2", "x": x0 + 5000, "y": 10000, "orient": "N"},
+                {"name": f"am_{i}", "macro": "asm_cell", "x": x0 + 10000, "y": 10000, "orient": "N"},
+            ]
+        )
+        instances.append({"name": f"am_{i}", "cell": "asm_cell"})
+        nets.extend(
+            [
+                {
+                    "name": f"n_sp1_{i}",
+                    "connections": [(f"sp_{i}", "y1"), (f"mg_{i}", "a")],
+                    "wires": [{"layer": "M1", "x1": x0 + 750, "y1": 10500, "x2": x0 + 5250, "y2": 10500}],
+                },
+                {
+                    "name": f"n_sp2_{i}",
+                    "connections": [(f"sp_{i}", "y2"), (f"mg_{i}", "b")],
+                    "wires": [{"layer": "M1", "x1": x0 + 750, "y1": 11500, "x2": x0 + 5250, "y2": 11500}],
+                },
+                {
+                    "name": f"n_am1_{i}",
+                    "connections": [(f"mg_{i}", "y"), (f"am_{i}", "in1")],
+                    "wires": [{"layer": "M1", "x1": x0 + 5750, "y1": 10500, "x2": x0 + 9500, "y2": 10500}],
+                },
+                {
+                    "name": f"n_am2_{i}",
+                    "connections": [(f"sp_{i}", "a"), (f"am_{i}", "in2")],
+                    "wires": [{"layer": "M1", "x1": x0 + 250, "y1": 11500, "x2": x0 + 9500, "y2": 11500}],
+                },
+            ]
+        )
+    def_data: dict[str, Any] = {"units": 1000, "components": components, "nets": nets}
+    netlist_data: dict[str, Any] = {
+        "fluids": [],
+        "instances": instances,
+        "cells": {
+            "asm_cell": {
+                "machine": "assembling-machine-2",
+                "width": 3,
+                "height": 3,
+                "inputs": ["in1", "in2"],
+                "outputs": ["out"],
+            }
+        },
+    }
+    yield
+    untangle_def(def_data, netlist_data, pins_only=True)
+
+
+def perf_route_unrouted_signal_nets(
+    n: int = 32,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N log N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for route_unrouted_signal_nets across routed nets and components."""
+    components = [
+        {"name": f"c_{i}", "macro": "belt_split2", "x": i * 10000, "y": 10000, "orient": "N"}
+        for i in range(n)
+    ]
+    nets = [
+        {
+            "name": f"n_{i}",
+            "connections": [(f"c_{i}", "y1"), (f"c_{(i + 1) % n}", "a")],
+            "wires": [{"layer": "M1", "x1": i * 10000, "y1": 10500, "x2": i * 10000 + 2000, "y2": 10500}],
+        }
+        for i in range(n)
+    ]
+    def_data: dict[str, Any] = {"units": 1000, "components": components, "nets": nets}
+    yield
+    route_unrouted_signal_nets(def_data, {"cells": {}, "instances": []})
 
 
 if __name__ == "__main__":
