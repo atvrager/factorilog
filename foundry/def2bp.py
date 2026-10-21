@@ -7,6 +7,7 @@ then generates Factorio 2.0 blueprint exchange strings.
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import sys
@@ -133,7 +134,7 @@ PIN_CLEARANCE_RADIUS: float = 3.5
 BORDER_POLE_MARGIN: float = 4.5
 CORNER_POLE_MODS: tuple[float, float] = (5.0, 95.0)
 BIG_POLE_DELTAS: tuple[float, float] = (-0.5, 0.5)
-RADAR_DELTAS: tuple[float, float, float] = (-1.0, 0.0, 1.0)
+RADAR_SPAN: int = 3
 BAY_Y_MIN: int = 3
 BAY_Y_MAX: int = 16
 BAY_Y_STOP: int = 17
@@ -144,7 +145,6 @@ FALLBACK_CHANNEL_W: int = 6
 CHANNEL_IN_OFFSET: float = 1.5
 PIN_DBU_SHIFT: int = 500
 LAMP_BUCKET_STEP: int = 4
-NEIGHBOR_BUCKET_DELTAS: tuple[int, int, int] = (-1, 0, 1)
 PIN_GUARD_OFFSETS: tuple[int, int, int] = (1, 2, 3)
 WIRE_COPPER_ID: int = 5
 WIRE_RED_ID: int = 1
@@ -234,7 +234,7 @@ PIN_PAD_OFFSETS: dict[str, tuple[TileCoord, ...]] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Def2BpConfig:
     """Runtime configuration parameters for DEF-to-blueprint compilation."""
 
@@ -347,12 +347,17 @@ def _resolve_macro_cell_port(
     is_output: bool,
 ) -> TerminalSpec | None:
     port_key = "outputs" if is_output else "inputs"
-    raw_ports = [_as_str(p) for p in _as_list(cell.get(port_key))]
-    norm_ports = [p.replace("-", "_") for p in raw_ports]
     clean_port = port.replace("-", "_")
-    if clean_port not in norm_ports:
+    orig_name = next(
+        (
+            s
+            for p in _as_list(cell.get(port_key))
+            if (s := _as_str(p)).replace("-", "_") == clean_port
+        ),
+        None,
+    )
+    if orig_name is None:
         return None
-    orig_name = raw_ports[norm_ports.index(clean_port)]
     geom = lef.get_macro_port_geometry(dict(cell), orig_name, is_output=is_output)
     is_fluid_port = _is_fluid_name(orig_name, clean_fluids)
     pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
@@ -462,6 +467,61 @@ def _extract_pins_and_obstacles(
     return obstacles, pin_dict, valid_in_pins, valid_out_pins
 
 
+def _sweep_octant_edges(
+    pts: Sequence[GridCoord],
+    adj: list[set[int]],
+) -> None:
+    diffs = sorted({x - y for x, y in pts})
+    num_ranks = len(diffs)
+    rank_of = {d: num_ranks - idx for idx, d in enumerate(diffs)}
+    bit: list[tuple[float, int]] = [(math.inf, -1)] * (num_ranks + 1)
+    order = sorted(range(len(pts)), key=lambda i: (-pts[i][1], -pts[i][0], i))
+    for i in order:
+        x, y = pts[i]
+        r = rank_of[x - y]
+        best = (math.inf, -1)
+        q = r
+        while q > 0:
+            best = min(best, bit[q])
+            q &= q - 1
+        if best[1] >= 0:
+            adj[i].add(best[1])
+            adj[best[1]].add(i)
+        cand = (x + y, i)
+        u = r
+        while u <= num_ranks:
+            bit[u] = min(bit[u], cand)
+            u += u & -u
+
+
+def _build_octant_adj(coords: Sequence[GridCoord]) -> list[set[int]]:
+    adj: list[set[int]] = [set() for _ in coords]
+    if len(coords) < 2:
+        return adj
+    for pts in (
+        coords,
+        [(y, x) for x, y in coords],
+        [(-x, y) for x, y in coords],
+        [(y, -x) for x, y in coords],
+    ):
+        _sweep_octant_edges(pts, adj)
+    return adj
+
+
+def _push_fluid_mst_neighbors(
+    u_idx: int,
+    nodes: Sequence[tuple[TileCoord, int | None, int | None]],
+    adj: Sequence[set[int]],
+    visited: Sequence[bool],
+    heap: list[tuple[int, int, int]],
+) -> None:
+    ux, uy = nodes[u_idx][0]
+    for nb in adj[u_idx]:
+        if not visited[nb]:
+            nx, ny = nodes[nb][0]
+            heapq.heappush(heap, (abs(ux - nx) + abs(uy - ny), u_idx, nb))
+
+
 def _build_fluid_mst_specs(
     nname: str,
     commodity: str,
@@ -473,18 +533,18 @@ def _build_fluid_mst_specs(
     nodes = list(seen_nodes.values())
     if len(nodes) < 2:
         return []
-    in_tree = [nodes[0]]
-    remaining = set(nodes[1:])
+    adj = _build_octant_adj([(float(n[0][0]), float(n[0][1])) for n in nodes])
+    visited = [False] * len(nodes)
+    visited[0] = True
+    heap: list[tuple[int, int, int]] = []
+    _push_fluid_mst_neighbors(0, nodes, adj, visited, heap)
     specs: list[RouterNetSpec] = []
-    while remaining:
-        u, v = min(
-            ((u_node, v_node) for u_node in in_tree for v_node in remaining),
-            key=lambda pair: (
-                abs(pair[0][0][0] - pair[1][0][0]) + abs(pair[0][0][1] - pair[1][0][1])
-            ),
-        )
-        in_tree.append(v)
-        remaining.remove(v)
+    while heap and len(specs) < len(nodes) - 1:
+        _, u_idx, v_idx = heapq.heappop(heap)
+        if visited[v_idx]:
+            continue
+        visited[v_idx] = True
+        u, v = nodes[u_idx], nodes[v_idx]
         specs.append(
             RouterNetSpec(
                 name=f"{nname}_mst_{len(specs)}",
@@ -499,6 +559,7 @@ def _build_fluid_mst_specs(
                 sink_inward_dir=u[2],
             )
         )
+        _push_fluid_mst_neighbors(v_idx, nodes, adj, visited, heap)
     return specs
 
 
@@ -1175,16 +1236,18 @@ def _select_cityblock_chassis(grid_w: int, grid_h: int, cfg: Def2BpConfig) -> Ci
 
 def _chassis_entity_footprint(bname: str, bx: float, by: float) -> list[GridCoord]:
     if bname == "big-electric-pole":
+        x0, y0 = bx - TILE_HALF, by - TILE_HALF
         return [
-            (round(bx + dx, COORD_PRECISION), round(by + dy, COORD_PRECISION))
-            for dx in BIG_POLE_DELTAS
-            for dy in BIG_POLE_DELTAS
+            (round(x0 + dx, COORD_PRECISION), round(y0 + dy, COORD_PRECISION))
+            for dx in range(2)
+            for dy in range(2)
         ]
     if bname == "radar":
+        x0, y0 = bx - 1.0, by - 1.0
         return [
-            (round(bx + dx, COORD_PRECISION), round(by + dy, COORD_PRECISION))
-            for dx in RADAR_DELTAS
-            for dy in RADAR_DELTAS
+            (round(x0 + dx, COORD_PRECISION), round(y0 + dy, COORD_PRECISION))
+            for dx in range(RADAR_SPAN)
+            for dy in range(RADAR_SPAN)
         ]
     return [(round(bx, COORD_PRECISION), round(by, COORD_PRECISION))]
 
@@ -1197,7 +1260,7 @@ def _should_skip_chassis_obstacle(
     pitch: float,
     die_w: float,
     die_h: float,
-    pin_coords: Sequence[GridCoord],
+    pin_buckets: Mapping[TileCoord, Sequence[GridCoord]],
 ) -> bool:
     if is_multi:
         is_corner = (
@@ -1205,18 +1268,20 @@ def _should_skip_chassis_obstacle(
             and (bx % pitch) in CORNER_POLE_MODS
             and (by % pitch) in CORNER_POLE_MODS
         )
-        if bname != "radar" and not is_corner:
-            return True
-    elif (
-        bx <= BORDER_POLE_MARGIN
-        or bx >= die_w - BORDER_POLE_MARGIN
-        or by <= BORDER_POLE_MARGIN
-        or by >= die_h - BORDER_POLE_MARGIN
-    ):
-        return True
-    return any(
+        skip_grid = bname != "radar" and not is_corner
+    else:
+        skip_grid = (
+            bx <= BORDER_POLE_MARGIN
+            or bx >= die_w - BORDER_POLE_MARGIN
+            or by <= BORDER_POLE_MARGIN
+            or by >= die_h - BORDER_POLE_MARGIN
+        )
+    bk_x, bk_y = int(bx // LAMP_BUCKET_STEP), int(by // LAMP_BUCKET_STEP)
+    return skip_grid or any(
         abs(bx - px) <= PIN_CLEARANCE_RADIUS and abs(by - py) <= PIN_CLEARANCE_RADIUS
-        for px, py in pin_coords
+        for nx in range(bk_x - 1, bk_x + 2)
+        for ny in range(bk_y - 1, bk_y + 2)
+        for px, py in pin_buckets.get((nx, ny), ())
     )
 
 
@@ -1232,20 +1297,20 @@ def _register_chassis_router_obstacles(
     cfg: Def2BpConfig,
 ) -> None:
     pitch = float(cfg.block_pitch)
-    pin_coords = [
-        (
-            math.floor(_as_float(_as_map(p).get("x")) * scale) + TILE_HALF,
-            math.floor(_as_float(_as_map(p).get("y")) * scale) + TILE_HALF,
-        )
-        for p in _as_list(def_data.get("pins"))
-    ]
+    pin_buckets: dict[TileCoord, list[GridCoord]] = {}
+    for p in _as_list(def_data.get("pins")):
+        pm = _as_map(p)
+        px = math.floor(_as_float(pm.get("x")) * scale) + TILE_HALF
+        py = math.floor(_as_float(pm.get("y")) * scale) + TILE_HALF
+        bkey = (int(px // LAMP_BUCKET_STEP), int(py // LAMP_BUCKET_STEP))
+        pin_buckets.setdefault(bkey, []).append((px, py))
     is_multi = grid_w * grid_h >= MIN_PROGRAMMATIC_BLOCKS
     for be in chassis_base_entities:
         if "position" not in be:
             continue
         bx, by = _entity_xy(be)
         bname = _as_str(be.get("name"))
-        if _should_skip_chassis_obstacle(bname, bx, by, is_multi, pitch, die_w, die_h, pin_coords):
+        if _should_skip_chassis_obstacle(bname, bx, by, is_multi, pitch, die_w, die_h, pin_buckets):
             continue
         placement.occupied_positions.update(_chassis_entity_footprint(bname, bx, by))
 
@@ -1484,9 +1549,9 @@ def _is_lamp_near_pole(
     bk_x, bk_y = int(bx // LAMP_BUCKET_STEP), int(by // LAMP_BUCKET_STEP)
     return any(
         abs(px - bx) <= r and abs(py - by) <= r
-        for dx_b in NEIGHBOR_BUCKET_DELTAS
-        for dy_b in NEIGHBOR_BUCKET_DELTAS
-        for px, py, r in lamp_pole_buckets.get((bk_x + dx_b, bk_y + dy_b), ())
+        for nx in range(bk_x - 1, bk_x + 2)
+        for ny in range(bk_y - 1, bk_y + 2)
+        for px, py, r in lamp_pole_buckets.get((nx, ny), ())
     )
 
 
@@ -1520,20 +1585,33 @@ def _merge_chassis_base_entities(
     return entities, occupied_tiles
 
 
-def _try_wire_big_pole_pair(
-    bp1: EntityDict,
-    bp2: EntityDict,
+def _build_big_pole_buckets(
+    big_poles: Sequence[EntityDict],
+    bucket_step: float,
+) -> dict[TileCoord, list[tuple[float, float, int]]]:
+    buckets: dict[TileCoord, list[tuple[float, float, int]]] = {}
+    for bp in big_poles:
+        bx, by = _entity_xy(bp)
+        bkey = (math.floor(bx / bucket_step), math.floor(by / bucket_step))
+        buckets.setdefault(bkey, []).append((bx, by, _as_int(bp.get("entity_number"))))
+    return buckets
+
+
+def _try_wire_big_pole_coords(
+    p1: tuple[float, float, int],
+    p2: tuple[float, float, int],
     wires: list[list[int]],
     seen_pairs: set[TileCoord],
     max_big_dist: float,
 ) -> None:
-    x1, y1 = _entity_xy(bp1)
-    x2, y2 = _entity_xy(bp2)
+    x1, y1, p1_num = p1
+    x2, y2, p2_num = p2
+    if p1_num == p2_num:
+        return
     dx, dy = abs(x1 - x2), abs(y1 - y2)
     is_aligned = dx < POLE_ALIGN_TOLERANCE or dy < POLE_ALIGN_TOLERANCE
     if math.hypot(dx, dy) > max_big_dist or not is_aligned:
         return
-    p1_num, p2_num = _as_int(bp1.get("entity_number")), _as_int(bp2.get("entity_number"))
     pair = (min(p1_num, p2_num), max(p1_num, p2_num))
     if pair in seen_pairs:
         return
@@ -1544,14 +1622,39 @@ def _try_wire_big_pole_pair(
 
 
 def _connect_aligned_big_poles(
-    big_poles: Sequence[EntityDict],
+    big_buckets: Mapping[TileCoord, Sequence[tuple[float, float, int]]],
     wires: list[list[int]],
     seen_pairs: set[TileCoord],
     max_big_dist: float,
 ) -> None:
-    for i, bp1 in enumerate(big_poles):
-        for bp2 in big_poles[i + 1 :]:
-            _try_wire_big_pole_pair(bp1, bp2, wires, seen_pairs, max_big_dist)
+    for (bk_x, bk_y), entries in big_buckets.items():
+        neighbors = [
+            cand
+            for nx in range(bk_x - 1, bk_x + 2)
+            for ny in range(bk_y - 1, bk_y + 2)
+            for cand in big_buckets.get((nx, ny), ())
+        ]
+        for p1 in entries:
+            for p2 in neighbors:
+                _try_wire_big_pole_coords(p1, p2, wires, seen_pairs, max_big_dist)
+
+
+def _nearest_big_pole_in_buckets(
+    mx: float,
+    my: float,
+    bucket_step: float,
+    med_reach: float,
+    big_buckets: Mapping[TileCoord, Sequence[tuple[float, float, int]]],
+) -> int | None:
+    bk_x, bk_y = math.floor(mx / bucket_step), math.floor(my / bucket_step)
+    in_reach = [
+        (dist, bp_num)
+        for nx in range(bk_x - 1, bk_x + 2)
+        for ny in range(bk_y - 1, bk_y + 2)
+        for bx, by, bp_num in big_buckets.get((nx, ny), ())
+        if (dist := math.hypot(mx - bx, my - by)) <= med_reach
+    ]
+    return min(in_reach)[1] if in_reach else None
 
 
 def _wire_chassis_big_and_medium_poles(
@@ -1561,22 +1664,21 @@ def _wire_chassis_big_and_medium_poles(
 ) -> tuple[list[EntityDict], list[EntityDict]]:
     big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
     med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
-    seen_pairs: set[TileCoord] = set()
-    _connect_aligned_big_poles(
-        big_poles, wires, seen_pairs, cfg.big_pole_wire_reach + POLE_REACH_SLACK
-    )
     if not big_poles:
         return big_poles, med_poles
+    max_big_dist = cfg.big_pole_wire_reach + POLE_REACH_SLACK
+    bucket_step = max(1.0, max_big_dist, cfg.med_pole_wire_reach)
+    big_buckets = _build_big_pole_buckets(big_poles, bucket_step)
+    seen_pairs: set[TileCoord] = set()
+    _connect_aligned_big_poles(big_buckets, wires, seen_pairs, max_big_dist)
 
     for mp in med_poles:
         mp_num = _as_int(mp.get("entity_number"))
         mx, my = _entity_xy(mp)
-        best_bp = min(
-            big_poles, key=lambda bp: math.hypot(mx - _entity_xy(bp)[0], my - _entity_xy(bp)[1])
+        bp_num = _nearest_big_pole_in_buckets(
+            mx, my, bucket_step, cfg.med_pole_wire_reach, big_buckets
         )
-        bx, by = _entity_xy(best_bp)
-        if math.hypot(mx - bx, my - by) <= cfg.med_pole_wire_reach:
-            bp_num = _as_int(best_bp.get("entity_number"))
+        if bp_num is not None:
             pair = (min(mp_num, bp_num), max(mp_num, bp_num))
             if pair not in seen_pairs:
                 seen_pairs.add(pair)
@@ -1709,6 +1811,21 @@ def _place_intermediate_bridge_poles(
     return prev_num
 
 
+def _push_pole_bridge_edges(
+    source_nums: set[int],
+    unreached_nums: set[int],
+    oct_adj: Mapping[int, set[int]],
+    pole_coords: Mapping[int, GridCoord],
+    heap: list[tuple[float, int, int]],
+) -> None:
+    for v_num in source_nums:
+        vx, vy = pole_coords[v_num]
+        for u_num in oct_adj.get(v_num, ()):
+            if u_num in unreached_nums:
+                ux, uy = pole_coords[u_num]
+                heapq.heappush(heap, (math.hypot(ux - vx, uy - vy), u_num, v_num))
+
+
 def _bridge_disconnected_chassis_poles(
     entities: list[EntityDict],
     wires: list[list[int]],
@@ -1723,17 +1840,23 @@ def _bridge_disconnected_chassis_poles(
     copper_adj = _build_copper_adjacency(wires)
     all_pole_by_num = {_as_int(p.get("entity_number")): p for p in [*big_poles, *med_poles]}
     reached = _find_largest_pole_component(all_pole_by_num, copper_adj)
+    unreached_nums = set(all_pole_by_num.keys()) - reached
+    if not unreached_nums or not reached:
+        return
     _reserve_pin_guard_tiles(routes, occupied_tiles)
 
-    unreached_nums = set(all_pole_by_num.keys()) - reached
-    while unreached_nums and reached:
-        u_num, v_num = min(
-            ((u, v) for u in unreached_nums for v in reached),
-            key=lambda pair: math.hypot(
-                _entity_xy(all_pole_by_num[pair[0]])[0] - _entity_xy(all_pole_by_num[pair[1]])[0],
-                _entity_xy(all_pole_by_num[pair[0]])[1] - _entity_xy(all_pole_by_num[pair[1]])[1],
-            ),
-        )
+    pole_nums = list(all_pole_by_num.keys())
+    pole_coords = {num: _entity_xy(p) for num, p in all_pole_by_num.items()}
+    idx_adj = _build_octant_adj([pole_coords[num] for num in pole_nums])
+    oct_adj: dict[int, set[int]] = {
+        pole_nums[i]: {pole_nums[j] for j in nbs} for i, nbs in enumerate(idx_adj)
+    }
+    heap: list[tuple[float, int, int]] = []
+    _push_pole_bridge_edges(reached, unreached_nums, oct_adj, pole_coords, heap)
+    while unreached_nums and heap:
+        _, u_num, v_num = heapq.heappop(heap)
+        if u_num not in unreached_nums:
+            continue
         prev_num = _place_intermediate_bridge_poles(
             all_pole_by_num[u_num],
             all_pole_by_num[v_num],
@@ -1748,8 +1871,9 @@ def _bridge_disconnected_chassis_poles(
         wires.append([min(prev_num, u_num), WIRE_COPPER_ID, max(prev_num, u_num), WIRE_COPPER_ID])
         copper_adj.setdefault(prev_num, set()).add(u_num)
         copper_adj.setdefault(u_num, set()).add(prev_num)
-        _bfs_pole_component(u_num, all_pole_by_num, copper_adj, reached)
-        unreached_nums -= reached
+        newly_reached = _bfs_pole_component(u_num, all_pole_by_num, copper_adj, reached)
+        unreached_nums -= newly_reached
+        _push_pole_bridge_edges(newly_reached, unreached_nums, oct_adj, pole_coords, heap)
 
 
 def _net_fluid_commodity(net_name: str, fluids: set[str]) -> str | None:
@@ -1980,7 +2104,7 @@ def _convert_chained_south_pole_jumper(
     y_hi: float,
     out_pos: GridCoord,
     cfg: Def2BpConfig,
-) -> bool:
+) -> None:
     for dist in range(1, cfg.max_underground_span + 1):
         cand = ent_map.get((x, round(out_pos[1] + dist, COORD_PRECISION)))
         if (
@@ -2003,8 +2127,7 @@ def _convert_chained_south_pole_jumper(
             for r_pos in ((x, y_lo), (x, y_hi), out_pos):
                 to_remove.add(r_pos)
                 ent_map.pop(r_pos, None)
-            return True
-    return False
+            return
 
 
 def _try_convert_pole_jumper_line(
