@@ -1,13 +1,19 @@
 """Unit tests for the DEF to Factorio blueprint converter."""
 
+from __future__ import annotations
+
+import io
 import json
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import blueprint
 import def2bp
+from placement import PlacementResult, RouteResult
 
 MINI_DEF = """
 VERSION 5.8 ;
@@ -166,6 +172,877 @@ class TestDef2Bp(unittest.TestCase):
 
         coal = next(p for p in pins["inputs"] if p["name"] == "coal")
         self.assertEqual(coal["type"], "belt")
+
+    def test_resolve_terminal_pins_and_macros(self) -> None:
+        """Verify _resolve_terminal for PINs, merge/split/pump macros, and machine faces."""
+        pin_dict = {
+            "iron_in": (0, 10),
+            "coal_in": (10, 0),
+            "gear_in": (5, 5),
+            "iron_out": (0, 20),
+            "coal_out": (20, 0),
+            "gear_out": (15, 15),
+            "water_in": (0, 30),
+            "steam_out": (30, 0),
+            "oil_in": (40, 40),
+        }
+        valid_in_pins = {(0.0, 10.0), (10.0, 0.0), (5.0, 5.0), (0.0, 30.0), (40.0, 40.0)}
+        clean_fluids = {"water", "steam", "crude_oil"}
+
+        # Missing pin returns None
+        self.assertIsNone(
+            def2bp._resolve_terminal(
+                "PIN", "missing", "missing", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            )
+        )
+        # Missing component returns None
+        self.assertIsNone(
+            def2bp._resolve_terminal(
+                "u_missing", "a", "net1", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            )
+        )
+
+        # PIN drivers and sinks
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "iron_in", "iron_in", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((0, 10), True, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "coal_in", "coal_in", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((10, 0), True, def2bp.DIRECTION_SOUTH, def2bp.DIRECTION_SOUTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "gear_in", "gear_in", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((5, 5), True, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "iron_out", "iron_out", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((0, 20), False, def2bp.DIRECTION_WEST, def2bp.DIRECTION_WEST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "coal_out", "coal_out", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((20, 0), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN", "gear_out", "gear_out", {}, {}, {}, pin_dict, valid_in_pins, 0.001
+            ),
+            ((15, 15), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+
+        # Fluid PINs
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN",
+                "water",
+                "water_in",
+                {},
+                {},
+                {},
+                pin_dict,
+                valid_in_pins,
+                0.001,
+                clean_fluids=clean_fluids,
+            ),
+            ((0, 30), True, None, def2bp.DIRECTION_WEST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN",
+                "steam",
+                "steam_out",
+                {},
+                {},
+                {},
+                pin_dict,
+                valid_in_pins,
+                0.001,
+                clean_fluids=clean_fluids,
+            ),
+            ((30, 0), False, None, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal(
+                "PIN",
+                "crude-oil",
+                "oil_in",
+                {},
+                {},
+                {},
+                pin_dict,
+                valid_in_pins,
+                0.001,
+                clean_fluids=clean_fluids,
+            ),
+            ((40, 40), True, None, None),
+        )
+
+        # belt_merge2 in W, E, S, N orientations
+        comp_map = {
+            "m_w": {"name": "m_w", "macro": "belt_merge2", "x": 10000, "y": 20000, "orient": "W"},
+            "m_e": {"name": "m_e", "macro": "belt_merge2", "x": 10000, "y": 20000, "orient": "E"},
+            "m_s": {"name": "m_s", "macro": "belt_merge2", "x": 10000, "y": 20000, "orient": "S"},
+            "m_n": {"name": "m_n", "macro": "belt_merge2", "x": 10000, "y": 20000, "orient": "N"},
+            "s_w": {"name": "s_w", "macro": "belt_split2", "x": 10000, "y": 20000, "orient": "W"},
+            "s_e": {"name": "s_e", "macro": "belt_split2", "x": 10000, "y": 20000, "orient": "E"},
+            "s_s": {"name": "s_s", "macro": "belt_split2", "x": 10000, "y": 20000, "orient": "S"},
+            "s_n": {"name": "s_n", "macro": "belt_split2", "x": 10000, "y": 20000, "orient": "N"},
+            "p_s": {"name": "p_s", "macro": "pump", "x": 10000, "y": 20000, "orient": "S"},
+            "p_n": {"name": "p_n", "macro": "pump", "x": 10000, "y": 20000, "orient": "N"},
+            "p_w": {"name": "p_w", "macro": "pump", "x": 10000, "y": 20000, "orient": "W"},
+            "p_e": {"name": "p_e", "macro": "pump", "x": 10000, "y": 20000, "orient": "E"},
+        }
+        # Merge W (splitter_dir = NORTH = 0)
+        self.assertEqual(
+            def2bp._resolve_terminal("m_w", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 23), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_w", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 23), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_w", "y", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 19), True, def2bp.DIRECTION_NORTH, None),
+        )
+        # Merge E (splitter_dir = SOUTH = 8)
+        self.assertEqual(
+            def2bp._resolve_terminal("m_e", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_SOUTH, def2bp.DIRECTION_SOUTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_e", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 19), False, def2bp.DIRECTION_SOUTH, def2bp.DIRECTION_SOUTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_e", "y", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 23), True, def2bp.DIRECTION_SOUTH, None),
+        )
+        # Merge S (splitter_dir = WEST = 12)
+        self.assertEqual(
+            def2bp._resolve_terminal("m_s", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((13, 20), False, def2bp.DIRECTION_WEST, def2bp.DIRECTION_WEST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_s", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((13, 21), False, def2bp.DIRECTION_WEST, def2bp.DIRECTION_WEST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_s", "y", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 21), True, def2bp.DIRECTION_WEST, None),
+        )
+        # Merge N (splitter_dir = EAST = 4)
+        self.assertEqual(
+            def2bp._resolve_terminal("m_n", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 20), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_n", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 21), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("m_n", "y", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((13, 21), True, def2bp.DIRECTION_EAST, None),
+        )
+
+        # Split W / E
+        self.assertEqual(
+            def2bp._resolve_terminal("s_w", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_w", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_w", "y1", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 21), True, def2bp.DIRECTION_NORTH, None),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_w", "y2", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 21), True, def2bp.DIRECTION_NORTH, None),
+        )
+        # Split N / S
+        self.assertEqual(
+            def2bp._resolve_terminal("s_n", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 20), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_n", "b", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((9, 21), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_n", "y1", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 20), True, def2bp.DIRECTION_EAST, None),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("s_n", "y2", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((11, 21), True, def2bp.DIRECTION_EAST, None),
+        )
+
+        # Pump S, N, W, E
+        self.assertEqual(
+            def2bp._resolve_terminal("p_s", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_SOUTH, def2bp.DIRECTION_SOUTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("p_s", "y", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 22), True, def2bp.DIRECTION_SOUTH, None),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("p_n", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_NORTH, def2bp.DIRECTION_NORTH),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("p_w", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_WEST, def2bp.DIRECTION_WEST),
+        )
+        self.assertEqual(
+            def2bp._resolve_terminal("p_e", "a", "n", comp_map, {}, {}, {}, set(), 0.001),
+            ((10, 19), False, def2bp.DIRECTION_EAST, def2bp.DIRECTION_EAST),
+        )
+
+        # Machine cell fluid and item ports across faces E, W, N, S
+        comp_map["u_mach"] = {"name": "u_mach", "macro": "chem", "x": 10000, "y": 20000}
+        inst_map = {"u_mach": {"name": "u_mach", "cell": "chem"}}
+        cell_map = {
+            "chem": {
+                "outputs": ["water", "steam", "crude_oil", "heavy_oil", "iron_plate"],
+                "inputs": ["water_in", "steam_in", "oil_in", "gas_in", "copper_plate"],
+            }
+        }
+        faces_out = {
+            "water": {"inserter_pos": (3.5, 1.5), "approach_pos": (4.5, 1.5), "face": "E"},
+            "steam": {"inserter_pos": (-0.5, 1.5), "approach_pos": (-1.5, 1.5), "face": "W"},
+            "crude_oil": {"inserter_pos": (1.5, -0.5), "approach_pos": (1.5, -1.5), "face": "N"},
+            "heavy_oil": {"inserter_pos": (1.5, 3.5), "approach_pos": (1.5, 4.5), "face": "S"},
+            "iron_plate": {
+                "inserter_pos": (3.5, 1.5),
+                "approach_pos": (4.5, 1.5),
+                "face": "E",
+                "approach_dir": def2bp.DIRECTION_EAST,
+            },
+        }
+        faces_in = {
+            "water_in": {"inserter_pos": (3.5, 1.5), "approach_pos": (4.5, 1.5), "face": "E"},
+            "steam_in": {"inserter_pos": (-0.5, 1.5), "approach_pos": (-1.5, 1.5), "face": "W"},
+            "oil_in": {"inserter_pos": (1.5, -0.5), "approach_pos": (1.5, -1.5), "face": "N"},
+            "gas_in": {"inserter_pos": (1.5, 3.5), "approach_pos": (1.5, 4.5), "face": "S"},
+            "copper_plate": {
+                "inserter_pos": (-0.5, 1.5),
+                "approach_pos": (-1.5, 1.5),
+                "face": "W",
+                "approach_dir": def2bp.DIRECTION_EAST,
+            },
+        }
+        all_fl = {
+            "water",
+            "steam",
+            "crude_oil",
+            "heavy_oil",
+            "water_in",
+            "steam_in",
+            "oil_in",
+            "gas_in",
+        }
+        with mock.patch(
+            "foundry.lef.get_macro_port_geometry",
+            side_effect=lambda _c, name, is_output=False: (
+                faces_out[name] if is_output else faces_in[name]
+            ),
+        ):
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "water",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((13, 21), True, None, def2bp.DIRECTION_WEST),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "steam",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((9, 21), True, None, def2bp.DIRECTION_EAST),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "crude_oil",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((11, 19), True, None, def2bp.DIRECTION_SOUTH),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "heavy_oil",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((11, 23), True, None, def2bp.DIRECTION_NORTH),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "water_in",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((13, 21), False, None, def2bp.DIRECTION_WEST),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "steam_in",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((9, 21), False, None, def2bp.DIRECTION_EAST),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "oil_in",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((11, 19), False, None, def2bp.DIRECTION_SOUTH),
+            )
+            self.assertEqual(
+                def2bp._resolve_terminal(
+                    "u_mach",
+                    "gas_in",
+                    "n",
+                    comp_map,
+                    inst_map,
+                    cell_map,
+                    {},
+                    set(),
+                    0.001,
+                    clean_fluids=all_fl,
+                ),
+                ((11, 23), False, None, def2bp.DIRECTION_NORTH),
+            )
+
+    def test_jumper_belts_across_chassis_poles_all_orientations(self) -> None:
+        """Verify jumper_belts_across_chassis_poles converts colliding belts in all 4 directions."""
+        base_entities = [{"name": "big-electric-pole", "position": {"x": 10.0, "y": 10.0}}]
+
+        # South (8): normal jumper
+        ents_s = [
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 8.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 9.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 10.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 11.5}, "direction": 8},
+        ]
+        res_s = def2bp.jumper_belts_across_chassis_poles(ents_s, base_entities)
+        self.assertEqual(len(res_s), 2)
+        self.assertEqual(res_s[0]["name"], "underground-belt")
+        self.assertEqual(res_s[0]["type"], "input")
+        self.assertEqual(res_s[0]["position"], {"x": 9.5, "y": 8.5})
+        self.assertEqual(res_s[1]["name"], "underground-belt")
+        self.assertEqual(res_s[1]["type"], "output")
+        self.assertEqual(res_s[1]["position"], {"x": 9.5, "y": 11.5})
+
+        # South (8): chained underground belt upgraded to fast-underground-belt (dist=2) and express (dist=6)
+        ents_s_fast = [
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 8.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 9.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 10.5}, "direction": 8},
+            {
+                "name": "underground-belt",
+                "type": "input",
+                "position": {"x": 9.5, "y": 11.5},
+                "direction": 8,
+            },
+            {
+                "name": "underground-belt",
+                "type": "output",
+                "position": {"x": 9.5, "y": 13.5},
+                "direction": 8,
+            },
+        ]
+        res_s_fast = def2bp.jumper_belts_across_chassis_poles(ents_s_fast, base_entities)
+        self.assertEqual(len(res_s_fast), 2)
+        self.assertEqual(res_s_fast[0]["name"], "fast-underground-belt")
+        self.assertEqual(res_s_fast[1]["name"], "fast-underground-belt")
+
+        # South (8): chained underground belt upgraded to express-underground-belt (dist=6, dist+3=9 > 7)
+        ents_s_exp = [
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 8.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 9.5}, "direction": 8},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 10.5}, "direction": 8},
+            {
+                "name": "underground-belt",
+                "type": "input",
+                "position": {"x": 9.5, "y": 11.5},
+                "direction": 8,
+            },
+            {
+                "name": "underground-belt",
+                "type": "output",
+                "position": {"x": 9.5, "y": 13.5},
+                "direction": 0,
+            },
+            {
+                "name": "underground-belt",
+                "type": "output",
+                "position": {"x": 9.5, "y": 17.5},
+                "direction": 8,
+            },
+        ]
+        res_s_exp = def2bp.jumper_belts_across_chassis_poles(ents_s_exp, base_entities)
+        self.assertEqual(len(res_s_exp), 3)
+        self.assertEqual(res_s_exp[0]["name"], "express-underground-belt")
+        self.assertEqual(res_s_exp[2]["name"], "express-underground-belt")
+
+        # North (0): normal jumper
+        ents_n = [
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 11.5}, "direction": 0},
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 10.5}, "direction": 0},
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 9.5}, "direction": 0},
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 8.5}, "direction": 0},
+        ]
+        res_n = def2bp.jumper_belts_across_chassis_poles(ents_n, base_entities)
+        self.assertEqual(len(res_n), 2)
+        self.assertEqual(res_n[0]["type"], "input")
+        self.assertEqual(res_n[0]["position"], {"x": 10.5, "y": 11.5})
+        self.assertEqual(res_n[1]["type"], "output")
+        self.assertEqual(res_n[1]["position"], {"x": 10.5, "y": 8.5})
+
+        # East (4): normal jumper
+        ents_e = [
+            {"name": "transport-belt", "position": {"x": 8.5, "y": 9.5}, "direction": 4},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 9.5}, "direction": 4},
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 9.5}, "direction": 4},
+            {"name": "transport-belt", "position": {"x": 11.5, "y": 9.5}, "direction": 4},
+        ]
+        res_e = def2bp.jumper_belts_across_chassis_poles(ents_e, base_entities)
+        self.assertEqual(len(res_e), 2)
+        self.assertEqual(res_e[0]["type"], "input")
+        self.assertEqual(res_e[0]["position"], {"x": 8.5, "y": 9.5})
+        self.assertEqual(res_e[1]["type"], "output")
+        self.assertEqual(res_e[1]["position"], {"x": 11.5, "y": 9.5})
+
+        # West (12): normal jumper
+        ents_w = [
+            {"name": "transport-belt", "position": {"x": 11.5, "y": 10.5}, "direction": 12},
+            {"name": "transport-belt", "position": {"x": 10.5, "y": 10.5}, "direction": 12},
+            {"name": "transport-belt", "position": {"x": 9.5, "y": 10.5}, "direction": 12},
+            {"name": "transport-belt", "position": {"x": 8.5, "y": 10.5}, "direction": 12},
+        ]
+        res_w = def2bp.jumper_belts_across_chassis_poles(ents_w, base_entities)
+        self.assertEqual(len(res_w), 2)
+        self.assertEqual(res_w[0]["type"], "input")
+        self.assertEqual(res_w[0]["position"], {"x": 11.5, "y": 10.5})
+        self.assertEqual(res_w[1]["type"], "output")
+        self.assertEqual(res_w[1]["position"], {"x": 8.5, "y": 10.5})
+
+    def test_route_with_maze_router_mst_and_headings(self) -> None:
+        """Verify fluid MST ordering, pin obstacles, and component headings in route_with_maze_router."""
+        def_data = {
+            "units": 1000,
+            "die_area": [0, 0, 50000, 50000],
+            "pins": [
+                {"name": "water_in", "net": "water__1", "direction": "INPUT", "x": 0, "y": 10000},
+                {
+                    "name": "iron_out",
+                    "net": "iron__1",
+                    "direction": "OUTPUT",
+                    "x": 40000,
+                    "y": 10000,
+                },
+            ],
+            "components": [
+                {"name": "p1", "macro": "pump", "x": 10000, "y": 10000, "orient": "E"},
+                {"name": "p2", "macro": "pump", "x": 30000, "y": 10000, "orient": "E"},
+                {"name": "s1", "macro": "belt_split2", "x": 20000, "y": 10000, "orient": "N"},
+            ],
+            "nets": [
+                {
+                    "name": "water__1",
+                    "connections": [("PIN", "water_in"), ("p1", "a"), ("p2", "a")],
+                },
+                {
+                    "name": "iron__1",
+                    "connections": [("s1", "y1"), ("PIN", "iron_out")],
+                },
+            ],
+        }
+        netlist_data = {"fluids": ["water"], "instances": [], "cells": {}}
+        placement = PlacementResult(
+            entities=[
+                {"name": "splitter", "position": [20.5, 11.0], "direction": 4},
+                {"name": "splitter", "position": [25.0, 15.5], "direction": 0},
+                {"name": "transport-belt", "position": [15.5, 15.5], "direction": 4},
+                {"name": "pipe", "position": [5.5, 5.5], "fluid": "water"},
+            ],
+            occupied_positions=set(),
+            grid_entities={},
+            inst_to_entity={},
+            fluids={"water"},
+            has_fluid_metadata=True,
+        )
+
+        captured_init: dict[str, Any] = {}
+        captured_specs: list[Any] = []
+
+        class FakeRouter:
+            def __init__(self, **kwargs: Any) -> None:
+                captured_init.update(kwargs)
+
+            def route(self, specs: list[Any], **_kwargs: Any) -> tuple[dict, list, None]:
+                captured_specs.extend(specs)
+                return {}, [], None
+
+        with mock.patch("foundry.router.maze_router.DualLaneMazeRouter", FakeRouter):
+            res = def2bp.route_with_maze_router(def_data, netlist_data, placement, engine=False)
+
+        self.assertEqual(res.valid_input_pins, {(0.0, 10.0)})
+        self.assertEqual(res.valid_output_pins, {(40.0, 10.0)})
+        # MST for water__1 connects (0, 10) -> (10, 9) first (dist 11), then (10, 9) -> (30, 9) (dist 20)
+        mst_specs = [s for s in captured_specs if s.is_fluid]
+        self.assertEqual(len(mst_specs), 2)
+        self.assertEqual(mst_specs[0].source, (10, 9))
+        self.assertEqual(mst_specs[0].sink, (0, 10))
+        self.assertEqual(mst_specs[1].source, (30, 9))
+        self.assertEqual(mst_specs[1].sink, (10, 9))
+
+        headings = captured_init["component_headings"]
+        self.assertEqual(headings[(20, 10)], 4)
+        self.assertEqual(headings[(20, 11)], 4)
+        self.assertEqual(headings[(24, 15)], 0)
+        self.assertEqual(headings[(25, 15)], 0)
+        self.assertEqual(headings[(15, 15)], 4)
+
+    def test_build_entities_chassis_pole_bridging_and_fluid_sharing(self) -> None:
+        """Verify chassis pole network bridging, lamp filtering, and same-fluid tile sharing."""
+        def_data = {
+            "units": 1000,
+            "die_area": [0, 0, 200000, 200000],
+            "blockages": [{"x1": 0, "y1": 0, "x2": 1000, "y2": 1000}],
+            "pins": [
+                {"name": "water_in", "net": "water__1", "direction": "INPUT", "x": 0, "y": 50000}
+            ],
+            "components": [],
+            "nets": [],
+        }
+        netlist_data = {"fluids": ["water"], "instances": [], "cells": {}}
+
+        fake_chassis_entities = [
+            {"name": "big-electric-pole", "position": {"x": 5.0, "y": 5.0}},
+            {"name": "big-electric-pole", "position": {"x": 5.0, "y": 35.0}},
+            {"name": "medium-electric-pole", "position": {"x": 5.5, "y": 55.5}},
+            {"name": "small-lamp", "position": {"x": 6.5, "y": 5.5}},
+            {"name": "small-lamp", "position": {"x": 150.5, "y": 150.5}},
+            {"name": "radar", "position": {"x": 5.5, "y": 5.5}},
+            {"name": "radar", "position": {"x": 12.5, "y": 20.5}},
+        ]
+
+        fake_routes = RouteResult(
+            net_surface_tiles={"water__1": {(20.5, 20.5): 4}, "water__2": {(20.5, 20.5): 4}},
+            tile_to_nets={(20.5, 20.5): {"water__1", "water__2"}},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles={(0.0, 50.0)},
+            valid_input_pins={(0.0, 50.0)},
+            valid_output_pins=set(),
+        )
+
+        orig_place = def2bp.place_components
+
+        def place_with_assembler(d: dict, n: dict) -> PlacementResult:
+            res = orig_place(d, n)
+            res.entities.append(
+                {
+                    "name": "assembling-machine-3",
+                    "position": {"x": 10.5, "y": 20.5},
+                    "direction": 0,
+                }
+            )
+            res.entities.append(
+                {
+                    "name": "medium-electric-pole",
+                    "position": {"x": 10.5, "y": 17.5},
+                }
+            )
+            return res
+
+        with (
+            mock.patch(
+                "foundry.chassis.CityBlockChassis.emit_base_blueprint",
+                return_value={"blueprint": {"entities": fake_chassis_entities, "tiles": []}},
+            ),
+            mock.patch.object(def2bp, "place_components", side_effect=place_with_assembler),
+            mock.patch.object(def2bp, "route_with_maze_router", return_value=fake_routes),
+            mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
+        ):
+            entities, wires = def2bp.build_entities(def_data, netlist_data, strict_drc=True)
+
+        big_poles = [e for e in entities if e["name"] == "big-electric-pole"]
+        med_poles = [e for e in entities if e["name"] == "medium-electric-pole"]
+        lamps = [e for e in entities if e["name"] == "small-lamp"]
+        radars = [e for e in entities if e["name"] == "radar"]
+        self.assertEqual(len(big_poles), 2)
+        self.assertEqual(len(lamps), 1)
+        self.assertEqual(lamps[0]["position"], {"x": 6.5, "y": 5.5})
+        self.assertGreaterEqual(len(med_poles), 3)
+        self.assertEqual(len(radars), 0)
+        self.assertGreater(len(wires), 0)
+
+    def test_route_with_maze_router_hierarchical_and_verifier(self) -> None:
+        """Verify hierarchical Stage 1/2 routing, obstacle masking, and NativeLayoutVerifier."""
+        def_data = {
+            "units": 1000,
+            "die_area": [0, 0, 200000, 100000],
+            "blockages": [{"x1": 0, "y1": 0, "x2": 1000, "y2": 1000}],
+            "pins": [],
+            "components": [
+                {"name": "s1", "macro": "belt_split2", "x": 10000, "y": 10000, "orient": "N"},
+                {"name": "s2", "macro": "belt_split2", "x": 110000, "y": 10000, "orient": "N"},
+            ],
+            "nets": [
+                {"name": "iron__1", "connections": [("s1", "y1"), ("s2", "a")]},
+            ],
+        }
+        netlist_data = {"fluids": [], "instances": [], "cells": {}}
+        placement = PlacementResult(
+            entities=[],
+            occupied_positions={(50.5, 50.5)},
+            grid_entities={},
+            inst_to_entity={},
+            fluids=set(),
+            has_fluid_metadata=False,
+        )
+
+        router_instances: list[dict[str, Any]] = []
+
+        class FakeRouteRes:
+            is_success = True
+            nodes: tuple = ()
+
+        class FakeHierRouter:
+            def __init__(self, **kwargs: Any) -> None:
+                router_instances.append(kwargs)
+
+            def route(self, specs: list[Any], **_kwargs: Any) -> tuple[dict, list, None]:
+                routes = {s.name: FakeRouteRes() for s in specs}
+                ents = [
+                    {
+                        "name": "transport-belt",
+                        "position": {"x": 10.5 + len(router_instances), "y": 10.5},
+                        "direction": 4,
+                    }
+                ]
+                return routes, ents, None
+
+        class FakeVerifRes:
+            is_valid = True
+            lvs_errors: tuple = ()
+            drc_violations: tuple = ()
+
+        class FakeVerifier:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def verify_blueprint(self, *_args: Any, **_kwargs: Any) -> FakeVerifRes:
+                return FakeVerifRes()
+
+        stderr_buf = io.StringIO()
+        print_kwargs: list[dict[str, Any]] = []
+
+        def tracking_print(*args: Any, **kwargs: Any) -> None:
+            print_kwargs.append(kwargs)
+            stderr_buf.write(" ".join(str(a) for a in args) + "\n")
+
+        with (
+            mock.patch("foundry.router.maze_router.DualLaneMazeRouter", FakeHierRouter),
+            mock.patch("foundry.native_engine.verifier.NativeLayoutVerifier", FakeVerifier),
+            mock.patch("builtins.print", side_effect=tracking_print),
+            mock.patch(
+                "time.perf_counter",
+                side_effect=[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+            ),
+        ):
+            def2bp.route_with_maze_router(def_data, netlist_data, placement, engine=object())
+
+        err_out = stderr_buf.getvalue()
+        self.assertIn("Stage 1: routing", err_out)
+        self.assertIn("Stage 2: routing", err_out)
+        self.assertIn("NativeLayoutVerifier completed in 1.00s", err_out)
+        self.assertTrue(all(kw.get("flush") is True for kw in print_kwargs))
+        # Stage 2 highway router must mask core interiors starting at margin (3, 3) and not street channels at (2, 50)
+        hwy_obs = router_instances[-1]["obstacles"]
+        self.assertIn((3, 50), hwy_obs)
+        self.assertNotIn((2, 50), hwy_obs)
+        self.assertIn((150, 50), hwy_obs)
+
+    def test_build_entities_legacy_floorplan_and_grid_sizes(self) -> None:
+        """Verify 2x2 vs 1x1 chassis obstacle handling and legacy floorplan input routing."""
+        # 2x2 grid (grid_w * grid_h >= 4) vs 1x1 grid (grid_w * grid_h < 4)
+        def_1x1 = {
+            "units": 1000,
+            "die_area": [0, 0, 100000, 100000],
+            "blockages": [{"x1": 0, "y1": 0, "x2": 1000, "y2": 1000}],
+            "pins": [],
+            "components": [],
+            "nets": [],
+        }
+        netlist_1x1 = {"fluids": [], "instances": [], "cells": {}}
+        fake_chassis_1x1 = [
+            {"name": "medium-electric-pole", "position": {"x": 50.5, "y": 50.5}},
+            {"name": "big-electric-pole", "position": {"x": 5.0, "y": 5.0}},
+        ]
+        fake_routes = RouteResult(
+            net_surface_tiles={},
+            tile_to_nets={},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles=set(),
+            valid_input_pins=set(),
+            valid_output_pins=set(),
+        )
+        captured_occ_1x1: set[tuple[float, float]] = set()
+
+        def capture_1x1(_d: dict, _n: dict, pl: PlacementResult, **_kw: object) -> RouteResult:
+            captured_occ_1x1.update(pl.occupied_positions)
+            return fake_routes
+
+        with (
+            mock.patch(
+                "foundry.chassis.CityBlockChassis.emit_base_blueprint",
+                return_value={"blueprint": {"entities": fake_chassis_1x1, "tiles": []}},
+            ),
+            mock.patch.object(def2bp, "route_with_maze_router", side_effect=capture_1x1),
+            mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
+            mock.patch.object(def2bp, "wire_telemetry", return_value=[]),
+        ):
+            def2bp.build_entities(def_1x1, netlist_1x1, strict_drc=False, use_maze_router=True)
+        # In 1x1 grid, interior medium pole at (50.5, 50.5) is added to occupied_positions
+        self.assertIn((50.5, 50.5), captured_occ_1x1)
+
+        # In 2x2 grid, interior medium pole at (50.5, 50.5) is skipped (not corner pole or radar)
+        def_2x2 = dict(def_1x1, die_area=[0, 0, 200000, 200000])
+        captured_occ_2x2: set[tuple[float, float]] = set()
+
+        def capture_2x2(_d: dict, _n: dict, pl: PlacementResult, **_kw: object) -> RouteResult:
+            captured_occ_2x2.update(pl.occupied_positions)
+            return fake_routes
+
+        with (
+            mock.patch(
+                "foundry.chassis.CityBlockChassis.emit_base_blueprint",
+                return_value={"blueprint": {"entities": fake_chassis_1x1, "tiles": []}},
+            ),
+            mock.patch.object(def2bp, "route_with_maze_router", side_effect=capture_2x2),
+            mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
+            mock.patch.object(def2bp, "wire_telemetry", return_value=[]),
+        ):
+            def2bp.build_entities(def_2x2, netlist_1x1, strict_drc=False, use_maze_router=True)
+        self.assertNotIn((50.5, 50.5), captured_occ_2x2)
+        self.assertIn((4.5, 4.5), captured_occ_2x2)
+
+        # Legacy branch (use_maze_router=False) with external PIN input into block (1, 0)
+        def_legacy = {
+            "units": 1000,
+            "die_area": [0, 0, 200000, 100000],
+            "blockages": [{"x1": 0, "y1": 0, "x2": 1000, "y2": 1000}],
+            "pins": [
+                {"name": "iron_in", "net": "iron_in", "direction": "INPUT", "x": 0, "y": 5000},
+                {
+                    "name": "no_pin_net",
+                    "net": "no_pin_net",
+                    "direction": "INPUT",
+                    "x": 0,
+                    "y": 8000,
+                },
+            ],
+            "components": [
+                {"name": "u_s1", "macro": "belt_split2", "x": 110000, "y": 10000, "orient": "N"},
+            ],
+            "nets": [
+                {"name": "iron_in", "connections": [("PIN", "iron_in"), ("u_s1", "a")]},
+                {"name": "no_pin_net", "connections": [("u_s1", "b")]},
+            ],
+        }
+        netlist_legacy = {
+            "fluids": [],
+            "instances": [{"name": "u_s1", "cell": "belt_split2"}],
+            "cells": {},
+        }
+        with (
+            mock.patch(
+                "foundry.chassis.CityBlockChassis.emit_base_blueprint",
+                return_value={"blueprint": {"entities": [], "tiles": []}},
+            ),
+            mock.patch.object(def2bp, "untangle_def"),
+            mock.patch.object(def2bp, "route_with_maze_router", return_value=fake_routes),
+            mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
+            mock.patch.object(def2bp, "wire_telemetry", return_value=[]),
+        ):
+            ents_leg, _ = def2bp.build_entities(
+                def_legacy, netlist_legacy, strict_drc=False, use_maze_router=False
+            )
+        # Pin x updated to 98000 (98.5 * 1000 - 500), while no_pin_net pin stays at 0
+        self.assertEqual(def_legacy["pins"][0]["x"], 98000)
+        self.assertEqual(def_legacy["pins"][1]["x"], 0)
+        self.assertGreater(len(ents_leg), 2)
 
 
 if __name__ == "__main__":
