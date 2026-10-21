@@ -158,7 +158,6 @@ POLE_REACH_SLACK: float = 0.5
 JUMPER_SPAN_PADDING: int = 3
 MAX_LOGGED_FAILURES: int = 25
 MAX_ERROR_SUMMARY: int = 5
-CARDINAL_NEIGHBORS: tuple[TileCoord, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 NORTH_SOUTH_DIRS: tuple[int, int] = (DIRECTION_NORTH, DIRECTION_SOUTH)
 WEST_EAST_ORIENT: tuple[str, str] = ("W", "E")
 DRIVER_PIN_NAMES: frozenset[str] = frozenset({"y", "y1", "y2", "out"})
@@ -567,9 +566,9 @@ def _partition_net_terminals(
         target_list = drivers if is_drv else sinks
         target_list.append((coord, head, term_head))
     if not drivers and sinks:
-        drivers.append(sinks.pop(0))
-    elif not sinks and drivers:
-        sinks.append(drivers.pop())
+        return [sinks[0]], sinks[1:]
+    if not sinks and drivers:
+        return drivers, [drivers.pop()]
     return drivers, sinks
 
 
@@ -658,8 +657,8 @@ def _record_single_entity_constraint(
     if ename == "pipe" and ent.get("fluid"):
         tx, ty = math.floor(cx), math.floor(cy)
         p_comm = _as_str(ent.get("fluid")).replace("_", "-")
-        for odx, ody in ((0, 0), *CARDINAL_NEIGHBORS):
-            fluid_port_approaches.setdefault((tx + odx, ty + ody), set()).add(p_comm)
+        for n_pt in ((tx, ty), (tx + 1, ty), (tx - 1, ty), (tx, ty + 1), (tx, ty - 1)):
+            fluid_port_approaches.setdefault(n_pt, set()).add(p_comm)
 
 
 def _collect_router_constraints(
@@ -682,11 +681,11 @@ def _collect_router_constraints(
 
 
 def _check_and_raise_failed_routes(
-    routes: Mapping[str, object],
+    routes: Mapping[str, EngineRef],
     strict_drc: bool,
     prefix: str,
-) -> list[object]:
-    failed = [r for r in routes.values() if not getattr(r, "is_success", True)]
+) -> list[EngineRef]:
+    failed = [r for r in routes.values() if not r.is_success]
     if failed and strict_drc:
         for f in failed[:MAX_LOGGED_FAILURES]:
             sys.stderr.write(
@@ -752,12 +751,8 @@ def _build_highway_obstacles(
         for bx in range(grid_w)
         for by in range(grid_h)
         for dx in range(margin, pitch - margin)
-        for dy in range(margin, pitch - margin)
+        for dy in range(BAY_Y_STOP if (bx, by) in bay_blocks else margin, pitch - margin)
     }
-    for bx_c, by_c in bay_blocks:
-        for nx_t in range(bx_c * pitch + margin, bx_c * pitch + pitch - margin):
-            for ny_t in range(by_c * pitch + margin, by_c * pitch + BAY_Y_STOP):
-                hwy_obs.discard((nx_t, ny_t))
     hwy_obs.update(obstacles)
     for ns in highway_specs:
         hwy_obs.discard(ns.source)
@@ -777,8 +772,8 @@ def _route_stage1_blocks(
     fluid_port_approaches: dict[TileCoord, set[str]],
     strict_drc: bool,
     cfg: Def2BpConfig,
-) -> tuple[dict[str, object], dict[GridCoord, EntityDict], list[RouterNetSpec]]:
-    routes: dict[str, object] = {}
+) -> tuple[dict[str, EngineRef], dict[GridCoord, EntityDict], list[RouterNetSpec]]:
+    routes: dict[str, EngineRef] = {}
     entities_by_pos: dict[GridCoord, EntityDict] = {}
     all_routed_specs: list[RouterNetSpec] = []
     total_intra = sum(len(ns) for ns in intra_block_specs.values())
@@ -848,7 +843,7 @@ def _route_hierarchical(
     engine: EngineRef = None,
     strict_drc: bool = False,
     cfg: Def2BpConfig = DEFAULT_DEF2BP_CONFIG,
-) -> tuple[dict[str, object], list[EntityDict], list[RouterNetSpec], object | None]:
+) -> tuple[dict[str, EngineRef], list[EntityDict], list[RouterNetSpec], EngineRef]:
     pitch = cfg.block_pitch
     xs = [c for ns in net_specs for c in (ns.source[0], ns.sink[0])]
     ys = [c for ns in net_specs for c in (ns.source[1], ns.sink[1])]
@@ -940,7 +935,7 @@ def _route_hierarchical(
     for idx, ent in enumerate(entities, start=1):
         ent["entity_number"] = idx
 
-    failed = [res for res in routes.values() if not getattr(res, "is_success", True)]
+    failed = [res for res in routes.values() if not res.is_success]
     verif_res = None
     if engine is not None and entities and not failed:
         t_verif = time.perf_counter()
@@ -978,11 +973,11 @@ def _resolve_router_engine(engine: EngineRef) -> EngineRef:
 
 
 def _report_router_diagnostics(
-    routes: Mapping[str, object],
-    verif_res: object | None,
+    routes: Mapping[str, EngineRef],
+    verif_res: EngineRef,
     strict_drc: bool,
 ) -> None:
-    if verif_res is not None and not getattr(verif_res, "is_valid", True):
+    if verif_res is not None and not verif_res.is_valid:
         for err in getattr(verif_res, "lvs_errors", ()):
             sys.stderr.write(
                 f"factorilog [maze_router]: NATIVE LVS ERROR: {err.net_name}: {err.message}\n"
@@ -991,7 +986,7 @@ def _report_router_diagnostics(
             sys.stderr.write(
                 f"factorilog [maze_router]: NATIVE DRC ERROR: [{drc.code}] at {drc.position}: {drc.message}\n"
             )
-    failed = [res for res in routes.values() if not getattr(res, "is_success", True)]
+    failed = [res for res in routes.values() if not res.is_success]
     for f in failed[:MAX_LOGGED_FAILURES]:
         sys.stderr.write(
             f"factorilog [maze_router]: NET ROUTE FAILED: {getattr(f, 'net_name', '')}: {getattr(f, 'error_message', '')}\n"
@@ -1631,13 +1626,9 @@ def _step_bridge_pole_toward(
 ) -> GridCoord | None:
     base_ix, base_iy = math.floor(cur_x), math.floor(cur_y)
     reach_int = int(med_reach)
+    offsets = range(-reach_int, reach_int + 1)
     candidates = [
-        (
-            round(base_ix + dx + TILE_HALF, COORD_PRECISION),
-            round(base_iy + dy + TILE_HALF, COORD_PRECISION),
-        )
-        for dx in range(-reach_int, reach_int + 1)
-        for dy in range(-reach_int, reach_int + 1)
+        (base_ix + dx + TILE_HALF, base_iy + dy + TILE_HALF) for dx in offsets for dy in offsets
     ]
     valid = [
         pt
@@ -1843,7 +1834,7 @@ def _run_drc_and_verify(
     _check_and_raise_failed_routes(router_routes, strict_drc=True, prefix="Router")
 
     verif_res = getattr(placement, "router_verif_res", None)
-    if verif_res is not None and not getattr(verif_res, "is_valid", True):
+    if verif_res is not None and not verif_res.is_valid:
         lvs_cnt = len(getattr(verif_res, "lvs_errors", ()))
         drc_cnt = len(getattr(verif_res, "drc_violations", ()))
         raise ValueError(
