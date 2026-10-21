@@ -288,6 +288,87 @@ class TestRoutingGrid(unittest.TestCase):
             1.0,
         )
 
+    def test_mutant_boundary_conditions_grid_builder_transitions(self) -> None:
+        """Verify boundary conditions across blueprint_builder, transitions, types, and grid."""
+        from foundry.router.blueprint_builder import build_blueprint_entities
+        from foundry.router.transitions import get_legal_transitions
+
+        # 1. RouteResult default is_success=True and build_blueprint_entities 0.5 center offset
+        n0 = RouteNode(3, 4, LAYER_SURFACE, DIRECTION_EAST)
+        n1 = RouteNode(4, 4, LAYER_SURFACE, DIRECTION_EAST)
+        edge = RouteEdge(n0, n1, "straight", "transport-belt", 1.0)
+        default_res = RouteResult("net_default", [n0, n1], [edge], 1.0)
+        self.assertTrue(default_res.is_success)
+        ents = build_blueprint_entities({"net_default": default_res})
+        self.assertEqual(len(ents), 2)
+        self.assertEqual(ents[0]["position"], {"x": 3.5, "y": 4.5})
+        self.assertEqual(ents[1]["position"], {"x": 4.5, "y": 4.5})
+
+        # 2. transitions.py turn cost (STEP_COST + TURN_PENALTY = 4.5)
+        grid = RoutingGrid(min_x=0, max_x=12, min_y=0, max_y=12)
+        net = RouterNetSpec("net_t", (2, 2), (10, 2))
+        moves = get_legal_transitions(RouteNode(2, 2, LAYER_SURFACE, DIRECTION_EAST), grid, net)
+        turn_moves = [m for m in moves if m[2] == "turn"]
+        self.assertEqual(len(turn_moves), 2)
+        for _nxt_node, cost, _mtype, _tier in turn_moves:
+            self.assertAlmostEqual(cost, 4.5)
+
+        # 3. _is_lookahead_tile_blocked historical_cost > 0.0 vs == 0.0
+        self.assertFalse(
+            grid.should_consider_underground(2, 2, 1, 0, 5, "net_t", LANE_BOTH, target_pos=(10, 2))
+        )
+        grid.has_congestion = True
+        grid.historical_cost[(3, 2, LAYER_SURFACE)] = 0.0
+        self.assertFalse(
+            grid.should_consider_underground(2, 2, 1, 0, 5, "net_t", LANE_BOTH, target_pos=(10, 2))
+        )
+        grid.historical_cost[(3, 2, LAYER_SURFACE)] = 0.5
+        self.assertTrue(
+            grid.should_consider_underground(2, 2, 1, 0, 5, "net_t", LANE_BOTH, target_pos=(10, 2))
+        )
+
+        # 4. _violates_front_hood_drc output vs input hood and forward vs rear check
+        grid.active_hoods[(6, 6)] = "other_belt"
+        grid.active_hood_types[(6, 6)] = ("output", DIRECTION_EAST)
+        self.assertFalse(
+            grid.can_occupy_surface((5, 6), "my_belt", LANE_BOTH, heading=DIRECTION_EAST)
+        )
+        self.assertTrue(
+            grid.can_occupy_surface((7, 6), "my_belt", LANE_BOTH, heading=DIRECTION_EAST)
+        )
+        grid.active_hood_types[(6, 6)] = ("input", DIRECTION_EAST)
+        self.assertTrue(
+            grid.can_occupy_surface((5, 6), "my_belt", LANE_BOTH, heading=DIRECTION_EAST)
+        )
+        grid.active_hood_types[(6, 6)] = ("input", DIRECTION_SOUTH)
+        self.assertFalse(
+            grid.can_occupy_surface((5, 6), "my_belt", LANE_BOTH, heading=DIRECTION_EAST)
+        )
+
+        # 5. _mark_leap_edge and _unmark_leap_edge endpoint occupancy and rip-up
+        belt_z = grid.belt_tier_keys[0]
+        ln0 = RouteNode(1, 8, LAYER_SURFACE, DIRECTION_EAST)
+        ln1 = RouteNode(1, 8, belt_z, DIRECTION_EAST)
+        ln2 = RouteNode(4, 8, LAYER_SURFACE, DIRECTION_EAST)
+        leap_res = RouteResult(
+            "leap_net",
+            [ln0, ln1, ln2],
+            [
+                RouteEdge(ln0, ln1, "dive", "underground-belt", 4.0),
+                RouteEdge(ln1, ln2, "leap", "underground-belt", 6.0),
+            ],
+            10.0,
+        )
+        grid.place_net("leap_net", leap_res)
+        self.assertEqual(grid.layer_occupancy[belt_z].get((4, 8)), "leap_net")
+        self.assertIn("leap_net", grid.node_occupants.get((4, 8, belt_z), set()))
+        self.assertIn((1, 8), grid.active_hood_types)
+        self.assertIn((4, 8), grid.active_hood_types)
+        grid.rip_up_net("leap_net")
+        self.assertNotIn((4, 8), grid.layer_occupancy[belt_z])
+        self.assertNotIn((1, 8), grid.active_hood_types)
+        self.assertNotIn((4, 8), grid.active_hood_types)
+
     def test_perf_cases_smoke(self) -> None:
         """Smoke-test all grid perf_* generator benchmarks."""
         for fn in (
