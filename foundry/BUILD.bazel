@@ -61,7 +61,6 @@ py_library(
         "def_parser.py",
         "def_untangle.py",
         "entity_helpers.py",
-        "jumper.py",
         "lef.py",
         "liberty.py",
         "macro_floorplan.py",

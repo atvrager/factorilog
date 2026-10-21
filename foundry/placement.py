@@ -125,6 +125,18 @@ DEFAULT_PLACEMENT_CONFIG = PlacementConfig()
 
 
 @dataclass
+class RouteResult:
+    """Surface routes, conflict tiles, and pin locations."""
+
+    net_surface_tiles: dict[str, dict[GridPos, int]]
+    tile_to_nets: dict[GridPos, set[str]]
+    adjacent_fluid_conflicts: set[GridPos]
+    pin_tiles: set[GridPos]
+    valid_input_pins: set[GridPos]
+    valid_output_pins: set[GridPos]
+
+
+@dataclass
 class PlacementResult:
     """Entities and occupancy resulting from component placement."""
 

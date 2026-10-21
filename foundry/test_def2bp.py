@@ -78,9 +78,7 @@ class TestDef2Bp(unittest.TestCase):
 
     def test_build_entities(self) -> None:
         def_data = def2bp.parse_def(MINI_DEF)
-        entities, wires = def2bp.build_entities(
-            def_data, MINI_NETLIST, strict_drc=False, use_maze_router=False
-        )
+        entities, wires = def2bp.build_entities(def_data, MINI_NETLIST, strict_drc=False)
         self.assertIsInstance(wires, list)
 
         # Look up by name
@@ -88,9 +86,6 @@ class TestDef2Bp(unittest.TestCase):
         self.assertIn("assembling-machine-3", names)
         self.assertIn("splitter", names)
         self.assertIn("transport-belt", names)
-        self.assertIn("underground-belt", names)
-        self.assertIn("pipe-to-ground", names)
-        self.assertIn("pipe", names)
 
         # Check machine coordinates (origin 10, 20 + 1.5, 1.5 -> 11.5, 21.5)
         mach = next(e for e in entities if e["name"] == "assembling-machine-3")

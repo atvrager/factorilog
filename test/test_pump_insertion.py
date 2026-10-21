@@ -11,8 +11,7 @@ from foundry.entity_helpers import (
     DIRECTION_SOUTH,
     DIRECTION_WEST,
 )
-from foundry.jumper import RouteResult
-from foundry.placement import PlacementResult
+from foundry.placement import PlacementResult, RouteResult
 from foundry.pump_insertion import (
     PumpInsertionConfig,
     _compress_straight_pipes,

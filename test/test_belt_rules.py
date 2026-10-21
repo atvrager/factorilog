@@ -222,23 +222,29 @@ class TestBeltRules(unittest.TestCase):
 
     def test_def2bp_strict_drc_abort(self) -> None:
         """def_to_blueprint aborts when strict_drc is enabled and violations exist."""
-        # Synthetic minimal DEF with opposing belts on two nets
+        # Synthetic minimal DEF with two splitters placed face-to-face on the same net
         bad_def = """
 VERSION 5.8 ;
 DESIGN bad_factory ;
 UNITS DISTANCE MICRONS 1000 ;
-DIEAREA ( 0 0 ) ( 10000 10000 ) ;
-COMPONENTS 0 ;
+DIEAREA ( 0 0 ) ( 20000 20000 ) ;
+COMPONENTS 2 ;
+- u_s1 belt_split2 + PLACED ( 5000 5000 ) N ;
+- u_s2 belt_split2 + PLACED ( 6000 5000 ) S ;
 END COMPONENTS
-NETS 2 ;
-- net1 + USE SIGNAL
-  + ROUTED M1 ( 1500 1500 ) ( 2500 * ) ;
-- net2 + USE SIGNAL
-  + ROUTED M1 ( 3500 1500 ) ( 2500 * ) ;
+NETS 1 ;
+- net1 ( u_s1 y1 ) ( u_s2 y1 ) + USE SIGNAL ;
 END NETS
 END DESIGN
 """
-        netlist_data = {"cells": {}, "instances": [], "fluids": []}
+        netlist_data = {
+            "cells": {},
+            "instances": [
+                {"name": "u_s1", "cell": "belt_split2"},
+                {"name": "u_s2", "cell": "belt_split2"},
+            ],
+            "fluids": [],
+        }
 
         # With strict_drc=True, it must raise ValueError
         with self.assertRaises(ValueError):

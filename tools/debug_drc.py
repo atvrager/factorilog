@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from foundry.belt_drc import BeltDrcChecker
+from foundry.def2bp import prune_dead_end_belts, route_with_maze_router
 from foundry.def_parser import parse_def
 from foundry.def_untangle import untangle_def
-from foundry.jumper import route_and_resolve_jumpers
 from foundry.placement import place_components
 
 
@@ -421,13 +421,13 @@ def run_diagnostics(
         # 2. Placement
         placement = place_components(def_data, netlist_data)
 
-        # 3. Jumper routing with trace recording
+        # 3. Route nets with maze router
         debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
-        routes = route_and_resolve_jumpers(
+        routes = route_with_maze_router(
             def_data,
             netlist_data,
             placement,
-            debug_trace=debug_trace if verbose else None,
+            strict_drc=False,
         )
 
         # 3b. Pipeline pump insertion
@@ -436,8 +436,6 @@ def run_diagnostics(
         insert_pipeline_pumps(placement, routes, def_data, netlist_data)
 
         # 4. Prune dead-end belts
-        from foundry.def2bp import prune_dead_end_belts
-
         entities = prune_dead_end_belts(placement.entities, def_data, netlist_data)
 
         # 5. DRC verification

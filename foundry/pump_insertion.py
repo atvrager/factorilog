@@ -25,9 +25,8 @@ try:
         TILE_HALF,
         get_underground_span,
     )
-    from foundry.jumper import RouteResult
     from foundry.lef import get_macro_port_geometry
-    from foundry.placement import PlacementResult
+    from foundry.placement import PlacementResult, RouteResult
 except ImportError:
     from entity_helpers import (
         DEFAULT_DEF_UNITS,
@@ -41,9 +40,8 @@ except ImportError:
         TILE_HALF,
         get_underground_span,
     )
-    from jumper import RouteResult
     from lef import get_macro_port_geometry
-    from placement import PlacementResult
+    from placement import PlacementResult, RouteResult
 
 TileCoord: TypeAlias = tuple[int, int]
 GridCoord: TypeAlias = tuple[float, float]

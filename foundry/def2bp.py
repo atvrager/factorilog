@@ -33,9 +33,8 @@ try:
         entity_size,
         prune_dead_end_belts,
     )
-    from foundry.jumper import RouteResult, route_and_resolve_jumpers
     from foundry.pdn import generate_pdn
-    from foundry.placement import place_components
+    from foundry.placement import RouteResult, place_components
     from foundry.pump_insertion import insert_pipeline_pumps
 except ImportError:
     import blueprint
@@ -56,9 +55,8 @@ except ImportError:
         entity_size,
         prune_dead_end_belts,
     )
-    from jumper import RouteResult, route_and_resolve_jumpers
     from pdn import generate_pdn
-    from placement import place_components
+    from placement import RouteResult, place_components
     from pump_insertion import insert_pipeline_pumps
 
 __all__ = [
@@ -1025,16 +1023,10 @@ def build_entities(
                     (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
                 )
 
-    # 3. Rasterize routing tracks and resolve surface crossings with underground jumpers
-    debug_trace: dict[tuple[float, float], list[dict[str, Any]]] = {}
-    if use_maze_router:
-        routes = route_with_maze_router(
-            def_data, netlist_data, placement, engine=engine, strict_drc=strict_drc
-        )
-    else:
-        routes = route_and_resolve_jumpers(
-            def_data, netlist_data, placement, debug_trace=debug_trace
-        )
+    # 3. Route nets with 3D multi-layer maze router
+    routes = route_with_maze_router(
+        def_data, netlist_data, placement, engine=engine, strict_drc=strict_drc
+    )
 
     if floorplan:
         for fe in fabric_entities:
@@ -1603,7 +1595,7 @@ def def_to_blueprint(
     netlist_data: dict[str, Any],
     label: str = "factory",
     strict_drc: bool = True,
-    use_maze_router: bool = False,
+    use_maze_router: bool = True,
 ) -> str:
     """Convert DEF text and netlist metadata into a blueprint exchange string."""
     def_data = parse_def(def_text)
