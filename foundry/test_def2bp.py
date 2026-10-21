@@ -796,6 +796,21 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(mst_specs[1].source, (30, 9))
         self.assertEqual(mst_specs[1].sink, (10, 9))
 
+        p2p_fluid = def2bp._build_net_specs_for_net(
+            {"name": "water__p2p", "connections": [("PIN", "water_in"), ("p1", "a")]},
+            {"p1": {"name": "p1", "macro": "pump", "x": 10000, "y": 10000, "orient": "E"}},
+            {},
+            {},
+            {"water_in": (0, 10)},
+            {(0.0, 10.0)},
+            0.001,
+            {"water"},
+        )
+        self.assertEqual(len(p2p_fluid), 1)
+        self.assertEqual(p2p_fluid[0].name, "water__p2p")
+        self.assertEqual(p2p_fluid[0].source, (0, 10))
+        self.assertEqual(p2p_fluid[0].sink, (10, 9))
+
         headings = captured_init["component_headings"]
         self.assertEqual(headings[(20, 10)], 4)
         self.assertEqual(headings[(20, 11)], 4)
@@ -993,16 +1008,48 @@ class TestDef2Bp(unittest.TestCase):
             valid_input_pins=set(),
             valid_output_pins=set(),
         )
-        def2bp._run_drc_and_verify(
-            [],
-            [],
-            single_item_routes,
-            PlacementResult([], set(), {}, {}, set(), False),
-            {"pins": []},
-            {},
-            0.001,
-            strict_drc=True,
+        drc_kwargs: dict[str, Any] = {}
+
+        def spy_drc(_self: Any, _ents: Any, **kw: Any) -> list[Any]:
+            drc_kwargs.update(kw)
+            return []
+
+        with mock.patch.object(def2bp.BeltDrcChecker, "check_entities", spy_drc):
+            def2bp._run_drc_and_verify(
+                [],
+                [],
+                single_item_routes,
+                PlacementResult([], set(), {}, {}, set(), False),
+                {
+                    "pins": [
+                        {"direction": "INPUT", "x": 1000, "y": 2000},
+                        {"direction": "OUTPUT", "x": 3000, "y": 4000},
+                    ]
+                },
+                {},
+                0.001,
+                strict_drc=True,
+            )
+        self.assertEqual(drc_kwargs["input_pins"], [(1.0, 2.0)])
+        self.assertEqual(drc_kwargs["output_pins"], [(3.0, 4.0)])
+        self.assertEqual(drc_kwargs["unresolved_crossings"], [])
+
+        merged_lamps, _ = def2bp._merge_chassis_base_entities(
+            [{"name": "medium-electric-pole", "position": {"x": 50.5, "y": 50.5}}],
+            [
+                {"name": "small-lamp", "position": {"x": 53.5, "y": 50.5}},
+                {"name": "big-electric-pole", "position": {"x": 80.0, "y": 80.0}},
+                {"name": "small-lamp", "position": {"x": 83.0, "y": 80.5}},
+            ],
+            True,
+            def2bp.DEFAULT_DEF2BP_CONFIG,
         )
+        lamp_pts = [
+            (e["position"]["x"], e["position"]["y"])
+            for e in merged_lamps
+            if e["name"] == "small-lamp"
+        ]
+        self.assertEqual(lamp_pts, [(53.5, 50.5)])
 
     def test_route_with_maze_router_hierarchical_and_verifier(self) -> None:
         """Verify hierarchical Stage 1/2 routing, obstacle masking, and NativeLayoutVerifier."""
@@ -1127,6 +1174,8 @@ class TestDef2Bp(unittest.TestCase):
         self.assertIn((10, 117), direct_obs)
         self.assertIn((10, 196), direct_obs)
         self.assertNotIn((10, 197), direct_obs)
+        self.assertIn((96, 50), direct_obs)
+        self.assertNotIn((97, 50), direct_obs)
 
     def test_build_entities_legacy_floorplan_and_grid_sizes(self) -> None:
         """Verify 2x2 vs 1x1 chassis obstacle handling and legacy floorplan input routing."""
