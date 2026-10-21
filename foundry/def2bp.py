@@ -11,59 +11,89 @@ import json
 import math
 import sys
 import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 try:
-    from foundry import blueprint
+    from foundry import blueprint, lef
     from foundry.belt_drc import BeltDrcChecker
+    from foundry.chassis import CityBlockChassis
     from foundry.circuit import wire_telemetry
     from foundry.def_parser import extract_pins, merge_collinear_wires, parse_def
     from foundry.def_untangle import untangle_def
     from foundry.entity_helpers import (
+        DEFAULT_DEF_UNITS,
         DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
         DIRECTION_WEST,
+        TILE_HALF,
         check_collisions,
         check_power,
         check_underground_pairing,
         entity_collision_half_size,
         entity_size,
+        get_compatible_underground_belt,
+        get_pole_supply_radius,
+        get_pole_wire_reach,
+        get_underground_span,
         prune_dead_end_belts,
     )
+    from foundry.macro_floorplan import InterBlockRoute, MacroFloorplanner
+    from foundry.native_engine import engine as native_engine_mod
+    from foundry.native_engine import verifier as verifier_mod
     from foundry.pdn import generate_pdn
-    from foundry.placement import RouteResult, place_components
+    from foundry.placement import PlacementResult, RouteResult, place_components
     from foundry.pump_insertion import insert_pipeline_pumps
+    from foundry.router import maze_router as maze_router_mod
+    from foundry.router.grid import base_net_name
+    from foundry.router.types import RouterNetSpec
 except ImportError:
     import blueprint
+    import lef
     from belt_drc import BeltDrcChecker
+    from chassis import CityBlockChassis
     from circuit import wire_telemetry
     from def_parser import extract_pins, merge_collinear_wires, parse_def
     from def_untangle import untangle_def
     from entity_helpers import (
+        DEFAULT_DEF_UNITS,
         DIR_STEPS,
         DIRECTION_EAST,
         DIRECTION_NORTH,
         DIRECTION_SOUTH,
         DIRECTION_WEST,
+        TILE_HALF,
         check_collisions,
         check_power,
         check_underground_pairing,
         entity_collision_half_size,
         entity_size,
+        get_compatible_underground_belt,
+        get_pole_supply_radius,
+        get_pole_wire_reach,
+        get_underground_span,
         prune_dead_end_belts,
     )
+    from macro_floorplan import InterBlockRoute, MacroFloorplanner
+    from native_engine import engine as native_engine_mod
+    from native_engine import verifier as verifier_mod
     from pdn import generate_pdn
-    from placement import RouteResult, place_components
+    from placement import PlacementResult, RouteResult, place_components
     from pump_insertion import insert_pipeline_pumps
+    from router import maze_router as maze_router_mod
+    from router.grid import base_net_name
+    from router.types import RouterNetSpec
 
 __all__ = [
     "DIRECTION_EAST",
     "DIRECTION_NORTH",
     "DIRECTION_SOUTH",
     "DIRECTION_WEST",
+    "Def2BpConfig",
     "build_entities",
     "check_collisions",
     "check_power",
@@ -72,6 +102,7 @@ __all__ = [
     "entity_collision_half_size",
     "entity_size",
     "extract_pins",
+    "jumper_belts_across_chassis_poles",
     "main",
     "merge_collinear_wires",
     "parse_def",
@@ -80,707 +111,1041 @@ __all__ = [
     "untangle_def",
 ]
 
+JsonMap: TypeAlias = Mapping[str, Any]
+MutableJsonMap: TypeAlias = dict[str, Any]
+EntityDict: TypeAlias = dict[str, Any]
+EngineRef: TypeAlias = Any
+TileCoord: TypeAlias = tuple[int, int]
+GridCoord: TypeAlias = tuple[float, float]
+TerminalSpec: TypeAlias = tuple[TileCoord, bool, int | None, int | None]
+
+COORD_PRECISION: int = 2
+TIME_PRECISION: int = 3
+BOX_EPSILON: float = 1e-6
+HALF_DIVISOR: float = 2.0
+DIE_X_MAX_IDX: int = 2
+DIE_Y_MAX_IDX: int = 3
+DIE_AREA_LEN: int = 4
+MERGE_FAR_OFFSET: int = 3
+PUMP_OUT_OFFSET: int = 2
+PORT_PAD_EXTENT: int = 2
+PIN_CLEARANCE_RADIUS: float = 3.5
+BORDER_POLE_MARGIN: float = 4.5
+CORNER_POLE_MODS: tuple[float, float] = (5.0, 95.0)
+BIG_POLE_DELTAS: tuple[float, float] = (-0.5, 0.5)
+RADAR_DELTAS: tuple[float, float, float] = (-1.0, 0.0, 1.0)
+BAY_Y_MIN: int = 3
+BAY_Y_MAX: int = 16
+BAY_Y_STOP: int = 17
+MIN_PROGRAMMATIC_BLOCKS: int = 4
+PROGRAMMATIC_CHANNEL_W: int = 8
+FALLBACK_CORE_DIM: int = 94
+FALLBACK_CHANNEL_W: int = 6
+CHANNEL_IN_OFFSET: float = 1.5
+PIN_DBU_SHIFT: int = 500
+LAMP_BUCKET_STEP: int = 4
+NEIGHBOR_BUCKET_DELTAS: tuple[int, int, int] = (-1, 0, 1)
+PIN_GUARD_OFFSETS: tuple[int, int, int] = (1, 2, 3)
+WIRE_COPPER_ID: int = 5
+WIRE_RED_ID: int = 1
+WIRE_GREEN_ID: int = 2
+WIRE_EDGE_LEN: int = 4
+WIRE_PORT_A_IDX: int = 1
+WIRE_PORT_B_IDX: int = 3
+WIRE_NODE_B_IDX: int = 2
+POLE_ALIGN_TOLERANCE: float = 0.1
+POLE_REACH_SLACK: float = 0.5
+JUMPER_SPAN_PADDING: int = 3
+MAX_LOGGED_FAILURES: int = 25
+MAX_ERROR_SUMMARY: int = 5
+CARDINAL_NEIGHBORS: tuple[TileCoord, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+NORTH_SOUTH_DIRS: tuple[int, int] = (DIRECTION_NORTH, DIRECTION_SOUTH)
+WEST_EAST_ORIENT: tuple[str, str] = ("W", "E")
+DRIVER_PIN_NAMES: frozenset[str] = frozenset({"y", "y1", "y2", "out"})
+
+FACE_INWARD_DIR: dict[str, int] = {
+    "E": DIRECTION_WEST,
+    "W": DIRECTION_EAST,
+    "N": DIRECTION_SOUTH,
+    "S": DIRECTION_NORTH,
+}
+
+ORIENT_SPLITTER_DIR: dict[str, int] = {
+    "W": DIRECTION_NORTH,
+    "E": DIRECTION_SOUTH,
+    "S": DIRECTION_WEST,
+    "N": DIRECTION_EAST,
+}
+
+ORIENT_PUMP_DIR: dict[str, int] = {
+    "W": DIRECTION_WEST,
+    "E": DIRECTION_EAST,
+    "S": DIRECTION_SOUTH,
+    "N": DIRECTION_NORTH,
+}
+
+# (orient, normalized_port) -> (dx, dy, is_driver)
+MERGE2_PORT_SPECS: dict[tuple[str, str], tuple[int, int, bool]] = {
+    ("W", "a"): (0, MERGE_FAR_OFFSET, False),
+    ("W", "a1"): (0, MERGE_FAR_OFFSET, False),
+    ("W", "b"): (1, MERGE_FAR_OFFSET, False),
+    ("W", "a2"): (1, MERGE_FAR_OFFSET, False),
+    ("W", "y"): (1, -1, True),
+    ("E", "a"): (0, -1, False),
+    ("E", "a1"): (0, -1, False),
+    ("E", "b"): (1, -1, False),
+    ("E", "a2"): (1, -1, False),
+    ("E", "y"): (1, MERGE_FAR_OFFSET, True),
+    ("S", "a"): (MERGE_FAR_OFFSET, 0, False),
+    ("S", "a1"): (MERGE_FAR_OFFSET, 0, False),
+    ("S", "b"): (MERGE_FAR_OFFSET, 1, False),
+    ("S", "a2"): (MERGE_FAR_OFFSET, 1, False),
+    ("S", "y"): (-1, 1, True),
+    ("N", "a"): (-1, 0, False),
+    ("N", "a1"): (-1, 0, False),
+    ("N", "b"): (-1, 1, False),
+    ("N", "a2"): (-1, 1, False),
+    ("N", "y"): (MERGE_FAR_OFFSET, 1, True),
+}
+
+# (is_west_east, normalized_port) -> (dx, dy, is_driver)
+SPLIT2_PORT_SPECS: dict[tuple[bool, str], tuple[int, int, bool]] = {
+    (True, "a"): (0, -1, False),
+    (True, "a1"): (0, -1, False),
+    (True, "b"): (1, -1, False),
+    (True, "a2"): (1, -1, False),
+    (True, "y1"): (0, 1, True),
+    (True, "y2"): (1, 1, True),
+    (False, "a"): (-1, 0, False),
+    (False, "a1"): (-1, 0, False),
+    (False, "b"): (-1, 1, False),
+    (False, "a2"): (-1, 1, False),
+    (False, "y1"): (1, 0, True),
+    (False, "y2"): (1, 1, True),
+}
+
+PUMP_PORT_SPECS: dict[str, tuple[int, int, bool]] = {
+    "a": (0, -1, False),
+    "y": (0, PUMP_OUT_OFFSET, True),
+}
+
+PIN_PAD_OFFSETS: dict[str, tuple[TileCoord, ...]] = {
+    "INPUT": ((-1, 0), (-2, 0), (-1, -1), (-1, 1)),
+    "OUTPUT": ((1, 0), (2, 0), (1, -1), (1, 1)),
+}
+
+
+@dataclass(frozen=True)
+class Def2BpConfig:
+    """Runtime configuration parameters for DEF-to-blueprint compilation."""
+
+    default_units: float = DEFAULT_DEF_UNITS
+    block_pitch: int = 100
+    highway_max_iterations: int = 60
+    verifier_ticks: int = 60
+    slow_block_sec: float = 0.5
+    cityblock_filename: str = "cityblock.bp"
+    big_pole_wire_reach: float = get_pole_wire_reach("big-electric-pole")
+    med_pole_wire_reach: float = get_pole_wire_reach("medium-electric-pole")
+    big_pole_supply_radius: float = get_pole_supply_radius("big-electric-pole")
+    med_pole_supply_radius: float = get_pole_supply_radius("medium-electric-pole")
+    max_underground_span: int = get_underground_span("express-underground-belt")
+    mid_underground_span: int = get_underground_span("fast-underground-belt")
+
+
+DEFAULT_DEF2BP_CONFIG = Def2BpConfig()
+
+
+def _as_map(val: object) -> JsonMap:
+    return val if isinstance(val, Mapping) else {}
+
+
+def _as_list(val: object) -> list[object]:
+    return list(val) if isinstance(val, (list, tuple, set)) else []
+
+
+def _as_float(val: object, default: float = 0.0) -> float:
+    return float(val) if isinstance(val, (int, float, str)) and val != "" else default
+
+
+def _as_int(val: object, default: int = 0) -> int:
+    return int(float(val)) if isinstance(val, (int, float, str)) and val != "" else default
+
+
+def _as_str(val: object, default: str = "") -> str:
+    return str(val) if val is not None and val != "" else default
+
+
+def _entity_xy(ent: JsonMap) -> GridCoord:
+    pos = ent.get("position", {})
+    if isinstance(pos, Mapping):
+        return _as_float(pos.get("x")), _as_float(pos.get("y"))
+    if isinstance(pos, Sequence) and len(pos) >= 2:
+        return _as_float(pos[0]), _as_float(pos[1])
+    return 0.0, 0.0
+
+
+def _pin_inward_dir(pos: TileCoord, fallback: int | None) -> int | None:
+    if pos[0] == 0:
+        return DIRECTION_WEST
+    if pos[1] == 0:
+        return DIRECTION_NORTH
+    return fallback
+
+
+def _is_fluid_name(name: str, clean_fluids: set[str] | None) -> bool:
+    if not clean_fluids:
+        return False
+    norm = name.replace("-", "_")
+    return name in clean_fluids or norm in clean_fluids
+
+
+def _resolve_pin_terminal(
+    port: str,
+    net_name: str,
+    pin_dict: Mapping[str, TileCoord],
+    valid_in_pins: set[GridCoord],
+    clean_fluids: set[str] | None,
+) -> TerminalSpec | None:
+    pos = pin_dict.get(net_name) or pin_dict.get(port)
+    if pos is None:
+        return None
+    is_driver = (float(pos[0]), float(pos[1])) in valid_in_pins
+    base_comm = net_name.split("__")[0]
+    if _is_fluid_name(base_comm, clean_fluids) or _is_fluid_name(port, clean_fluids):
+        return (pos, is_driver, None, _pin_inward_dir(pos, None))
+    if is_driver:
+        pin_head = DIRECTION_SOUTH if (pos[0] != 0 and pos[1] == 0) else DIRECTION_EAST
+        return (pos, True, pin_head, pin_head)
+    sink_head = _pin_inward_dir(pos, DIRECTION_EAST)
+    return (pos, False, sink_head, sink_head)
+
+
+def _macro_port_headings(
+    geom: JsonMap,
+    is_output: bool,
+    is_fluid_port: bool,
+) -> tuple[int | None, int | None]:
+    default_face = "E" if is_output else "W"
+    face = str(geom.get("face", default_face))
+    inward = FACE_INWARD_DIR.get(face, DIRECTION_NORTH)
+    raw_dir = geom.get("approach_dir")
+    approach_dir = raw_dir if isinstance(raw_dir, int) else None
+    if is_fluid_port:
+        return (None, inward)
+    if is_output:
+        return (approach_dir, None)
+    sink_head = approach_dir if face in WEST_EAST_ORIENT else None
+    return (None, sink_head)
+
+
+def _resolve_macro_cell_port(
+    cell: JsonMap,
+    gx: float,
+    gy: float,
+    port: str,
+    clean_fluids: set[str] | None,
+    is_output: bool,
+) -> TerminalSpec | None:
+    port_key = "outputs" if is_output else "inputs"
+    raw_ports = [_as_str(p) for p in _as_list(cell.get(port_key))]
+    norm_ports = [p.replace("-", "_") for p in raw_ports]
+    clean_port = port.replace("-", "_")
+    if clean_port not in norm_ports:
+        return None
+    orig_name = raw_ports[norm_ports.index(clean_port)]
+    geom = lef.get_macro_port_geometry(dict(cell), orig_name, is_output=is_output)
+    is_fluid_port = _is_fluid_name(orig_name, clean_fluids)
+    pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
+    ax, ay = geom[pos_key]
+    coord = (math.floor(gx + ax), math.floor(gy + ay))
+    head, term_head = _macro_port_headings(geom, is_output, is_fluid_port)
+    return (coord, is_output, head, term_head)
+
+
+def _format_fixed_port_spec(
+    igx: int,
+    igy: int,
+    spec: tuple[int, int, bool],
+    heading: int,
+) -> TerminalSpec:
+    dx, dy, is_drv = spec
+    term_head = None if is_drv else heading
+    return ((igx + dx, igy + dy), is_drv, heading, term_head)
+
+
+def _resolve_special_macro_terminal(
+    cell_id: str,
+    macro_name: str,
+    orient: str,
+    port: str,
+    igx: int,
+    igy: int,
+) -> tuple[bool, TerminalSpec | None]:
+    names = {cell_id, macro_name}
+    if "belt_merge2" in names:
+        spec = MERGE2_PORT_SPECS.get((orient, port))
+        s_dir = ORIENT_SPLITTER_DIR.get(orient, DIRECTION_EAST)
+        return True, _format_fixed_port_spec(igx, igy, spec, s_dir) if spec else None
+    if names & {"belt_split2", "belt_balancer2"}:
+        spec = SPLIT2_PORT_SPECS.get((orient in WEST_EAST_ORIENT, port))
+        s_dir = ORIENT_SPLITTER_DIR.get(orient, DIRECTION_EAST)
+        return True, _format_fixed_port_spec(igx, igy, spec, s_dir) if spec else None
+    if "pump" in names:
+        spec = PUMP_PORT_SPECS.get(port)
+        p_dir = ORIENT_PUMP_DIR.get(orient, DIRECTION_NORTH)
+        return True, _format_fixed_port_spec(igx, igy, spec, p_dir) if spec else None
+    return False, None
+
 
 def _resolve_terminal(
     inst_name: str,
     port: str,
     net_name: str,
-    comp_map: dict[str, Any],
-    inst_map: dict[str, Any],
-    cell_map: dict[str, Any],
-    pin_dict: dict[str, tuple[int, int]],
-    valid_in_pins: set[tuple[float, float]],
+    comp_map: Mapping[str, JsonMap],
+    inst_map: Mapping[str, JsonMap],
+    cell_map: Mapping[str, JsonMap],
+    pin_dict: Mapping[str, TileCoord],
+    valid_in_pins: set[GridCoord],
     scale: float,
     clean_fluids: set[str] | None = None,
-) -> tuple[tuple[int, int], bool, int | None, int | None] | None:
+) -> TerminalSpec | None:
+    """Resolve grid coordinate, driver role, and headings for a net connection."""
     if inst_name == "PIN":
-        pos = pin_dict.get(net_name) or pin_dict.get(port)
-        if pos is None:
-            return None
-        is_driver = (float(pos[0]), float(pos[1])) in valid_in_pins
-        base_comm = net_name.split("__")[0].replace("-", "_")
-        is_fluid_pin = bool(
-            clean_fluids and (base_comm in clean_fluids or port.replace("-", "_") in clean_fluids)
-        )
-        if is_fluid_pin:
-            inward_dir = DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else None
-            return (pos, is_driver, None, inward_dir)
-        if is_driver:
-            pin_head = (
-                DIRECTION_EAST
-                if pos[0] == 0
-                else DIRECTION_SOUTH
-                if pos[1] == 0
-                else DIRECTION_EAST
-            )
-            return (pos, True, pin_head, pin_head)
-        pin_head = (
-            DIRECTION_WEST if pos[0] == 0 else DIRECTION_NORTH if pos[1] == 0 else DIRECTION_EAST
-        )
-        return (pos, False, pin_head, pin_head)
-
+        return _resolve_pin_terminal(port, net_name, pin_dict, valid_in_pins, clean_fluids)
     if inst_name not in comp_map:
         return None
 
     comp = comp_map[inst_name]
-    gx = comp["x"] * scale
-    gy = comp["y"] * scale
+    gx = _as_float(comp.get("x")) * scale
+    gy = _as_float(comp.get("y")) * scale
+    igx, igy = round(gx), round(gy)
     inst = inst_map.get(inst_name, {})
-    cell_id = inst.get("cell", comp.get("macro", ""))
+    macro_name = _as_str(comp.get("macro"))
+    cell_id = _as_str(inst.get("cell"), macro_name)
+    orient = _as_str(comp.get("orient"), "N")
+
+    matched_special, special_res = _resolve_special_macro_terminal(
+        cell_id, macro_name, orient, port, igx, igy
+    )
+    if matched_special:
+        return special_res or ((igx, igy), False, None, None)
+
     cell = cell_map.get(cell_id, {})
-    orient = comp.get("orient", "N")
+    res = _resolve_macro_cell_port(cell, gx, gy, port, clean_fluids, is_output=True)
+    if res is None:
+        res = _resolve_macro_cell_port(cell, gx, gy, port, clean_fluids, is_output=False)
+    return res or ((igx, igy), False, None, None)
 
-    igx = round(gx)
-    igy = round(gy)
 
-    if orient in ("W", "E"):
-        splitter_dir = DIRECTION_NORTH if orient == "W" else DIRECTION_SOUTH
-        pump_dir = DIRECTION_WEST if orient == "W" else DIRECTION_EAST
-    else:
-        splitter_dir = DIRECTION_WEST if orient == "S" else DIRECTION_EAST
-        pump_dir = DIRECTION_SOUTH if orient == "S" else DIRECTION_NORTH
+def _extract_pins_and_obstacles(
+    def_data: JsonMap,
+    placement: PlacementResult,
+    scale: float,
+) -> tuple[set[TileCoord], dict[str, TileCoord], set[GridCoord], set[GridCoord]]:
+    obstacles = {(math.floor(pos[0]), math.floor(pos[1])) for pos in placement.occupied_positions}
+    pin_dict: dict[str, TileCoord] = {}
+    valid_in_pins: set[GridCoord] = set()
+    valid_out_pins: set[GridCoord] = set()
+    for pin_obj in _as_list(def_data.get("pins")):
+        pin = _as_map(pin_obj)
+        px = math.floor(_as_float(pin.get("x")) * scale)
+        py = math.floor(_as_float(pin.get("y")) * scale)
+        pname = _as_str(pin.get("name"), _as_str(pin.get("net")))
+        pin_dict[pname] = (px, py)
+        direction = _as_str(pin.get("direction"))
+        if direction == "INPUT":
+            valid_in_pins.add((float(px), float(py)))
+        elif direction == "OUTPUT":
+            valid_out_pins.add((float(px), float(py)))
+        for dx, dy in PIN_PAD_OFFSETS.get(direction, ()):
+            obstacles.add((px + dx, py + dy))
+    return obstacles, pin_dict, valid_in_pins, valid_out_pins
 
-    if cell_id == "belt_merge2" or comp.get("macro") == "belt_merge2":
-        if orient == "W":
-            if port in ("a", "a1"):
-                return ((igx, igy + 3), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx + 1, igy + 3), False, splitter_dir, splitter_dir)
-            if port == "y":
-                return ((igx + 1, igy - 1), True, splitter_dir, None)
-        elif orient == "E":
-            if port in ("a", "a1"):
-                return ((igx, igy - 1), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx + 1, igy - 1), False, splitter_dir, splitter_dir)
-            if port == "y":
-                return ((igx + 1, igy + 3), True, splitter_dir, None)
-        elif orient == "S":
-            if port in ("a", "a1"):
-                return ((igx + 3, igy), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx + 3, igy + 1), False, splitter_dir, splitter_dir)
-            if port == "y":
-                return ((igx - 1, igy + 1), True, splitter_dir, None)
-        else:
-            if port in ("a", "a1"):
-                return ((igx - 1, igy), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx - 1, igy + 1), False, splitter_dir, splitter_dir)
-            if port == "y":
-                return ((igx + 3, igy + 1), True, splitter_dir, None)
 
-    elif cell_id in ("belt_split2", "belt_balancer2") or comp.get("macro") in (
-        "belt_split2",
-        "belt_balancer2",
-    ):
-        if orient in ("W", "E"):
-            if port in ("a", "a1"):
-                return ((igx, igy - 1), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx + 1, igy - 1), False, splitter_dir, splitter_dir)
-            if port == "y1":
-                return ((igx, igy + 1), True, splitter_dir, None)
-            if port == "y2":
-                return ((igx + 1, igy + 1), True, splitter_dir, None)
-        else:
-            if port in ("a", "a1"):
-                return ((igx - 1, igy), False, splitter_dir, splitter_dir)
-            if port in ("b", "a2"):
-                return ((igx - 1, igy + 1), False, splitter_dir, splitter_dir)
-            if port == "y1":
-                return ((igx + 1, igy), True, splitter_dir, None)
-            if port == "y2":
-                return ((igx + 1, igy + 1), True, splitter_dir, None)
-
-    elif cell_id == "pump" or comp.get("macro") == "pump":
-        if port == "a":
-            return ((igx, igy - 1), False, pump_dir, pump_dir)
-        if port == "y":
-            return ((igx, igy + 2), True, pump_dir, None)
-
-    else:
-        outputs = [o.replace("-", "_") for o in cell.get("outputs", [])]
-        clean_port = port.replace("-", "_")
-        try:
-            from foundry.lef import get_macro_port_geometry
-        except ImportError:
-            from lef import get_macro_port_geometry
-
-        if clean_port in outputs:
-            orig_outputs = cell.get("outputs", [])
-            idx = outputs.index(clean_port)
-            orig_name = orig_outputs[idx] if idx < len(orig_outputs) else clean_port
-            geom = get_macro_port_geometry(cell, orig_name, is_output=True)
-            is_fluid_port = bool(clean_fluids and orig_name in clean_fluids)
-            pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
-            ax, ay = geom[pos_key]
-            head = geom.get("approach_dir") if not is_fluid_port else None
-            face = geom.get("face", "E")
-            inward_dir = (
-                (
-                    DIRECTION_WEST
-                    if face == "E"
-                    else DIRECTION_EAST
-                    if face == "W"
-                    else DIRECTION_SOUTH
-                    if face == "N"
-                    else DIRECTION_NORTH
-                )
-                if is_fluid_port
-                else None
+def _build_fluid_mst_specs(
+    nname: str,
+    commodity: str,
+    terms: Sequence[tuple[TileCoord, int | None, int | None]],
+) -> list[RouterNetSpec]:
+    seen_nodes: dict[TileCoord, tuple[TileCoord, int | None, int | None]] = {}
+    for t in terms:
+        seen_nodes.setdefault(t[0], t)
+    nodes = list(seen_nodes.values())
+    if len(nodes) < 2:
+        return []
+    in_tree = [nodes[0]]
+    remaining = set(nodes[1:])
+    specs: list[RouterNetSpec] = []
+    while remaining:
+        u, v = min(
+            ((u_node, v_node) for u_node in in_tree for v_node in remaining),
+            key=lambda pair: (
+                abs(pair[0][0][0] - pair[1][0][0]) + abs(pair[0][0][1] - pair[1][0][1])
+            ),
+        )
+        in_tree.append(v)
+        remaining.remove(v)
+        specs.append(
+            RouterNetSpec(
+                name=f"{nname}_mst_{len(specs)}",
+                source=v[0],
+                sink=u[0],
+                commodity=commodity,
+                is_fluid=True,
+                start_heading=v[1],
+                end_heading=None,
+                terminal_heading=None,
+                source_inward_dir=v[2],
+                sink_inward_dir=u[2],
             )
-            return ((math.floor(gx + ax), math.floor(gy + ay)), True, head, inward_dir)
+        )
+    return specs
 
-        inputs = [i.replace("-", "_") for i in cell.get("inputs", [])]
-        if clean_port in inputs:
-            orig_inputs = cell.get("inputs", [])
-            idx = inputs.index(clean_port)
-            orig_name = orig_inputs[idx] if idx < len(orig_inputs) else clean_port
-            geom = get_macro_port_geometry(cell, orig_name, is_output=False)
-            is_fluid_port = bool(clean_fluids and orig_name in clean_fluids)
-            pos_key = "inserter_pos" if is_fluid_port else "approach_pos"
-            ax, ay = geom[pos_key]
-            face = geom.get("face", "W")
-            if is_fluid_port:
-                approach_head = (
-                    DIRECTION_WEST
-                    if face == "E"
-                    else DIRECTION_EAST
-                    if face == "W"
-                    else DIRECTION_SOUTH
-                    if face == "N"
-                    else DIRECTION_NORTH
-                )
-            else:
-                approach_head = geom.get("approach_dir") if face in ("W", "E") else None
-            return ((math.floor(gx + ax), math.floor(gy + ay)), False, None, approach_head)
 
-    return ((igx, igy), False, None, None)
+def _build_point_to_point_specs(
+    nname: str,
+    commodity: str,
+    is_fluid: bool,
+    drivers: Sequence[tuple[TileCoord, int | None, int | None]],
+    sinks: Sequence[tuple[TileCoord, int | None, int | None]],
+) -> list[RouterNetSpec]:
+    multi = len(drivers) > 1 or len(sinks) > 1
+    return [
+        RouterNetSpec(
+            name=f"{nname}_d{d_idx}_s{s_idx}" if multi else nname,
+            source=d_pos,
+            sink=s_pos,
+            commodity=commodity,
+            is_fluid=is_fluid,
+            start_heading=d_head,
+            end_heading=s_head,
+            terminal_heading=None if is_fluid else s_term,
+            source_inward_dir=d_term if is_fluid else None,
+            sink_inward_dir=s_term if is_fluid else None,
+        )
+        for d_idx, (d_pos, d_head, d_term) in enumerate(drivers)
+        for s_idx, (s_pos, s_head, s_term) in enumerate(sinks)
+        if d_pos != s_pos
+    ]
+
+
+def _partition_net_terminals(
+    conns: Sequence[object],
+    nname: str,
+    comp_map: Mapping[str, JsonMap],
+    inst_map: Mapping[str, JsonMap],
+    cell_map: Mapping[str, JsonMap],
+    pin_dict: Mapping[str, TileCoord],
+    valid_in_pins: set[GridCoord],
+    scale: float,
+    clean_fluids: set[str],
+) -> tuple[
+    list[tuple[TileCoord, int | None, int | None]], list[tuple[TileCoord, int | None, int | None]]
+]:
+    drivers: list[tuple[TileCoord, int | None, int | None]] = []
+    sinks: list[tuple[TileCoord, int | None, int | None]] = []
+    for conn in conns:
+        pair = _as_list(conn)
+        if len(pair) < 2:
+            continue
+        term = _resolve_terminal(
+            _as_str(pair[0]),
+            _as_str(pair[1]),
+            nname,
+            comp_map,
+            inst_map,
+            cell_map,
+            pin_dict,
+            valid_in_pins,
+            scale,
+            clean_fluids=clean_fluids,
+        )
+        if term is None:
+            continue
+        coord, is_drv, head, term_head = term
+        target_list = drivers if is_drv else sinks
+        target_list.append((coord, head, term_head))
+    if not drivers and sinks:
+        drivers.append(sinks.pop(0))
+    elif not sinks and drivers:
+        sinks.append(drivers.pop())
+    return drivers, sinks
+
+
+def _build_net_specs_for_net(
+    net: JsonMap,
+    comp_map: Mapping[str, JsonMap],
+    inst_map: Mapping[str, JsonMap],
+    cell_map: Mapping[str, JsonMap],
+    pin_dict: Mapping[str, TileCoord],
+    valid_in_pins: set[GridCoord],
+    scale: float,
+    clean_fluids: set[str],
+) -> list[RouterNetSpec]:
+    nname = _as_str(net.get("name"))
+    conns = _as_list(net.get("connections"))
+    if len(conns) < 2:
+        return []
+    drivers, sinks = _partition_net_terminals(
+        conns, nname, comp_map, inst_map, cell_map, pin_dict, valid_in_pins, scale, clean_fluids
+    )
+    base_comm = nname.split("__")[0].replace("-", "_")
+    is_fluid = _is_fluid_name(base_comm, clean_fluids)
+    commodity = base_comm.replace("_", "-")
+    if is_fluid and (len(drivers) > 1 or len(sinks) > 1):
+        return _build_fluid_mst_specs(nname, commodity, [*drivers, *sinks])
+    return _build_point_to_point_specs(nname, commodity, is_fluid, drivers, sinks)
+
+
+def _bind_pin_constraint(
+    tile: TileCoord,
+    heading: int | None,
+    valid_pins: set[GridCoord],
+    pin_no_hood_tiles: set[TileCoord],
+    component_headings: dict[TileCoord, int],
+) -> None:
+    if (float(tile[0]), float(tile[1])) not in valid_pins:
+        return
+    pin_no_hood_tiles.add(tile)
+    if heading is not None:
+        component_headings[tile] = heading
+
+
+def _record_pin_spec_constraints(
+    net_specs: Sequence[RouterNetSpec],
+    valid_in_pins: set[GridCoord],
+    valid_out_pins: set[GridCoord],
+    pin_no_hood_tiles: set[TileCoord],
+    component_headings: dict[TileCoord, int],
+) -> None:
+    for nspec in net_specs:
+        if nspec.is_fluid:
+            continue
+        _bind_pin_constraint(
+            nspec.source, nspec.start_heading, valid_in_pins, pin_no_hood_tiles, component_headings
+        )
+        _bind_pin_constraint(
+            nspec.sink, nspec.end_heading, valid_out_pins, pin_no_hood_tiles, component_headings
+        )
+
+
+def _record_single_entity_constraint(
+    ent: EntityDict,
+    pin_no_hood_tiles: set[TileCoord],
+    component_headings: dict[TileCoord, int],
+    fluid_port_approaches: dict[TileCoord, set[str]],
+) -> None:
+    ename = _as_str(ent.get("name"))
+    cx, cy = _entity_xy(ent)
+    d = _as_int(ent.get("direction"), DIRECTION_NORTH)
+    if "splitter" in ename:
+        is_ns = d in NORTH_SOUTH_DIRS
+        offsets = (
+            ((-TILE_HALF, 0.0), (TILE_HALF, 0.0))
+            if is_ns
+            else ((0.0, -TILE_HALF), (0.0, TILE_HALF))
+        )
+        for ox, oy in offsets:
+            component_headings[(math.floor(cx + ox), math.floor(cy + oy))] = d
+        return
+    if "transport-belt" in ename:
+        tx, ty = math.floor(cx), math.floor(cy)
+        component_headings[(tx, ty)] = d
+        dx, dy = DIR_STEPS.get(d, (0, 0))
+        pin_no_hood_tiles.add((tx + dx, ty + dy))
+        return
+    if ename == "pipe" and ent.get("fluid"):
+        tx, ty = math.floor(cx), math.floor(cy)
+        p_comm = _as_str(ent.get("fluid")).replace("_", "-")
+        for odx, ody in ((0, 0), *CARDINAL_NEIGHBORS):
+            fluid_port_approaches.setdefault((tx + odx, ty + ody), set()).add(p_comm)
+
+
+def _collect_router_constraints(
+    net_specs: Sequence[RouterNetSpec],
+    entities: Sequence[EntityDict],
+    valid_in_pins: set[GridCoord],
+    valid_out_pins: set[GridCoord],
+) -> tuple[set[TileCoord], dict[TileCoord, int], dict[TileCoord, set[str]]]:
+    pin_no_hood_tiles: set[TileCoord] = set()
+    component_headings: dict[TileCoord, int] = {}
+    fluid_port_approaches: dict[TileCoord, set[str]] = {}
+    _record_pin_spec_constraints(
+        net_specs, valid_in_pins, valid_out_pins, pin_no_hood_tiles, component_headings
+    )
+    for ent in entities:
+        _record_single_entity_constraint(
+            ent, pin_no_hood_tiles, component_headings, fluid_port_approaches
+        )
+    return pin_no_hood_tiles, component_headings, fluid_port_approaches
+
+
+def _check_and_raise_failed_routes(
+    routes: Mapping[str, object],
+    strict_drc: bool,
+    prefix: str,
+) -> list[object]:
+    failed = [r for r in routes.values() if not getattr(r, "is_success", True)]
+    if failed and strict_drc:
+        for f in failed[:MAX_LOGGED_FAILURES]:
+            sys.stderr.write(
+                f"factorilog [maze_router]: NET ROUTE FAILED: {getattr(f, 'net_name', '')}: {getattr(f, 'error_message', '')}\n"
+            )
+        names = ", ".join(str(getattr(r, "net_name", "")) for r in failed[:MAX_ERROR_SUMMARY])
+        raise ValueError(f"{prefix} failed on {len(failed)} net(s): {names}")
+    return failed
+
+
+def _find_bay_blocks(
+    components: Sequence[object],
+    scale: float,
+    grid_w: int,
+    grid_h: int,
+    pitch: int,
+) -> set[TileCoord]:
+    bay_blocks: set[TileCoord] = set()
+    for comp_obj in components:
+        comp = _as_map(comp_obj)
+        cx_t = round(_as_float(comp.get("x")) * scale)
+        cy_t = round(_as_float(comp.get("y")) * scale)
+        bx_c, by_c = cx_t // pitch, cy_t // pitch
+        if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and BAY_Y_MIN <= (cy_t % pitch) <= BAY_Y_MAX:
+            bay_blocks.add((bx_c, by_c))
+    return bay_blocks
+
+
+def _build_block_core_obstacles(
+    b_min_x: int,
+    b_min_y: int,
+    b_max_x: int,
+    b_max_y: int,
+    obstacles: set[TileCoord],
+    blk_nets: Sequence[RouterNetSpec],
+) -> set[TileCoord]:
+    blk_obs = {
+        pt for pt in obstacles if b_min_x <= pt[0] <= b_max_x and b_min_y <= pt[1] <= b_max_y
+    }
+    for rx in range(b_min_x, b_max_x + 1):
+        blk_obs.add((rx, b_min_y))
+        blk_obs.add((rx, b_max_y))
+    for ry in range(b_min_y, b_max_y + 1):
+        blk_obs.add((b_min_x, ry))
+        blk_obs.add((b_max_x, ry))
+    for ns in blk_nets:
+        blk_obs.discard(ns.source)
+        blk_obs.discard(ns.sink)
+    return blk_obs
+
+
+def _build_highway_obstacles(
+    grid_w: int,
+    grid_h: int,
+    margin: int,
+    pitch: int,
+    bay_blocks: set[TileCoord],
+    obstacles: set[TileCoord],
+    highway_specs: Sequence[RouterNetSpec],
+) -> set[TileCoord]:
+    hwy_obs = {
+        (bx * pitch + dx, by * pitch + dy)
+        for bx in range(grid_w)
+        for by in range(grid_h)
+        for dx in range(margin, pitch - margin)
+        for dy in range(margin, pitch - margin)
+    }
+    for bx_c, by_c in bay_blocks:
+        for nx_t in range(bx_c * pitch + margin, bx_c * pitch + pitch - margin):
+            for ny_t in range(by_c * pitch + margin, by_c * pitch + BAY_Y_STOP):
+                hwy_obs.discard((nx_t, ny_t))
+    hwy_obs.update(obstacles)
+    for ns in highway_specs:
+        hwy_obs.discard(ns.source)
+        hwy_obs.discard(ns.sink)
+    return hwy_obs
+
+
+def _route_stage1_blocks(
+    intra_block_specs: Mapping[TileCoord, list[RouterNetSpec]],
+    macro_planner: MacroFloorplanner,
+    bay_blocks: set[TileCoord],
+    margin: int,
+    obstacles: set[TileCoord],
+    prototypes: dict[str, object],
+    merged_headings: dict[TileCoord, int],
+    port_no_hood_tiles: set[TileCoord],
+    fluid_port_approaches: dict[TileCoord, set[str]],
+    strict_drc: bool,
+    cfg: Def2BpConfig,
+) -> tuple[dict[str, object], dict[GridCoord, EntityDict], list[RouterNetSpec]]:
+    routes: dict[str, object] = {}
+    entities_by_pos: dict[GridCoord, EntityDict] = {}
+    all_routed_specs: list[RouterNetSpec] = []
+    total_intra = sum(len(ns) for ns in intra_block_specs.values())
+    t_stage1 = time.perf_counter()
+    print(
+        f"[def2bp] Stage 1: routing {total_intra} intra-block nets across {len(intra_block_specs)} blocks (margin={margin})...",
+        file=sys.stderr,
+        flush=True,
+    )
+    for (bx, by), blk_nets in sorted(intra_block_specs.items()):
+        if not blk_nets:
+            continue
+        t_blk = time.perf_counter()
+        b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
+            (bx, by), bay_blocks, margin=margin
+        )
+        blk_obs = _build_block_core_obstacles(
+            b_min_x, b_min_y, b_max_x, b_max_y, obstacles, blk_nets
+        )
+        blk_router = maze_router_mod.DualLaneMazeRouter(
+            min_x=b_min_x,
+            max_x=b_max_x,
+            min_y=b_min_y,
+            max_y=b_max_y,
+            engine=None,
+            prototypes=prototypes,
+            obstacles=blk_obs,
+            component_headings=merged_headings,
+            no_hood_tiles=port_no_hood_tiles,
+            fluid_port_approaches=fluid_port_approaches,
+        )
+        b_routes, b_entities, _ = blk_router.route(blk_nets, verify=False)
+        dt_blk = time.perf_counter() - t_blk
+        b_failed = _check_and_raise_failed_routes(
+            b_routes, strict_drc, f"Stage 1 block ({bx},{by}) router"
+        )
+        if dt_blk >= cfg.slow_block_sec or b_failed:
+            print(
+                f"[def2bp]   block ({bx},{by}): {len(blk_nets)} nets in {dt_blk:.2f}s (failed={len(b_failed)})",
+                file=sys.stderr,
+                flush=True,
+            )
+        routes.update(b_routes)
+        all_routed_specs.extend(blk_nets)
+        for ent in b_entities:
+            ex, ey = _entity_xy(ent)
+            entities_by_pos[(round(ex, COORD_PRECISION), round(ey, COORD_PRECISION))] = ent
+    print(
+        f"[def2bp] Stage 1 completed in {time.perf_counter() - t_stage1:.2f}s",
+        file=sys.stderr,
+        flush=True,
+    )
+    return routes, entities_by_pos, all_routed_specs
+
+
+def _route_hierarchical(
+    def_data: MutableJsonMap,
+    net_specs: list[RouterNetSpec],
+    grid_w: int,
+    grid_h: int,
+    scale: float,
+    obstacles: set[TileCoord],
+    prototypes: dict[str, object],
+    component_headings: dict[TileCoord, int],
+    pin_no_hood_tiles: set[TileCoord],
+    fluid_port_approaches: dict[TileCoord, set[str]],
+    engine: EngineRef = None,
+    strict_drc: bool = False,
+    cfg: Def2BpConfig = DEFAULT_DEF2BP_CONFIG,
+) -> tuple[dict[str, object], list[EntityDict], list[RouterNetSpec], object | None]:
+    pitch = cfg.block_pitch
+    xs = [c for ns in net_specs for c in (ns.source[0], ns.sink[0])]
+    ys = [c for ns in net_specs for c in (ns.source[1], ns.sink[1])]
+    hwy_min_x = min([0, *xs])
+    hwy_min_y = min([0, *ys])
+    hwy_max_x = max([grid_w * pitch - 1, *xs])
+    hwy_max_y = max([grid_h * pitch - 1, *ys])
+    bay_blocks = _find_bay_blocks(
+        _as_list(def_data.get("components")), scale, grid_w, grid_h, pitch
+    )
+
+    macro_planner = MacroFloorplanner()
+    (
+        intra_block_specs,
+        highway_specs,
+        port_no_hood_tiles,
+        port_headings,
+        h_floorplan,
+    ) = macro_planner.plan_hierarchical_nets(
+        net_specs=net_specs,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        obstacles=obstacles,
+        min_x=hwy_min_x,
+        min_y=hwy_min_y,
+        max_x=hwy_max_x,
+        max_y=hwy_max_y,
+        bay_blocks=bay_blocks,
+    )
+    port_no_hood_tiles.update(pin_no_hood_tiles)
+    def_data["_macro_floorplan"] = h_floorplan
+    def_data["_bay_blocks"] = bay_blocks
+    def_data["_highway_specs"] = highway_specs
+    merged_headings = {**component_headings, **port_headings}
+    margin = h_floorplan.chassis.core_margin_x
+
+    routes, entities_by_pos, all_routed_specs = _route_stage1_blocks(
+        intra_block_specs,
+        macro_planner,
+        bay_blocks,
+        margin,
+        obstacles,
+        prototypes,
+        merged_headings,
+        port_no_hood_tiles,
+        fluid_port_approaches,
+        strict_drc,
+        cfg,
+    )
+
+    if highway_specs:
+        t_stage2 = time.perf_counter()
+        print(
+            f"[def2bp] Stage 2: routing {len(highway_specs)} highway nets across {grid_w}x{grid_h} street grid...",
+            file=sys.stderr,
+            flush=True,
+        )
+        hwy_obs = _build_highway_obstacles(
+            grid_w, grid_h, margin, pitch, bay_blocks, obstacles, highway_specs
+        )
+        hwy_router = maze_router_mod.DualLaneMazeRouter(
+            min_x=hwy_min_x,
+            max_x=hwy_max_x,
+            min_y=hwy_min_y,
+            max_y=hwy_max_y,
+            engine=None,
+            prototypes=prototypes,
+            obstacles=hwy_obs,
+            component_headings=merged_headings,
+            no_hood_tiles=port_no_hood_tiles,
+            fluid_port_approaches=fluid_port_approaches,
+        )
+        h_routes, h_entities, _ = hwy_router.route(
+            highway_specs, max_iterations=cfg.highway_max_iterations, verify=False
+        )
+        h_failed = _check_and_raise_failed_routes(h_routes, strict_drc, "Stage 2 highway router")
+        print(
+            f"[def2bp] Stage 2 completed in {time.perf_counter() - t_stage2:.2f}s (failed={len(h_failed)})",
+            file=sys.stderr,
+            flush=True,
+        )
+        routes.update(h_routes)
+        all_routed_specs.extend(highway_specs)
+        for ent in h_entities:
+            ex, ey = _entity_xy(ent)
+            entities_by_pos[(round(ex, COORD_PRECISION), round(ey, COORD_PRECISION))] = ent
+
+    entities = list(entities_by_pos.values())
+    for idx, ent in enumerate(entities, start=1):
+        ent["entity_number"] = idx
+
+    failed = [res for res in routes.values() if not getattr(res, "is_success", True)]
+    verif_res = None
+    if engine is not None and entities and not failed:
+        t_verif = time.perf_counter()
+        verifier = verifier_mod.NativeLayoutVerifier(engine, prototypes=prototypes)
+        verifier_nets = [
+            verifier_mod.NetSpec(
+                name=n.name,
+                commodity=n.commodity,
+                source_pos=(n.source[0] + TILE_HALF, n.source[1] + TILE_HALF),
+                sink_pos=(n.sink[0] + TILE_HALF, n.sink[1] + TILE_HALF),
+                is_fluid=n.is_fluid,
+            )
+            for n in net_specs
+        ]
+        verif_res = verifier.verify_blueprint(
+            entities, nets=verifier_nets, ticks=cfg.verifier_ticks
+        )
+        print(
+            f"[def2bp] NativeLayoutVerifier completed in {time.perf_counter() - t_verif:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+    return routes, entities, all_routed_specs, verif_res
+
+
+def _resolve_router_engine(engine: EngineRef) -> EngineRef:
+    if engine is False:
+        return None
+    if engine is not None:
+        return engine
+    try:
+        return native_engine_mod.FactorioNativeEngine()
+    except Exception:
+        return None
+
+
+def _report_router_diagnostics(
+    routes: Mapping[str, object],
+    verif_res: object | None,
+    strict_drc: bool,
+) -> None:
+    if verif_res is not None and not getattr(verif_res, "is_valid", True):
+        for err in getattr(verif_res, "lvs_errors", ()):
+            sys.stderr.write(
+                f"factorilog [maze_router]: NATIVE LVS ERROR: {err.net_name}: {err.message}\n"
+            )
+        for drc in getattr(verif_res, "drc_violations", ()):
+            sys.stderr.write(
+                f"factorilog [maze_router]: NATIVE DRC ERROR: [{drc.code}] at {drc.position}: {drc.message}\n"
+            )
+    failed = [res for res in routes.values() if not getattr(res, "is_success", True)]
+    for f in failed[:MAX_LOGGED_FAILURES]:
+        sys.stderr.write(
+            f"factorilog [maze_router]: NET ROUTE FAILED: {getattr(f, 'net_name', '')}: {getattr(f, 'error_message', '')}\n"
+        )
+    if failed and strict_drc:
+        names = ", ".join(str(getattr(r, "net_name", "")) for r in failed[:MAX_ERROR_SUMMARY])
+        raise ValueError(f"Router failed on {len(failed)} net(s): {names}")
+
+
+def _extract_clean_fluids(netlist_data: JsonMap, placement: PlacementResult) -> set[str]:
+    raw_fluids = {_as_str(f) for f in _as_list(netlist_data.get("fluids"))}
+    if not raw_fluids and placement.fluids:
+        raw_fluids = set(placement.fluids)
+    underscored = {f.replace("-", "_") for f in raw_fluids}
+    hyphenated = {f.replace("_", "-") for f in raw_fluids}
+    return underscored | hyphenated | raw_fluids
+
+
+def _extract_lookup_maps(
+    def_data: JsonMap,
+    netlist_data: JsonMap,
+) -> tuple[dict[str, JsonMap], dict[str, JsonMap], dict[str, JsonMap]]:
+    comp_map = {
+        _as_str(_as_map(c).get("name")): _as_map(c) for c in _as_list(def_data.get("components"))
+    }
+    inst_map = {
+        _as_str(_as_map(i).get("name")): _as_map(i) for i in _as_list(netlist_data.get("instances"))
+    }
+    cell_map = {k: _as_map(v) for k, v in _as_map(netlist_data.get("cells")).items()}
+    return comp_map, inst_map, cell_map
+
+
+def _build_surface_tile_maps(
+    routes: Mapping[str, object],
+) -> tuple[dict[str, dict[GridCoord, int]], dict[GridCoord, set[str]]]:
+    net_surface_tiles: dict[str, dict[GridCoord, int]] = {}
+    tile_to_nets: dict[GridCoord, set[str]] = {}
+    for nname, route_res in routes.items():
+        base_name = base_net_name(nname)
+        net_surface_tiles.setdefault(base_name, {})
+        for node in getattr(route_res, "nodes", ()):
+            if node.z == 0:
+                k = (node.x + TILE_HALF, node.y + TILE_HALF)
+                net_surface_tiles[base_name][k] = node.heading
+                tile_to_nets.setdefault(k, set()).add(base_name)
+    return net_surface_tiles, tile_to_nets
+
+
+def _parse_die_area(def_data: JsonMap, units: float, cfg: Def2BpConfig) -> list[float]:
+    default_span = cfg.block_pitch * units
+    die_area = [_as_float(v) for v in _as_list(def_data.get("die_area"))]
+    if len(die_area) < DIE_AREA_LEN:
+        return [0.0, 0.0, default_span, default_span]
+    return die_area
 
 
 def route_with_maze_router(
-    def_data: dict[str, Any],
-    netlist_data: dict[str, Any],
-    placement: Any,
-    engine: Any | None = None,
+    def_data: MutableJsonMap,
+    netlist_data: JsonMap,
+    placement: PlacementResult,
+    engine: object | None = None,
     strict_drc: bool = False,
+    cfg: Def2BpConfig = DEFAULT_DEF2BP_CONFIG,
 ) -> RouteResult:
-    """Route DEF nets using the 3D multi-layer DualLaneMazeRouter.
+    """Route DEF nets using the 3D multi-layer DualLaneMazeRouter."""
+    units = _as_float(def_data.get("units"), cfg.default_units)
+    scale = 1.0 / units
+    die_area = _parse_die_area(def_data, units, cfg)
+    min_x, min_y = math.floor(die_area[0] * scale), math.floor(die_area[1] * scale)
+    max_x = math.ceil(die_area[DIE_X_MAX_IDX] * scale)
+    max_y = math.ceil(die_area[DIE_Y_MAX_IDX] * scale)
 
-    Extract terminal coordinates for each logical net from components and pins.
-    Execute the multi-layer router across surface and subterranean layers.
-    Add routed physical entities directly to the placement record.
-    """
-    try:
-        from foundry.native_engine.verifier import load_game_prototypes
-        from foundry.router.maze_router import DualLaneMazeRouter
-        from foundry.router.types import RouterNetSpec
-    except ImportError:
-        from native_engine.verifier import load_game_prototypes
-        from router.maze_router import DualLaneMazeRouter
-        from router.types import RouterNetSpec
-
-    scale = 1.0 / float(def_data.get("units", 1000))
-    die_area = def_data.get("die_area", [0, 0, 100000, 100000])
-    min_x = math.floor(die_area[0] * scale)
-    min_y = math.floor(die_area[1] * scale)
-    max_x = math.ceil(die_area[2] * scale)
-    max_y = math.ceil(die_area[3] * scale)
-
-    obstacles = {(math.floor(pos[0]), math.floor(pos[1])) for pos in placement.occupied_positions}
-
-    pin_dict: dict[str, tuple[int, int]] = {}
-    valid_in_pins: set[tuple[float, float]] = set()
-    valid_out_pins: set[tuple[float, float]] = set()
-    for pin in def_data.get("pins", []):
-        px = math.floor(pin.get("x", 0) * scale)
-        py = math.floor(pin.get("y", 0) * scale)
-        pname = pin.get("name", pin.get("net", ""))
-        pin_dict[pname] = (px, py)
-        direction = pin.get("direction", "")
-        if direction == "INPUT":
-            valid_in_pins.add((float(px), float(py)))
-            obstacles.update(((px - 1, py), (px - 2, py), (px - 1, py - 1), (px - 1, py + 1)))
-        elif direction == "OUTPUT":
-            valid_out_pins.add((float(px), float(py)))
-            obstacles.update(((px + 1, py), (px + 2, py), (px + 1, py - 1), (px + 1, py + 1)))
-
-    fluids = set(netlist_data.get("fluids", [])) or set(placement.fluids or [])
-    clean_fluids = (
-        {f.replace("-", "_") for f in fluids} | {f.replace("_", "-") for f in fluids} | set(fluids)
+    obstacles, pin_dict, valid_in_pins, valid_out_pins = _extract_pins_and_obstacles(
+        def_data, placement, scale
     )
-    comp_map = {c["name"]: c for c in def_data.get("components", [])}
-    inst_map = {inst["name"]: inst for inst in netlist_data.get("instances", [])}
-    cell_map = netlist_data.get("cells", {})
+    clean_fluids = _extract_clean_fluids(netlist_data, placement)
+    comp_map, inst_map, cell_map = _extract_lookup_maps(def_data, netlist_data)
 
     net_specs: list[RouterNetSpec] = []
-
-    for net in def_data.get("nets", []):
-        nname = net.get("name", "")
-        conns = net.get("connections", [])
-        if len(conns) < 2:
-            continue
-
-        drivers: list[tuple[tuple[int, int], int | None, int | None]] = []
-        sinks: list[tuple[tuple[int, int], int | None, int | None]] = []
-
-        for inst_name, port in conns:
-            term = _resolve_terminal(
-                inst_name,
-                port,
-                nname,
+    for net_obj in _as_list(def_data.get("nets")):
+        net_specs.extend(
+            _build_net_specs_for_net(
+                _as_map(net_obj),
                 comp_map,
                 inst_map,
                 cell_map,
                 pin_dict,
                 valid_in_pins,
                 scale,
-                clean_fluids=clean_fluids,
+                clean_fluids,
             )
-            if term is not None:
-                coord, is_drv, head, term_head = term
-                if is_drv:
-                    drivers.append((coord, head, term_head))
-                else:
-                    sinks.append((coord, head, term_head))
+        )
 
-        if not drivers and sinks and len(conns) >= 2:
-            drivers.append(sinks.pop(0))
-        elif not sinks and drivers and len(conns) >= 2:
-            sinks.append(drivers.pop())
-
-        base_commodity = nname.split("__")[0].replace("-", "_")
-        is_fluid = bool(clean_fluids and base_commodity in clean_fluids)
-        commodity = base_commodity.replace("_", "-")
-
-        if is_fluid and (len(drivers) > 1 or len(sinks) > 1):
-            all_terms = drivers + sinks
-            seen_nodes: dict[tuple[int, int], tuple[tuple[int, int], int | None, int | None]] = {}
-            for t in all_terms:
-                if t[0] not in seen_nodes:
-                    seen_nodes[t[0]] = t
-            nodes = list(seen_nodes.values())
-            if len(nodes) >= 2:
-                in_tree = [nodes[0]]
-                remaining = set(nodes[1:])
-                edge_idx = 0
-                while remaining:
-                    best_dist = float("inf")
-                    best_pair = None
-                    for u in in_tree:
-                        ux, uy = u[0]
-                        for v in remaining:
-                            vx, vy = v[0]
-                            dist = abs(ux - vx) + abs(uy - vy)
-                            if dist < best_dist:
-                                best_dist = dist
-                                best_pair = (u, v)
-                    if best_pair is None:
-                        break
-                    u, v = best_pair
-                    in_tree.append(v)
-                    remaining.remove(v)
-                    net_specs.append(
-                        RouterNetSpec(
-                            name=f"{nname}_mst_{edge_idx}",
-                            source=v[0],
-                            sink=u[0],
-                            commodity=commodity,
-                            is_fluid=True,
-                            start_heading=v[1],
-                            end_heading=None,
-                            terminal_heading=None,
-                            source_inward_dir=v[2],
-                            sink_inward_dir=u[2],
-                        )
-                    )
-                    edge_idx += 1
-        else:
-            for d_idx, (d_pos, d_head, d_term) in enumerate(drivers):
-                for s_idx, (s_pos, s_head, s_term) in enumerate(sinks):
-                    if d_pos != s_pos:
-                        sub_name = nname
-                        if len(drivers) > 1 or len(sinks) > 1:
-                            sub_name = f"{nname}_d{d_idx}_s{s_idx}"
-                        net_specs.append(
-                            RouterNetSpec(
-                                name=sub_name,
-                                source=d_pos,
-                                sink=s_pos,
-                                commodity=commodity,
-                                is_fluid=is_fluid,
-                                start_heading=d_head,
-                                end_heading=s_head,
-                                terminal_heading=None if is_fluid else s_term,
-                                source_inward_dir=d_term if is_fluid else None,
-                                sink_inward_dir=s_term if is_fluid else None,
-                            )
-                        )
-    # Ensure source and sink tiles are not blocked by fixed obstacles
     for nspec in net_specs:
         obstacles.discard(nspec.source)
         obstacles.discard(nspec.sink)
-        min_x = min(min_x, nspec.source[0] - 2, nspec.sink[0] - 2)
-        max_x = max(max_x, nspec.source[0] + 2, nspec.sink[0] + 2)
-        min_y = min(min_y, nspec.source[1] - 2, nspec.sink[1] - 2)
-        max_y = max(max_y, nspec.source[1] + 2, nspec.sink[1] + 2)
+        min_x = min(min_x, nspec.source[0] - PORT_PAD_EXTENT, nspec.sink[0] - PORT_PAD_EXTENT)
+        max_x = max(max_x, nspec.source[0] + PORT_PAD_EXTENT, nspec.sink[0] + PORT_PAD_EXTENT)
+        min_y = min(min_y, nspec.source[1] - PORT_PAD_EXTENT, nspec.sink[1] - PORT_PAD_EXTENT)
+        max_y = max(max_y, nspec.source[1] + PORT_PAD_EXTENT, nspec.sink[1] + PORT_PAD_EXTENT)
 
-    pin_no_hood_tiles: set[tuple[int, int]] = set()
-    component_headings: dict[tuple[int, int], int] = {}
-    fluid_port_approaches: dict[tuple[int, int], set[str]] = {}
-    for nspec in net_specs:
-        if not nspec.is_fluid:
-            if (float(nspec.source[0]), float(nspec.source[1])) in valid_in_pins:
-                pin_no_hood_tiles.add(nspec.source)
-                if nspec.start_heading is not None:
-                    component_headings[nspec.source] = nspec.start_heading
-            if (float(nspec.sink[0]), float(nspec.sink[1])) in valid_out_pins:
-                pin_no_hood_tiles.add(nspec.sink)
-                if nspec.end_heading is not None:
-                    component_headings[nspec.sink] = nspec.end_heading
-    for ent in placement.entities:
-        ename = ent.get("name", "")
-        if "splitter" in ename:
-            pos = ent.get("position", {})
-            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
-            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
-            d = ent.get("direction", 0)
-            if d in (0, 8):  # North, South
-                component_headings[(math.floor(cx - 0.5), math.floor(cy))] = d
-                component_headings[(math.floor(cx + 0.5), math.floor(cy))] = d
-            else:  # East, West
-                component_headings[(math.floor(cx), math.floor(cy - 0.5))] = d
-                component_headings[(math.floor(cx), math.floor(cy + 0.5))] = d
-        elif "transport-belt" in ename:
-            pos = ent.get("position", {})
-            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
-            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
-            ed = ent.get("direction", 0)
-            tx, ty = math.floor(cx), math.floor(cy)
-            component_headings[(tx, ty)] = ed
-            dx, dy = DIR_STEPS.get(ed, (0, 0))
-            pin_no_hood_tiles.add((tx + dx, ty + dy))
-        elif ename == "pipe" and ent.get("fluid"):
-            pos = ent.get("position", {})
-            cx = float(pos.get("x", 0)) if isinstance(pos, dict) else float(pos[0])
-            cy = float(pos.get("y", 0)) if isinstance(pos, dict) else float(pos[1])
-            tx, ty = math.floor(cx), math.floor(cy)
-            p_comm = str(ent["fluid"]).replace("_", "-")
-            fluid_port_approaches.setdefault((tx, ty), set()).add(p_comm)
-            for odx, ody in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                fluid_port_approaches.setdefault((tx + odx, ty + ody), set()).add(p_comm)
+    pin_no_hood_tiles, component_headings, fluid_port_approaches = _collect_router_constraints(
+        net_specs, placement.entities, valid_in_pins, valid_out_pins
+    )
+    resolved_engine = _resolve_router_engine(engine)
+    prototypes = verifier_mod.load_game_prototypes()
 
-    if engine is False:
-        engine = None
-    elif engine is None:
-        try:
-            from foundry.native_engine.engine import FactorioNativeEngine
-
-            engine = FactorioNativeEngine()
-        except Exception:
-            try:
-                from native_engine.engine import FactorioNativeEngine
-
-                engine = FactorioNativeEngine()
-            except Exception:
-                pass
-
-    prototypes = load_game_prototypes()
-    try:
-        from foundry.router.grid import base_net_name
-    except ImportError:
-        from router.grid import base_net_name
-
-    units = float(def_data.get("units", 1000))
-    die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
-    die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
-    grid_w = max(1, round(die_w / 100.0))
-    grid_h = max(1, round(die_h / 100.0))
-    use_hierarchical = bool(def_data.get("blockages")) and (grid_w * grid_h > 1)
-
-    if use_hierarchical:
-        try:
-            from foundry.macro_floorplan import MacroFloorplanner
-            from foundry.native_engine.verifier import NativeLayoutVerifier, NetSpec
-        except ImportError:
-            from macro_floorplan import MacroFloorplanner
-            from native_engine.verifier import NativeLayoutVerifier, NetSpec
-
-        hwy_min_x = 0
-        hwy_min_y = 0
-        hwy_max_x = grid_w * 100 - 1
-        hwy_max_y = grid_h * 100 - 1
-        for ns in net_specs:
-            hwy_min_x = min(hwy_min_x, ns.source[0], ns.sink[0])
-            hwy_min_y = min(hwy_min_y, ns.source[1], ns.sink[1])
-            hwy_max_x = max(hwy_max_x, ns.source[0], ns.sink[0])
-            hwy_max_y = max(hwy_max_y, ns.source[1], ns.sink[1])
-
-        bay_blocks: set[tuple[int, int]] = set()
-        for comp in def_data.get("components", []):
-            cx_t = round(comp["x"] * scale)
-            cy_t = round(comp["y"] * scale)
-            bx_c = cx_t // 100
-            by_c = cy_t // 100
-            if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and 3 <= (cy_t % 100) <= 16:
-                bay_blocks.add((bx_c, by_c))
-
-        macro_planner = MacroFloorplanner()
-        (
-            intra_block_specs,
-            highway_specs,
-            port_no_hood_tiles,
-            port_headings,
-            h_floorplan,
-        ) = macro_planner.plan_hierarchical_nets(
-            net_specs=net_specs,
-            grid_w=grid_w,
-            grid_h=grid_h,
-            obstacles=obstacles,
-            min_x=hwy_min_x,
-            min_y=hwy_min_y,
-            max_x=hwy_max_x,
-            max_y=hwy_max_y,
-            bay_blocks=bay_blocks,
+    grid_w = max(1, round((die_area[DIE_X_MAX_IDX] / units) / float(cfg.block_pitch)))
+    grid_h = max(1, round((die_area[DIE_Y_MAX_IDX] / units) / float(cfg.block_pitch)))
+    if bool(def_data.get("blockages")) and (grid_w * grid_h > 1):
+        routes, entities, all_routed_specs, verif_res = _route_hierarchical(
+            def_data,
+            net_specs,
+            grid_w,
+            grid_h,
+            scale,
+            obstacles,
+            prototypes,
+            component_headings,
+            pin_no_hood_tiles,
+            fluid_port_approaches,
+            resolved_engine,
+            strict_drc,
+            cfg,
         )
-        port_no_hood_tiles.update(pin_no_hood_tiles)
-        def_data["_macro_floorplan"] = h_floorplan
-        def_data["_bay_blocks"] = bay_blocks
-        def_data["_highway_specs"] = highway_specs
-        merged_headings = {**component_headings, **port_headings}
-
-        routes: dict[str, Any] = {}
-        entities_by_pos: dict[tuple[float, float], dict[str, Any]] = {}
-        all_routed_specs: list[RouterNetSpec] = []
-
-        margin = h_floorplan.chassis.core_margin_x
-        total_intra = sum(len(ns) for ns in intra_block_specs.values())
-        t_stage1_start = time.perf_counter()
-        print(
-            f"[def2bp] Stage 1: routing {total_intra} intra-block nets across {len(intra_block_specs)} blocks (margin={margin})...",
-            file=sys.stderr,
-            flush=True,
-        )
-
-        # Stage 1: Route each occupied city block core independently
-        for (bx, by), blk_nets in sorted(intra_block_specs.items()):
-            if not blk_nets:
-                continue
-            t_blk = time.perf_counter()
-            b_min_x, b_min_y, b_max_x, b_max_y = macro_planner._block_core_bbox(
-                (bx, by), bay_blocks, margin=margin
-            )
-            blk_obstacles = {
-                pt
-                for pt in obstacles
-                if b_min_x <= pt[0] <= b_max_x and b_min_y <= pt[1] <= b_max_y
-            }
-            # Mask the 1-tile outer core ring except at allocated BlockPort core_pos terminals
-            for rx in range(b_min_x, b_max_x + 1):
-                blk_obstacles.add((rx, b_min_y))
-                blk_obstacles.add((rx, b_max_y))
-            for ry in range(b_min_y, b_max_y + 1):
-                blk_obstacles.add((b_min_x, ry))
-                blk_obstacles.add((b_max_x, ry))
-            for ns in blk_nets:
-                blk_obstacles.discard(ns.source)
-                blk_obstacles.discard(ns.sink)
-
-            blk_router = DualLaneMazeRouter(
-                min_x=b_min_x,
-                max_x=b_max_x,
-                min_y=b_min_y,
-                max_y=b_max_y,
-                engine=None,
-                prototypes=prototypes,
-                obstacles=blk_obstacles,
-                component_headings=merged_headings,
-                no_hood_tiles=port_no_hood_tiles,
-                fluid_port_approaches=fluid_port_approaches,
-            )
-            b_routes, b_entities, _ = blk_router.route(blk_nets, verify=False)
-            dt_blk = time.perf_counter() - t_blk
-            b_failed = [r for r in b_routes.values() if not r.is_success]
-            if dt_blk >= 0.5 or b_failed:
-                print(
-                    f"[def2bp]   block ({bx},{by}): {len(blk_nets)} nets in {dt_blk:.2f}s (failed={len(b_failed)})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            routes.update(b_routes)
-            all_routed_specs.extend(blk_nets)
-            for ent in b_entities:
-                epos = ent.get("position", {})
-                pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
-                entities_by_pos[pkey] = ent
-            if b_failed and strict_drc:
-                for f in b_failed[:25]:
-                    sys.stderr.write(
-                        f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
-                    )
-                raise ValueError(
-                    f"Stage 1 block ({bx},{by}) router failed on {len(b_failed)} net(s): "
-                    + ", ".join(r.net_name for r in b_failed[:5])
-                )
-
-        print(
-            f"[def2bp] Stage 1 completed in {time.perf_counter() - t_stage1_start:.2f}s",
-            file=sys.stderr,
-            flush=True,
-        )
-
-        # Stage 2: Route inter-block highway trunks through street channels, switchboxes, and matrix bays
-        if highway_specs:
-            t_stage2_start = time.perf_counter()
-            print(
-                f"[def2bp] Stage 2: routing {len(highway_specs)} highway nets across {grid_w}x{grid_h} street grid...",
-                file=sys.stderr,
-                flush=True,
-            )
-            hwy_obstacles: set[tuple[int, int]] = set()
-            for bx in range(grid_w):
-                for by in range(grid_h):
-                    for cx_tile in range(bx * 100 + margin, bx * 100 + 100 - margin):
-                        for cy_tile in range(by * 100 + margin, by * 100 + 100 - margin):
-                            hwy_obstacles.add((cx_tile, cy_tile))
-            for comp in def_data.get("components", []):
-                cx_t = round(comp["x"] * scale)
-                cy_t = round(comp["y"] * scale)
-                bx_c = cx_t // 100
-                by_c = cy_t // 100
-                if 0 <= bx_c < grid_w and 0 <= by_c < grid_h and 3 <= (cy_t % 100) <= 16:
-                    for nx_t in range(bx_c * 100 + margin, bx_c * 100 + 100 - margin):
-                        for ny_t in range(by_c * 100 + margin, by_c * 100 + 17):
-                            hwy_obstacles.discard((nx_t, ny_t))
-            hwy_obstacles.update(obstacles)
-            for ns in highway_specs:
-                hwy_obstacles.discard(ns.source)
-                hwy_obstacles.discard(ns.sink)
-
-            hwy_router = DualLaneMazeRouter(
-                min_x=hwy_min_x,
-                max_x=hwy_max_x,
-                min_y=hwy_min_y,
-                max_y=hwy_max_y,
-                engine=None,
-                prototypes=prototypes,
-                obstacles=hwy_obstacles,
-                component_headings=merged_headings,
-                no_hood_tiles=port_no_hood_tiles,
-                fluid_port_approaches=fluid_port_approaches,
-            )
-            h_routes, h_entities, _ = hwy_router.route(
-                highway_specs, max_iterations=60, verify=False
-            )
-            h_failed = [r for r in h_routes.values() if not r.is_success]
-            print(
-                f"[def2bp] Stage 2 completed in {time.perf_counter() - t_stage2_start:.2f}s (failed={len(h_failed)})",
-                file=sys.stderr,
-                flush=True,
-            )
-            routes.update(h_routes)
-            all_routed_specs.extend(highway_specs)
-            for ent in h_entities:
-                epos = ent.get("position", {})
-                pkey = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
-                entities_by_pos[pkey] = ent
-            if h_failed and strict_drc:
-                for f in h_failed[:25]:
-                    sys.stderr.write(
-                        f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
-                    )
-                raise ValueError(
-                    f"Stage 2 highway router failed on {len(h_failed)} net(s): "
-                    + ", ".join(r.net_name for r in h_failed[:5])
-                )
-
-        entities = list(entities_by_pos.values())
-        for idx, ent in enumerate(entities, start=1):
-            ent["entity_number"] = idx
-
-        failed = [res for res in routes.values() if not res.is_success]
-        verif_res = None
-        if engine is not None and entities and not failed:
-            t_verif = time.perf_counter()
-            verifier = NativeLayoutVerifier(engine, prototypes=prototypes)
-            verifier_nets = [
-                NetSpec(
-                    name=n.name,
-                    commodity=n.commodity,
-                    source_pos=(n.source[0] + 0.5, n.source[1] + 0.5),
-                    sink_pos=(n.sink[0] + 0.5, n.sink[1] + 0.5),
-                    is_fluid=n.is_fluid,
-                )
-                for n in net_specs
-            ]
-            verif_res = verifier.verify_blueprint(entities, nets=verifier_nets, ticks=60)
-            print(
-                f"[def2bp] NativeLayoutVerifier completed in {time.perf_counter() - t_verif:.2f}s",
-                file=sys.stderr,
-                flush=True,
-            )
-
-        placement.router_routes = routes
-        placement.router_net_specs = all_routed_specs
-        placement.router_verif_res = verif_res
     else:
-        router = DualLaneMazeRouter(
+        router = maze_router_mod.DualLaneMazeRouter(
             min_x=min_x,
             max_x=max_x,
             min_y=min_y,
             max_y=max_y,
-            engine=engine,
+            engine=resolved_engine,
             prototypes=prototypes,
             obstacles=obstacles,
             component_headings=component_headings,
             no_hood_tiles=pin_no_hood_tiles,
             fluid_port_approaches=fluid_port_approaches,
         )
-        routes, entities, verif_res = router.route(net_specs, verify=engine is not None)
-        placement.router_routes = routes
-        placement.router_net_specs = net_specs
-        placement.router_verif_res = verif_res
+        routes, entities, verif_res = router.route(net_specs, verify=resolved_engine is not None)
+        all_routed_specs = net_specs
 
-    if verif_res and not verif_res.is_valid:
-        for err in verif_res.lvs_errors:
-            sys.stderr.write(
-                f"factorilog [maze_router]: NATIVE LVS ERROR: {err.net_name}: {err.message}\n"
-            )
-        for drc in verif_res.drc_violations:
-            sys.stderr.write(
-                f"factorilog [maze_router]: NATIVE DRC ERROR: [{drc.code}] at {drc.position}: {drc.message}\n"
-            )
-    failed = [res for res in routes.values() if not res.is_success]
-    if failed:
-        for f in failed[:25]:
-            sys.stderr.write(
-                f"factorilog [maze_router]: NET ROUTE FAILED: {f.net_name}: {f.error_message}\n"
-            )
-        if strict_drc:
-            raise ValueError(
-                f"Router failed on {len(failed)} net(s): "
-                + ", ".join(r.net_name for r in failed[:5])
-            )
+    placement.__dict__["router_routes"] = routes
+    placement.__dict__["router_net_specs"] = all_routed_specs
+    placement.__dict__["router_verif_res"] = verif_res
+    _report_router_diagnostics(routes, verif_res, strict_drc)
 
     for ent in entities:
         placement.entities.append(ent)
-        epos = ent.get("position", {})
-        pos_key = (round(float(epos.get("x", 0.0)), 2), round(float(epos.get("y", 0.0)), 2))
+        ex, ey = _entity_xy(ent)
+        pos_key = (round(ex, COORD_PRECISION), round(ey, COORD_PRECISION))
         placement.occupied_positions.add(pos_key)
         placement.grid_entities[pos_key] = ent
 
-    net_surface_tiles: dict[str, dict[tuple[float, float], int]] = {}
-    tile_to_nets: dict[tuple[float, float], set[str]] = {}
-    for nname, route_res in routes.items():
-        base_name = base_net_name(nname)
-        net_surface_tiles.setdefault(base_name, {})
-        for node in route_res.nodes:
-            if node.z == 0:
-                k = (node.x + 0.5, node.y + 0.5)
-                net_surface_tiles[base_name][k] = node.heading
-                tile_to_nets.setdefault(k, set()).add(base_name)
-
+    net_surface_tiles, tile_to_nets = _build_surface_tile_maps(routes)
     all_pins = valid_in_pins | valid_out_pins
     return RouteResult(
         net_surface_tiles=net_surface_tiles,
@@ -792,585 +1157,650 @@ def route_with_maze_router(
     )
 
 
-def build_entities(
-    def_data: dict[str, Any],
-    netlist_data: dict[str, Any],
-    strict_drc: bool = True,
-    use_maze_router: bool = True,
-    engine: Any | None = None,
-) -> tuple[list[dict[str, Any]], list[list[int]]]:
-    """Build Factorio entities and wire connections from DEF and netlist data."""
-    def_data["_netlist_data"] = netlist_data
-
-    # 1. Untangle routing tracks (topological pin swaps and iterative geometric/physical loop)
-    untangle_def(def_data, netlist_data, pins_only=use_maze_router)
-
-    scale = 1.0 / float(def_data.get("units", 1000))
-
-    # 2. Place components, machines, and inserters
-    placement = place_components(def_data, netlist_data)
-    def_data["_placement"] = placement
-
-    fabric_entities: list[dict[str, Any]] = []
-    input_channel_entities: list[dict[str, Any]] = []
-    floorplan = None
-    chassis_base_entities: list[dict[str, Any]] = []
-    if def_data.get("blockages"):
-        try:
-            from foundry.chassis import CityBlockChassis
-            from foundry.macro_floorplan import InterBlockRoute, MacroFloorplanner
-        except ImportError:
-            from chassis import CityBlockChassis
-            from macro_floorplan import InterBlockRoute, MacroFloorplanner
-
-        units = float(def_data.get("units", 1000))
-        die_w = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[2] / units
-        die_h = def_data.get("die_area", [0, 0, 100 * units, 100 * units])[3] / units
-        grid_w = max(1, round(die_w / 100.0))
-        grid_h = max(1, round(die_h / 100.0))
-
-        chassis: CityBlockChassis | None = None
-        if grid_w * grid_h >= 4:
-            chassis = CityBlockChassis(pitch=100, channel_width=8, programmatic=True)
-        else:
-            bp_candidates = [
-                Path("cityblock.bp"),
-                Path(__file__).resolve().parent.parent / "cityblock.bp",
-                Path("/home/atv/src/factorilog/cityblock.bp"),
-            ]
-            for bp_cand in bp_candidates:
-                if bp_cand.is_file():
-                    try:
-                        chassis = CityBlockChassis.from_blueprint_file(bp_cand)
-                        break
-                    except Exception:
-                        pass
-            if chassis is None:
-                chassis = CityBlockChassis(
-                    pitch=100, core_width=94, core_height=94, channel_width=6
-                )
-
-        base_bp = chassis.emit_base_blueprint(grid_w, grid_h)
-        chassis_base_entities = base_bp.get("blueprint", {}).get("entities", [])
-        def_data["_chassis_tiles"] = base_bp.get("blueprint", {}).get("tiles", [])
-
-        if use_maze_router:
-            pin_coords = [
-                (
-                    math.floor(p.get("x", 0) * scale) + 0.5,
-                    math.floor(p.get("y", 0) * scale) + 0.5,
-                )
-                for p in def_data.get("pins", [])
-            ]
-            for be in chassis_base_entities:
-                if "position" not in be:
-                    continue
-                bpos = be.get("position", {})
-                bx = float(bpos.get("x", 0.0))
-                by = float(bpos.get("y", 0.0))
-                bname = be.get("name", "")
-                if grid_w * grid_h >= 4:
-                    is_corner_pole = (
-                        bname == "big-electric-pole"
-                        and (bx % 100.0) in (5.0, 95.0)
-                        and (by % 100.0) in (5.0, 95.0)
-                    )
-                    if bname != "radar" and not is_corner_pole:
-                        continue
-                elif bx <= 4.5 or bx >= die_w - 4.5 or by <= 4.5 or by >= die_h - 4.5:
-                    continue
-                if any(abs(bx - px) <= 3.5 and abs(by - py) <= 3.5 for px, py in pin_coords):
-                    continue
-                if bname == "big-electric-pole":
-                    for dx in (-0.5, 0.5):
-                        for dy in (-0.5, 0.5):
-                            placement.occupied_positions.add((round(bx + dx, 2), round(by + dy, 2)))
-                elif bname == "radar":
-                    for dx in (-1.0, 0.0, 1.0):
-                        for dy in (-1.0, 0.0, 1.0):
-                            placement.occupied_positions.add((round(bx + dx, 2), round(by + dy, 2)))
-                else:
-                    placement.occupied_positions.add((round(bx, 2), round(by, 2)))
-        else:
-            macro_planner = MacroFloorplanner(chassis=chassis)
-            floorplan = macro_planner.plan(netlist_data, grid_w=grid_w, grid_h=grid_h)
-            floorplan.routes.clear()
-            for ch in floorplan.channels.values():
-                ch.clear_allocations()
-            for inter in floorplan.intersections.values():
-                inter.clear()
-
-            inst_to_block: dict[str, tuple[int, int]] = {}
-            for iname, ent in placement.inst_to_entity.items():
-                pos = ent.get("position", {})
-                bx = int(float(pos.get("x", 0.0)) // 100.0)
-                by = int(float(pos.get("y", 0.0)) // 100.0)
-                inst_to_block[iname] = (bx, by)
-                floorplan.instance_to_block[iname] = (bx, by)
-
-            inst_to_cell = {i["name"]: i.get("cell", "") for i in netlist_data.get("instances", [])}
-            cell_table = netlist_data.get("cells", {})
-
-            for net in def_data.get("nets", []):
-                nname = net.get("name", "")
-                conns = net.get("connections", [])
-                blocks = {inst_to_block[iname] for iname, _ in conns if iname in inst_to_block}
-                if len(blocks) > 1:
-                    # Inter-block net: remove flat OpenROAD routing wires
-                    net["wires"] = []
-                    net["vias"] = []
-
-                    driver_inst = None
-                    sink_insts = []
-                    for iname, pin in conns:
-                        cell_id = inst_to_cell.get(iname, "")
-                        cell_meta = cell_table.get(cell_id, {})
-                        outs = cell_meta.get("outputs", [])
-                        clean_outs = {o.replace("_", "-") for o in outs} | set(outs)
-                        if (
-                            pin in clean_outs
-                            or pin.replace("_", "-") in clean_outs
-                            or pin in ("y", "y1", "y2", "out")
-                        ):
-                            driver_inst = iname
-                        else:
-                            sink_insts.append(iname)
-
-                    if driver_inst and sink_insts:
-                        s_blk = inst_to_block[driver_inst]
-                        t_blks = [inst_to_block[si] for si in sink_insts if si in inst_to_block]
-                        route = InterBlockRoute(
-                            net_name=nname,
-                            source_block=s_blk,
-                            target_blocks=t_blks,
-                            source_instance=driver_inst,
-                            target_instances=sink_insts,
-                        )
-                        floorplan.routes[nname] = route
-
-            # Route external inputs entering chassis grid
-            input_pin_nets = {
-                pin.get("net", pin.get("name", ""))
-                for pin in def_data.get("pins", [])
-                if pin.get("direction") == "INPUT"
-            }
-            for net in def_data.get("nets", []):
-                nname = net.get("name", "")
-                if nname not in input_pin_nets:
-                    continue
-                conns = net.get("connections", [])
-                has_pin = any(iname == "PIN" for iname, _ in conns)
-                if not has_pin:
-                    continue
-                sink_insts = [iname for iname, _ in conns if iname in inst_to_block]
-                if not sink_insts:
-                    continue
-                target_block = inst_to_block[sink_insts[0]]
-                if target_block[0] > 0:
-                    net["wires"] = []
-                    net["vias"] = []
-                    net_name = net.get("name", "")
-                    ch_x = target_block[0] * 100.0 - 1.5
-
-                    # Update pin position in def_data
-                    for pin in def_data.get("pins", []):
-                        if pin.get("net") == net_name or pin.get("name") == net_name:
-                            dbu = float(def_data.get("units", 1000))
-                            pin["x"] = int(ch_x * dbu - 500)
-                            pin["y"] = 0
-
-                    sink_ent = placement.inst_to_entity.get(sink_insts[0])
-                    if sink_ent:
-                        spos = sink_ent.get("position", {})
-                        sx = float(spos.get("x", 0.0))
-                        sy = float(spos.get("y", 0.0))
-                        target_x = sx - 1.0 if sink_ent.get("name") == "splitter" else sx - 0.5
-                        target_y = sy - 0.5 if sink_ent.get("name") == "splitter" else sy
-
-                        # Vertical channel belt from entrance to sink row
-                        cur_y = 0.5
-                        while cur_y < target_y:
-                            pos = {"x": ch_x, "y": cur_y}
-                            b_ent = {
-                                "name": "transport-belt",
-                                "position": pos,
-                                "direction": DIRECTION_SOUTH,
-                            }
-                            input_channel_entities.append(b_ent)
-                            placement.entities.append(b_ent)
-                            placement.occupied_positions.add((ch_x, cur_y))
-                            cur_y += 1.0
-
-                        # Turn East into target block
-                        cur_x = ch_x
-                        while cur_x <= target_x:
-                            pos = {"x": cur_x, "y": target_y}
-                            b_ent = {
-                                "name": "transport-belt",
-                                "position": pos,
-                                "direction": DIRECTION_EAST,
-                            }
-                            input_channel_entities.append(b_ent)
-                            placement.entities.append(b_ent)
-                            placement.occupied_positions.add((cur_x, target_y))
-                            cur_x += 1.0
-
-            fabric_entities = floorplan.emit_fabric_entities(placement=placement)
-            for fe in fabric_entities:
-                placement.entities.append(fe)
-                fpos = fe.get("position", {})
-                placement.occupied_positions.add(
-                    (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
-                )
-
-    # 3. Route nets with 3D multi-layer maze router
-    routes = route_with_maze_router(
-        def_data, netlist_data, placement, engine=engine, strict_drc=strict_drc
+def _select_cityblock_chassis(grid_w: int, grid_h: int, cfg: Def2BpConfig) -> CityBlockChassis:
+    pitch = cfg.block_pitch
+    if grid_w * grid_h >= MIN_PROGRAMMATIC_BLOCKS:
+        return CityBlockChassis(
+            pitch=pitch, channel_width=PROGRAMMATIC_CHANNEL_W, programmatic=True
+        )
+    repo_root = Path(__file__).resolve().parent.parent
+    for bp_cand in (Path(cfg.cityblock_filename), repo_root / cfg.cityblock_filename):
+        if bp_cand.is_file():
+            try:
+                return CityBlockChassis.from_blueprint_file(bp_cand)
+            except Exception:
+                pass
+    return CityBlockChassis(
+        pitch=pitch,
+        core_width=FALLBACK_CORE_DIM,
+        core_height=FALLBACK_CORE_DIM,
+        channel_width=FALLBACK_CHANNEL_W,
     )
 
-    if floorplan:
-        for fe in fabric_entities:
-            fpos = fe.get("position", {})
-            k = (round(float(fpos.get("x", 0.0)), 2), round(float(fpos.get("y", 0.0)), 2))
-            routes.tile_to_nets.setdefault(k, set())
-        for ie in input_channel_entities:
-            ipos = ie.get("position", {})
-            k = (round(float(ipos.get("x", 0.0)), 2), round(float(ipos.get("y", 0.0)), 2))
-            routes.tile_to_nets.setdefault(k, set())
 
-    # 3b. Insert inline pumps to segment overextended pipelines (<= 320 tiles)
-    insert_pipeline_pumps(placement, routes, def_data, netlist_data)
+def _chassis_entity_footprint(bname: str, bx: float, by: float) -> list[GridCoord]:
+    if bname == "big-electric-pole":
+        return [
+            (round(bx + dx, COORD_PRECISION), round(by + dy, COORD_PRECISION))
+            for dx in BIG_POLE_DELTAS
+            for dy in BIG_POLE_DELTAS
+        ]
+    if bname == "radar":
+        return [
+            (round(bx + dx, COORD_PRECISION), round(by + dy, COORD_PRECISION))
+            for dx in RADAR_DELTAS
+            for dy in RADAR_DELTAS
+        ]
+    return [(round(bx, COORD_PRECISION), round(by, COORD_PRECISION))]
 
-    # 4. Generate power distribution network (PDN)
-    pole_entities, mst_connections = generate_pdn(
-        placement.entities,
-        placement.occupied_positions,
-        routes.pin_tiles,
-        routes.valid_input_pins,
-        routes.valid_output_pins,
+
+def _should_skip_chassis_obstacle(
+    bname: str,
+    bx: float,
+    by: float,
+    is_multi: bool,
+    pitch: float,
+    die_w: float,
+    die_h: float,
+    pin_coords: Sequence[GridCoord],
+) -> bool:
+    if is_multi:
+        is_corner = (
+            bname == "big-electric-pole"
+            and (bx % pitch) in CORNER_POLE_MODS
+            and (by % pitch) in CORNER_POLE_MODS
+        )
+        if bname != "radar" and not is_corner:
+            return True
+    elif (
+        bx <= BORDER_POLE_MARGIN
+        or bx >= die_w - BORDER_POLE_MARGIN
+        or by <= BORDER_POLE_MARGIN
+        or by >= die_h - BORDER_POLE_MARGIN
+    ):
+        return True
+    return any(
+        abs(bx - px) <= PIN_CLEARANCE_RADIUS and abs(by - py) <= PIN_CLEARANCE_RADIUS
+        for px, py in pin_coords
     )
 
-    # 5. Sanity checks
-    collision_pairs = check_collisions(placement.entities)
-    if collision_pairs:
-        raise RuntimeError(
-            f"Collision check failed: {len(collision_pairs)} overlapping entity pairs detected: {collision_pairs[:10]}"
+
+def _register_chassis_router_obstacles(
+    def_data: JsonMap,
+    placement: PlacementResult,
+    chassis_base_entities: Sequence[EntityDict],
+    grid_w: int,
+    grid_h: int,
+    die_w: float,
+    die_h: float,
+    scale: float,
+    cfg: Def2BpConfig,
+) -> None:
+    pitch = float(cfg.block_pitch)
+    pin_coords = [
+        (
+            math.floor(_as_float(_as_map(p).get("x")) * scale) + TILE_HALF,
+            math.floor(_as_float(_as_map(p).get("y")) * scale) + TILE_HALF,
         )
+        for p in _as_list(def_data.get("pins"))
+    ]
+    is_multi = grid_w * grid_h >= MIN_PROGRAMMATIC_BLOCKS
+    for be in chassis_base_entities:
+        if "position" not in be:
+            continue
+        bx, by = _entity_xy(be)
+        bname = _as_str(be.get("name"))
+        if _should_skip_chassis_obstacle(bname, bx, by, is_multi, pitch, die_w, die_h, pin_coords):
+            continue
+        placement.occupied_positions.update(_chassis_entity_footprint(bname, bx, by))
 
-    unpaired_hoods = check_underground_pairing(placement.entities)
-    if unpaired_hoods:
-        raise RuntimeError(
-            f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected: {unpaired_hoods}"
-        )
 
-    # 6. Prune dead-end stub belts (only needed for legacy rasterizer)
-    if not use_maze_router:
-        entities = prune_dead_end_belts(placement.entities, def_data, netlist_data)
-    else:
-        entities = list(placement.entities)
+def _relocate_legacy_input_pin(
+    def_data: MutableJsonMap,
+    net_name: str,
+    ch_x: float,
+    dbu: float,
+) -> None:
+    for pin_obj in _as_list(def_data.get("pins")):
+        if isinstance(pin_obj, dict) and net_name in (pin_obj.get("net"), pin_obj.get("name")):
+            pin_obj["x"] = int(ch_x * dbu - PIN_DBU_SHIFT)
+            pin_obj["y"] = 0
 
-    # 6b. Merge chassis base entities before assigning entity numbers and running DRC
-    occupied_tiles: set[tuple[float, float]] = set()
-    if def_data.get("blockages"):
-        if not use_maze_router:
-            entities = jumper_belts_across_chassis_poles(entities, chassis_base_entities)
 
-        for e in entities:
-            pos = e.get("position", {})
-            ex = float(pos.get("x", 0.0))
-            ey = float(pos.get("y", 0.0))
-            ename = e.get("name", "")
-            w, h = entity_size(ename, e.get("direction", DIRECTION_NORTH))
-            min_tx = math.floor(ex - w / 2.0 - 1e-6)
-            max_tx = math.floor(ex + w / 2.0 - 1e-6)
-            min_ty = math.floor(ey - h / 2.0 - 1e-6)
-            max_ty = math.floor(ey + h / 2.0 - 1e-6)
-            for tx in range(min_tx, max_tx + 2):
-                for ty in range(min_ty, max_ty + 2):
-                    if max(ex - w / 2.0, tx) < min(ex + w / 2.0, tx + 1.0) and max(
-                        ey - h / 2.0, ty
-                    ) < min(ey + h / 2.0, ty + 1.0):
-                        occupied_tiles.add((round(tx + 0.5, 2), round(ty + 0.5, 2)))
-            occupied_tiles.add((round(ex, 2), round(ey, 2)))
+def _emit_legacy_l_channel_belts(
+    placement: PlacementResult,
+    ch_x: float,
+    target_x: float,
+    target_y: float,
+) -> list[EntityDict]:
+    emitted: list[EntityDict] = []
+    cur_y = TILE_HALF
+    while cur_y < target_y:
+        b_ent: EntityDict = {
+            "name": "transport-belt",
+            "position": {"x": ch_x, "y": cur_y},
+            "direction": DIRECTION_SOUTH,
+        }
+        emitted.append(b_ent)
+        placement.entities.append(b_ent)
+        placement.occupied_positions.add((ch_x, cur_y))
+        cur_y += 1.0
+    cur_x = ch_x
+    while cur_x <= target_x:
+        b_ent = {
+            "name": "transport-belt",
+            "position": {"x": cur_x, "y": target_y},
+            "direction": DIRECTION_EAST,
+        }
+        emitted.append(b_ent)
+        placement.entities.append(b_ent)
+        placement.occupied_positions.add((cur_x, target_y))
+        cur_x += 1.0
+    return emitted
 
-        lamp_pole_buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
-        for e in entities:
-            if "position" not in e:
-                continue
-            ename = e.get("name")
-            if ename == "big-electric-pole":
-                px, py = float(e["position"]["x"]), float(e["position"]["y"])
-                lamp_pole_buckets.setdefault((int(px // 4), int(py // 4)), []).append((px, py, 2.0))
-            elif ename == "medium-electric-pole":
-                px, py = float(e["position"]["x"]), float(e["position"]["y"])
-                lamp_pole_buckets.setdefault((int(px // 4), int(py // 4)), []).append((px, py, 3.5))
 
-        sorted_base_entities = sorted(
-            chassis_base_entities,
-            key=lambda item: 0 if item.get("name") == "big-electric-pole" else 1,
-        )
-        for be in sorted_base_entities:
-            if "position" not in be:
-                continue
-            bpos = be.get("position", {})
-            bx = float(bpos.get("x", 0.0))
-            by = float(bpos.get("y", 0.0))
-            bname = be.get("name", "")
-            b_tiles: list[tuple[float, float]] = []
-            if bname == "big-electric-pole":
-                b_tiles.extend(
-                    (round(bx + dx, 2), round(by + dy, 2))
-                    for dx in (-0.5, 0.5)
-                    for dy in (-0.5, 0.5)
-                )
-            elif bname == "radar":
-                b_tiles.extend(
-                    (round(bx + dx, 2), round(by + dy, 2))
-                    for dx in (-1.0, 0.0, 1.0)
-                    for dy in (-1.0, 0.0, 1.0)
-                )
-            else:
-                b_tiles.append((round(bx, 2), round(by, 2)))
+def _route_legacy_external_input_net(
+    net: MutableJsonMap,
+    def_data: MutableJsonMap,
+    placement: PlacementResult,
+    inst_to_block: Mapping[str, TileCoord],
+    cfg: Def2BpConfig,
+) -> list[EntityDict]:
+    conns = [_as_list(c) for c in _as_list(net.get("connections"))]
+    has_pin = any(len(c) >= 2 and _as_str(c[0]) == "PIN" for c in conns)
+    sink_insts = [_as_str(c[0]) for c in conns if len(c) >= 2 and _as_str(c[0]) in inst_to_block]
+    if not has_pin or not sink_insts or inst_to_block[sink_insts[0]][0] <= 0:
+        return []
+    sink_ent = placement.inst_to_entity.get(sink_insts[0])
+    if not sink_ent:
+        return []
 
-            if any(t in occupied_tiles for t in b_tiles):
-                continue
+    target_block = inst_to_block[sink_insts[0]]
+    net["wires"] = []
+    net["vias"] = []
+    ch_x = target_block[0] * float(cfg.block_pitch) - CHANNEL_IN_OFFSET
+    dbu = _as_float(def_data.get("units"), cfg.default_units)
+    _relocate_legacy_input_pin(def_data, _as_str(net.get("name")), ch_x, dbu)
 
-            if bname == "small-lamp":
-                bk_x, bk_y = int(bx // 4), int(by // 4)
-                has_pole = any(
-                    abs(px - bx) <= r and abs(py - by) <= r
-                    for dx_b in (-1, 0, 1)
-                    for dy_b in (-1, 0, 1)
-                    for px, py, r in lamp_pole_buckets.get((bk_x + dx_b, bk_y + dy_b), ())
-                )
-                if not has_pole:
-                    continue
+    sx, sy = _entity_xy(sink_ent)
+    is_spl = sink_ent.get("name") == "splitter"
+    target_x = sx - 1.0 if is_spl else sx - TILE_HALF
+    target_y = sy - TILE_HALF if is_spl else sy
+    return _emit_legacy_l_channel_belts(placement, ch_x, target_x, target_y)
 
-            for t in b_tiles:
-                occupied_tiles.add(t)
 
-            new_be = dict(be)
-            new_be.pop("neighbours", None)
-            new_be.pop("connections", None)
-            new_be.pop("entity_number", None)
-            entities.append(new_be)
-            if bname == "big-electric-pole":
-                lamp_pole_buckets.setdefault((int(bx // 4), int(by // 4)), []).append((bx, by, 2.0))
-            elif bname == "medium-electric-pole":
-                lamp_pole_buckets.setdefault((int(bx // 4), int(by // 4)), []).append((bx, by, 3.5))
-
-    grid_entities = {
-        (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e for e in entities
+def _classify_interblock_net(
+    net_obj: MutableJsonMap,
+    inst_to_block: Mapping[str, TileCoord],
+    inst_to_cell: Mapping[str, str],
+    cell_table: JsonMap,
+) -> InterBlockRoute | None:
+    conns = [_as_list(c) for c in _as_list(net_obj.get("connections"))]
+    blocks = {
+        inst_to_block[_as_str(c[0])]
+        for c in conns
+        if len(c) >= 2 and _as_str(c[0]) in inst_to_block
     }
-
-    # 7. Wire circuit telemetry and assign sequential entity numbers
-    wires = wire_telemetry(
-        entities,
-        netlist_data,
-        placement.inst_to_entity,
-        routes.net_surface_tiles,
-        grid_entities,
-        mst_connections,
-        pole_entities,
+    if len(blocks) <= 1:
+        return None
+    net_obj["wires"] = []
+    net_obj["vias"] = []
+    driver_inst: str | None = None
+    sink_insts: list[str] = []
+    for c in conns:
+        if len(c) < 2:
+            continue
+        iname, pin = _as_str(c[0]), _as_str(c[1])
+        cell_meta = _as_map(cell_table.get(inst_to_cell.get(iname, "")))
+        outs = [_as_str(o) for o in _as_list(cell_meta.get("outputs"))]
+        clean_outs = {o.replace("_", "-") for o in outs} | set(outs)
+        if pin in clean_outs or pin.replace("_", "-") in clean_outs or pin in DRIVER_PIN_NAMES:
+            driver_inst = iname
+        else:
+            sink_insts.append(iname)
+    if not (driver_inst and sink_insts):
+        return None
+    nname = _as_str(net_obj.get("name"))
+    return InterBlockRoute(
+        net_name=nname,
+        source_block=inst_to_block[driver_inst],
+        target_blocks=[inst_to_block[si] for si in sink_insts if si in inst_to_block],
+        source_instance=driver_inst,
+        target_instances=sink_insts,
     )
 
-    if def_data.get("blockages"):
-        # Wire chassis big electric poles together into a unified power and circuit bus grid
-        big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
-        seen_pairs: set[tuple[int, int]] = set()
-        if wires is None:
-            wires = []
 
-        for i, bp1 in enumerate(big_poles):
-            p1_num = int(bp1.get("entity_number", 0))
-            p1_pos = bp1.get("position", {})
-            x1, y1 = float(p1_pos.get("x", 0.0)), float(p1_pos.get("y", 0.0))
-            for bp2 in big_poles[i + 1 :]:
-                p2_num = int(bp2.get("entity_number", 0))
-                p2_pos = bp2.get("position", {})
-                x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
-                dx = abs(x1 - x2)
-                dy = abs(y1 - y2)
-                dist = math.hypot(dx, dy)
-                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
-                    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
-                    if pair not in seen_pairs:
-                        seen_pairs.add(pair)
-                        # 5: copper wire, 1: red wire, 2: green wire
-                        wires.append([pair[0], 5, pair[1], 5])
-                        wires.append([pair[0], 1, pair[1], 1])
-                        wires.append([pair[0], 2, pair[1], 2])
+def _plan_legacy_macro_floorplan(
+    def_data: MutableJsonMap,
+    netlist_data: JsonMap,
+    placement: PlacementResult,
+    chassis: CityBlockChassis,
+    grid_w: int,
+    grid_h: int,
+    cfg: Def2BpConfig,
+) -> tuple[object, list[EntityDict], list[EntityDict]]:
+    macro_planner = MacroFloorplanner(chassis=chassis)
+    floorplan = macro_planner.plan(dict(netlist_data), grid_w=grid_w, grid_h=grid_h)
+    floorplan.routes.clear()
+    for ch in floorplan.channels.values():
+        ch.clear_allocations()
+    for inter in floorplan.intersections.values():
+        inter.clear()
 
-        # Connect medium electric poles to the nearest big electric pole within reach (<= 9.0 tiles)
-        med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
-        for mp in med_poles:
-            mp_num = int(mp.get("entity_number", 0))
-            mp_pos = mp.get("position", {})
-            mx, my = float(mp_pos.get("x", 0.0)), float(mp_pos.get("y", 0.0))
-            best_d = float("inf")
-            best_bp = None
-            for bp in big_poles:
-                bp_pos = bp.get("position", {})
-                bx, by = float(bp_pos.get("x", 0.0)), float(bp_pos.get("y", 0.0))
-                d = math.hypot(mx - bx, my - by)
-                if d < best_d:
-                    best_d = d
-                    best_bp = bp
-            if best_bp is not None and best_d <= 9.0:
-                bp_num = int(best_bp.get("entity_number", 0))
-                pair = (min(mp_num, bp_num), max(mp_num, bp_num))
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    wires.append([pair[0], 5, pair[1], 5])
+    pitch = float(cfg.block_pitch)
+    inst_to_block: dict[str, TileCoord] = {}
+    for iname, ent in placement.inst_to_entity.items():
+        ex, ey = _entity_xy(ent)
+        blk = (int(ex // pitch), int(ey // pitch))
+        inst_to_block[iname] = blk
+        floorplan.instance_to_block[iname] = blk
 
-        # Bridge any disconnected pole component to the main electric pole network
-        if big_poles or med_poles:
-            copper_adj: dict[int, set[int]] = {}
-            for w_edge in wires:
-                if len(w_edge) >= 4 and int(w_edge[1]) == 5 and int(w_edge[3]) == 5:
-                    u_id, v_id = int(w_edge[0]), int(w_edge[2])
-                    copper_adj.setdefault(u_id, set()).add(v_id)
-                    copper_adj.setdefault(v_id, set()).add(u_id)
+    inst_to_cell = {
+        _as_str(_as_map(i).get("name")): _as_str(_as_map(i).get("cell"))
+        for i in _as_list(netlist_data.get("instances"))
+    }
+    cell_table = _as_map(netlist_data.get("cells"))
+    input_pin_nets = {
+        _as_str(_as_map(p).get("net"), _as_str(_as_map(p).get("name")))
+        for p in _as_list(def_data.get("pins"))
+        if _as_map(p).get("direction") == "INPUT"
+    }
+    input_channel_entities: list[EntityDict] = []
 
-            all_pole_by_num = {int(p.get("entity_number", 0)): p for p in big_poles + med_poles}
-            visited_p: set[int] = set()
-            reached: set[int] = set()
-            for start_id in all_pole_by_num:
-                if start_id in visited_p:
-                    continue
-                comp_ids: set[int] = {start_id}
-                visited_p.add(start_id)
-                queue = [start_id]
-                while queue:
-                    curr_id = queue.pop()
-                    for nxt_id in copper_adj.get(curr_id, ()):
-                        if nxt_id in all_pole_by_num and nxt_id not in visited_p:
-                            visited_p.add(nxt_id)
-                            comp_ids.add(nxt_id)
-                            queue.append(nxt_id)
-                if len(comp_ids) > len(reached):
-                    reached = comp_ids
+    for net_obj in _as_list(def_data.get("nets")):
+        if not isinstance(net_obj, dict):
+            continue
+        ib_route = _classify_interblock_net(net_obj, inst_to_block, inst_to_cell, cell_table)
+        if ib_route is not None:
+            floorplan.routes[ib_route.net_name] = ib_route
+        if _as_str(net_obj.get("name")) in input_pin_nets:
+            input_channel_entities.extend(
+                _route_legacy_external_input_net(net_obj, def_data, placement, inst_to_block, cfg)
+            )
 
-            for px, py in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
-                p_pt = (round(math.floor(px) + 0.5, 2), round(math.floor(py) + 0.5, 2))
-                occupied_tiles.add(p_pt)
-                for k in (1, 2, 3):
-                    occupied_tiles.add((round(p_pt[0] - k, 2), p_pt[1]))
-                    occupied_tiles.add((round(p_pt[0] + k, 2), p_pt[1]))
-                    occupied_tiles.add((p_pt[0], round(p_pt[1] - k, 2)))
-                    occupied_tiles.add((p_pt[0], round(p_pt[1] + k, 2)))
-            unreached_nums = set(all_pole_by_num.keys()) - reached
-            while unreached_nums:
-                best_pair_poles: tuple[dict[str, Any], dict[str, Any]] | None = None
-                best_dist = float("inf")
-                for u_num in unreached_nums:
-                    u_p = all_pole_by_num[u_num]
-                    ux = float(u_p["position"]["x"])
-                    uy = float(u_p["position"]["y"])
-                    for v_num in reached:
-                        v_p = all_pole_by_num[v_num]
-                        vx = float(v_p["position"]["x"])
-                        vy = float(v_p["position"]["y"])
-                        d = math.hypot(ux - vx, uy - vy)
-                        if d < best_dist:
-                            best_dist = d
-                            best_pair_poles = (u_p, v_p)
+    fabric_entities = floorplan.emit_fabric_entities(placement=placement)
+    for fe in fabric_entities:
+        placement.entities.append(fe)
+        fx, fy = _entity_xy(fe)
+        placement.occupied_positions.add((round(fx, COORD_PRECISION), round(fy, COORD_PRECISION)))
+    return floorplan, fabric_entities, input_channel_entities
 
-                if best_pair_poles is None:
-                    break
-                u_p, v_p = best_pair_poles
-                ux, uy = float(u_p["position"]["x"]), float(u_p["position"]["y"])
-                vx, vy = float(v_p["position"]["x"]), float(v_p["position"]["y"])
-                cur_x, cur_y = vx, vy
-                prev_num = int(v_p["entity_number"])
-                max_final_reach = (
-                    30.0
-                    if (
-                        v_p.get("name") == "big-electric-pole"
-                        and u_p.get("name") == "big-electric-pole"
-                    )
-                    else 9.0
+
+def _mark_entity_occupied_tiles(
+    ex: float,
+    ey: float,
+    w: float,
+    h: float,
+    occupied_tiles: set[GridCoord],
+) -> None:
+    half_w, half_h = w / HALF_DIVISOR, h / HALF_DIVISOR
+    min_tx = math.floor(ex - half_w - BOX_EPSILON)
+    max_tx = math.floor(ex + half_w - BOX_EPSILON)
+    min_ty = math.floor(ey - half_h - BOX_EPSILON)
+    max_ty = math.floor(ey + half_h - BOX_EPSILON)
+    for tx in range(min_tx, max_tx + 2):
+        for ty in range(min_ty, max_ty + 2):
+            overlaps_x = max(ex - half_w, tx) < min(ex + half_w, tx + 1.0)
+            overlaps_y = max(ey - half_h, ty) < min(ey + half_h, ty + 1.0)
+            if overlaps_x and overlaps_y:
+                occupied_tiles.add(
+                    (round(tx + TILE_HALF, COORD_PRECISION), round(ty + TILE_HALF, COORD_PRECISION))
                 )
-                while math.hypot(ux - cur_x, uy - cur_y) > (
-                    max_final_reach if prev_num == int(v_p["entity_number"]) else 9.0
-                ):
-                    best_cand: tuple[float, float] | None = None
-                    best_rem = float("inf")
-                    base_ix = math.floor(cur_x)
-                    base_iy = math.floor(cur_y)
-                    for dx in range(-9, 10):
-                        for dy in range(-9, 10):
-                            cand_pt = (round(base_ix + dx + 0.5, 2), round(base_iy + dy + 0.5))
-                            if cand_pt in occupied_tiles:
-                                continue
-                            step_d = math.hypot(cand_pt[0] - cur_x, cand_pt[1] - cur_y)
-                            if step_d < 1.0 or step_d > 9.0:
-                                continue
-                            rem_d = math.hypot(ux - cand_pt[0], uy - cand_pt[1])
-                            if rem_d < best_rem:
-                                best_rem = rem_d
-                                best_cand = cand_pt
-                    if best_cand is None:
-                        break
-                    occupied_tiles.add(best_cand)
-                    new_num = len(entities) + 1
-                    bridge_pole = {
-                        "name": "medium-electric-pole",
-                        "position": {"x": best_cand[0], "y": best_cand[1]},
-                        "entity_number": new_num,
-                    }
-                    entities.append(bridge_pole)
-                    all_pole_by_num[new_num] = bridge_pole
-                    reached.add(new_num)
-                    wires.append([min(prev_num, new_num), 5, max(prev_num, new_num), 5])
-                    prev_num = new_num
-                    cur_x, cur_y = best_cand[0], best_cand[1]
+    occupied_tiles.add((round(ex, COORD_PRECISION), round(ey, COORD_PRECISION)))
 
-                u_num = int(u_p["entity_number"])
-                wires.append([min(prev_num, u_num), 5, max(prev_num, u_num), 5])
-                copper_adj.setdefault(prev_num, set()).add(u_num)
-                copper_adj.setdefault(u_num, set()).add(prev_num)
-                bfs_q = [u_num]
-                reached.add(u_num)
-                while bfs_q:
-                    c_id = bfs_q.pop()
-                    for n_id in copper_adj.get(c_id, ()):
-                        if n_id not in reached:
-                            reached.add(n_id)
-                            bfs_q.append(n_id)
-                unreached_nums -= reached
 
-    # 8. Physical Design Rule Check (DRC)
-    def _net_fluid_comm(n: str) -> str | None:
-        c = n.split("__")[0]
-        if c in placement.fluids:
-            return c
-        c_dash = c.replace("_", "-")
-        if c_dash in placement.fluids:
-            return c_dash
+def _add_pole_to_lamp_buckets(
+    ename: str,
+    ex: float,
+    ey: float,
+    lamp_pole_buckets: dict[TileCoord, list[tuple[float, float, float]]],
+    cfg: Def2BpConfig,
+) -> None:
+    if ename not in ("big-electric-pole", "medium-electric-pole"):
+        return
+    is_big = ename == "big-electric-pole"
+    r = cfg.big_pole_supply_radius if is_big else cfg.med_pole_supply_radius
+    bkey = (int(ex // LAMP_BUCKET_STEP), int(ey // LAMP_BUCKET_STEP))
+    lamp_pole_buckets.setdefault(bkey, []).append((ex, ey, r))
+
+
+def _collect_occupied_tiles_and_pole_buckets(
+    entities: Sequence[EntityDict],
+    cfg: Def2BpConfig,
+) -> tuple[set[GridCoord], dict[TileCoord, list[tuple[float, float, float]]]]:
+    occupied_tiles: set[GridCoord] = set()
+    lamp_pole_buckets: dict[TileCoord, list[tuple[float, float, float]]] = {}
+    for e in entities:
+        if "position" not in e:
+            continue
+        ex, ey = _entity_xy(e)
+        ename = _as_str(e.get("name"))
+        w, h = entity_size(ename, _as_int(e.get("direction"), DIRECTION_NORTH))
+        _mark_entity_occupied_tiles(ex, ey, w, h, occupied_tiles)
+        _add_pole_to_lamp_buckets(ename, ex, ey, lamp_pole_buckets, cfg)
+    return occupied_tiles, lamp_pole_buckets
+
+
+def _is_lamp_near_pole(
+    bx: float,
+    by: float,
+    lamp_pole_buckets: Mapping[TileCoord, Sequence[tuple[float, float, float]]],
+) -> bool:
+    bk_x, bk_y = int(bx // LAMP_BUCKET_STEP), int(by // LAMP_BUCKET_STEP)
+    return any(
+        abs(px - bx) <= r and abs(py - by) <= r
+        for dx_b in NEIGHBOR_BUCKET_DELTAS
+        for dy_b in NEIGHBOR_BUCKET_DELTAS
+        for px, py, r in lamp_pole_buckets.get((bk_x + dx_b, bk_y + dy_b), ())
+    )
+
+
+def _merge_chassis_base_entities(
+    entities: list[EntityDict],
+    chassis_base_entities: Sequence[EntityDict],
+    use_maze_router: bool,
+    cfg: Def2BpConfig,
+) -> tuple[list[EntityDict], set[GridCoord]]:
+    if not use_maze_router:
+        entities = jumper_belts_across_chassis_poles(entities, chassis_base_entities, cfg=cfg)
+    occupied_tiles, lamp_pole_buckets = _collect_occupied_tiles_and_pole_buckets(entities, cfg)
+    big_first = [e for e in chassis_base_entities if e.get("name") == "big-electric-pole"]
+    other_base = [e for e in chassis_base_entities if e.get("name") != "big-electric-pole"]
+    for be in [*big_first, *other_base]:
+        if "position" not in be:
+            continue
+        bx, by = _entity_xy(be)
+        bname = _as_str(be.get("name"))
+        b_tiles = _chassis_entity_footprint(bname, bx, by)
+        if any(t in occupied_tiles for t in b_tiles):
+            continue
+        if bname == "small-lamp" and not _is_lamp_near_pole(bx, by, lamp_pole_buckets):
+            continue
+        occupied_tiles.update(b_tiles)
+        new_be = {
+            k: v for k, v in be.items() if k not in ("neighbours", "connections", "entity_number")
+        }
+        entities.append(new_be)
+        _add_pole_to_lamp_buckets(bname, bx, by, lamp_pole_buckets, cfg)
+    return entities, occupied_tiles
+
+
+def _try_wire_big_pole_pair(
+    bp1: EntityDict,
+    bp2: EntityDict,
+    wires: list[list[int]],
+    seen_pairs: set[TileCoord],
+    max_big_dist: float,
+) -> None:
+    x1, y1 = _entity_xy(bp1)
+    x2, y2 = _entity_xy(bp2)
+    dx, dy = abs(x1 - x2), abs(y1 - y2)
+    is_aligned = dx < POLE_ALIGN_TOLERANCE or dy < POLE_ALIGN_TOLERANCE
+    if math.hypot(dx, dy) > max_big_dist or not is_aligned:
+        return
+    p1_num, p2_num = _as_int(bp1.get("entity_number")), _as_int(bp2.get("entity_number"))
+    pair = (min(p1_num, p2_num), max(p1_num, p2_num))
+    if pair in seen_pairs:
+        return
+    seen_pairs.add(pair)
+    wires.extend(
+        [[pair[0], wid, pair[1], wid] for wid in (WIRE_COPPER_ID, WIRE_RED_ID, WIRE_GREEN_ID)]
+    )
+
+
+def _connect_aligned_big_poles(
+    big_poles: Sequence[EntityDict],
+    wires: list[list[int]],
+    seen_pairs: set[TileCoord],
+    max_big_dist: float,
+) -> None:
+    for i, bp1 in enumerate(big_poles):
+        for bp2 in big_poles[i + 1 :]:
+            _try_wire_big_pole_pair(bp1, bp2, wires, seen_pairs, max_big_dist)
+
+
+def _wire_chassis_big_and_medium_poles(
+    entities: Sequence[EntityDict],
+    wires: list[list[int]],
+    cfg: Def2BpConfig,
+) -> tuple[list[EntityDict], list[EntityDict]]:
+    big_poles = [e for e in entities if e.get("name") == "big-electric-pole"]
+    med_poles = [e for e in entities if e.get("name") == "medium-electric-pole"]
+    seen_pairs: set[TileCoord] = set()
+    _connect_aligned_big_poles(
+        big_poles, wires, seen_pairs, cfg.big_pole_wire_reach + POLE_REACH_SLACK
+    )
+    if not big_poles:
+        return big_poles, med_poles
+
+    for mp in med_poles:
+        mp_num = _as_int(mp.get("entity_number"))
+        mx, my = _entity_xy(mp)
+        best_bp = min(
+            big_poles, key=lambda bp: math.hypot(mx - _entity_xy(bp)[0], my - _entity_xy(bp)[1])
+        )
+        bx, by = _entity_xy(best_bp)
+        if math.hypot(mx - bx, my - by) <= cfg.med_pole_wire_reach:
+            bp_num = _as_int(best_bp.get("entity_number"))
+            pair = (min(mp_num, bp_num), max(mp_num, bp_num))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                wires.append([pair[0], WIRE_COPPER_ID, pair[1], WIRE_COPPER_ID])
+    return big_poles, med_poles
+
+
+def _bfs_pole_component(
+    start_id: int,
+    all_pole_by_num: Mapping[int, EntityDict],
+    copper_adj: Mapping[int, set[int]],
+    visited: set[int],
+) -> set[int]:
+    comp_ids = {start_id}
+    visited.add(start_id)
+    queue = [start_id]
+    while queue:
+        for nxt_id in copper_adj.get(queue.pop(), ()):
+            if nxt_id in all_pole_by_num and nxt_id not in visited:
+                visited.add(nxt_id)
+                comp_ids.add(nxt_id)
+                queue.append(nxt_id)
+    return comp_ids
+
+
+def _find_largest_pole_component(
+    all_pole_by_num: Mapping[int, EntityDict],
+    copper_adj: Mapping[int, set[int]],
+) -> set[int]:
+    visited: set[int] = set()
+    largest: set[int] = set()
+    for start_id in all_pole_by_num:
+        if start_id not in visited:
+            comp_ids = _bfs_pole_component(start_id, all_pole_by_num, copper_adj, visited)
+            if len(comp_ids) > len(largest):
+                largest = comp_ids
+    return largest
+
+
+def _step_bridge_pole_toward(
+    cur_x: float,
+    cur_y: float,
+    ux: float,
+    uy: float,
+    occupied_tiles: set[GridCoord],
+    med_reach: float,
+) -> GridCoord | None:
+    base_ix, base_iy = math.floor(cur_x), math.floor(cur_y)
+    reach_int = int(med_reach)
+    candidates = [
+        (
+            round(base_ix + dx + TILE_HALF, COORD_PRECISION),
+            round(base_iy + dy + TILE_HALF, COORD_PRECISION),
+        )
+        for dx in range(-reach_int, reach_int + 1)
+        for dy in range(-reach_int, reach_int + 1)
+    ]
+    valid = [
+        pt
+        for pt in candidates
+        if pt not in occupied_tiles and 1.0 <= math.hypot(pt[0] - cur_x, pt[1] - cur_y) <= med_reach
+    ]
+    if not valid:
         return None
+    return min(valid, key=lambda pt: math.hypot(ux - pt[0], uy - pt[1]))
 
+
+def _build_copper_adjacency(wires: Sequence[Sequence[int]]) -> dict[int, set[int]]:
+    copper_adj: dict[int, set[int]] = {}
+    for w_edge in wires:
+        if (
+            len(w_edge) >= WIRE_EDGE_LEN
+            and int(w_edge[WIRE_PORT_A_IDX]) == WIRE_COPPER_ID
+            and int(w_edge[WIRE_PORT_B_IDX]) == WIRE_COPPER_ID
+        ):
+            u_id, v_id = int(w_edge[0]), int(w_edge[WIRE_NODE_B_IDX])
+            copper_adj.setdefault(u_id, set()).add(v_id)
+            copper_adj.setdefault(v_id, set()).add(u_id)
+    return copper_adj
+
+
+def _reserve_pin_guard_tiles(routes: RouteResult, occupied_tiles: set[GridCoord]) -> None:
+    for px, py in routes.pin_tiles | routes.valid_input_pins | routes.valid_output_pins:
+        p_pt = (
+            round(math.floor(px) + TILE_HALF, COORD_PRECISION),
+            round(math.floor(py) + TILE_HALF, COORD_PRECISION),
+        )
+        occupied_tiles.add(p_pt)
+        for k in PIN_GUARD_OFFSETS:
+            occupied_tiles.add((round(p_pt[0] - k, COORD_PRECISION), p_pt[1]))
+            occupied_tiles.add((round(p_pt[0] + k, COORD_PRECISION), p_pt[1]))
+            occupied_tiles.add((p_pt[0], round(p_pt[1] - k, COORD_PRECISION)))
+            occupied_tiles.add((p_pt[0], round(p_pt[1] + k, COORD_PRECISION)))
+
+
+def _place_intermediate_bridge_poles(
+    u_p: EntityDict,
+    v_p: EntityDict,
+    v_num: int,
+    entities: list[EntityDict],
+    wires: list[list[int]],
+    all_pole_by_num: dict[int, EntityDict],
+    reached: set[int],
+    occupied_tiles: set[GridCoord],
+    cfg: Def2BpConfig,
+) -> int:
+    ux, uy = _entity_xy(u_p)
+    cur_x, cur_y = _entity_xy(v_p)
+    prev_num = v_num
+    both_big = v_p.get("name") == "big-electric-pole" and u_p.get("name") == "big-electric-pole"
+    cur_reach = cfg.big_pole_wire_reach if both_big else cfg.med_pole_wire_reach
+    while math.hypot(ux - cur_x, uy - cur_y) > cur_reach:
+        best_cand = _step_bridge_pole_toward(
+            cur_x, cur_y, ux, uy, occupied_tiles, cfg.med_pole_wire_reach
+        )
+        if best_cand is None:
+            break
+        occupied_tiles.add(best_cand)
+        new_num = len(entities) + 1
+        bridge_pole: EntityDict = {
+            "name": "medium-electric-pole",
+            "position": {"x": best_cand[0], "y": best_cand[1]},
+            "entity_number": new_num,
+        }
+        entities.append(bridge_pole)
+        all_pole_by_num[new_num] = bridge_pole
+        reached.add(new_num)
+        wires.append(
+            [min(prev_num, new_num), WIRE_COPPER_ID, max(prev_num, new_num), WIRE_COPPER_ID]
+        )
+        prev_num = new_num
+        cur_x, cur_y = best_cand
+        cur_reach = cfg.med_pole_wire_reach
+    return prev_num
+
+
+def _bridge_disconnected_chassis_poles(
+    entities: list[EntityDict],
+    wires: list[list[int]],
+    big_poles: Sequence[EntityDict],
+    med_poles: Sequence[EntityDict],
+    routes: RouteResult,
+    occupied_tiles: set[GridCoord],
+    cfg: Def2BpConfig,
+) -> None:
+    if not big_poles and not med_poles:
+        return
+    copper_adj = _build_copper_adjacency(wires)
+    all_pole_by_num = {_as_int(p.get("entity_number")): p for p in [*big_poles, *med_poles]}
+    reached = _find_largest_pole_component(all_pole_by_num, copper_adj)
+    _reserve_pin_guard_tiles(routes, occupied_tiles)
+
+    unreached_nums = set(all_pole_by_num.keys()) - reached
+    while unreached_nums and reached:
+        u_num, v_num = min(
+            ((u, v) for u in unreached_nums for v in reached),
+            key=lambda pair: math.hypot(
+                _entity_xy(all_pole_by_num[pair[0]])[0] - _entity_xy(all_pole_by_num[pair[1]])[0],
+                _entity_xy(all_pole_by_num[pair[0]])[1] - _entity_xy(all_pole_by_num[pair[1]])[1],
+            ),
+        )
+        prev_num = _place_intermediate_bridge_poles(
+            all_pole_by_num[u_num],
+            all_pole_by_num[v_num],
+            v_num,
+            entities,
+            wires,
+            all_pole_by_num,
+            reached,
+            occupied_tiles,
+            cfg,
+        )
+        wires.append([min(prev_num, u_num), WIRE_COPPER_ID, max(prev_num, u_num), WIRE_COPPER_ID])
+        copper_adj.setdefault(prev_num, set()).add(u_num)
+        copper_adj.setdefault(u_num, set()).add(prev_num)
+        _bfs_pole_component(u_num, all_pole_by_num, copper_adj, reached)
+        unreached_nums -= reached
+
+
+def _net_fluid_commodity(net_name: str, fluids: set[str]) -> str | None:
+    c = net_name.split("__")[0]
+    if c in fluids:
+        return c
+    c_dash = c.replace("_", "-")
+    return c_dash if c_dash in fluids else None
+
+
+def _run_drc_and_verify(
+    entities: list[EntityDict],
+    wires: list[list[int]],
+    routes: RouteResult,
+    placement: PlacementResult,
+    def_data: JsonMap,
+    netlist_data: JsonMap,
+    scale: float,
+    strict_drc: bool,
+) -> None:
     remaining_conflicts = [
         pos
         for pos, nets in routes.tile_to_nets.items()
         if (
             len(nets) > 1
             and not (
-                all(_net_fluid_comm(n) is not None for n in nets)
-                and len({_net_fluid_comm(n) for n in nets}) == 1
+                all(_net_fluid_commodity(n, placement.fluids) is not None for n in nets)
+                and len({_net_fluid_commodity(n, placement.fluids) for n in nets}) == 1
             )
         )
         or pos in routes.adjacent_fluid_conflicts
     ]
+    pins = [_as_map(p) for p in _as_list(def_data.get("pins"))]
     drc_in_pins = [
-        (pin["x"] * scale, pin["y"] * scale)
-        for pin in def_data.get("pins", [])
-        if pin.get("direction") == "INPUT"
+        (_as_float(p.get("x")) * scale, _as_float(p.get("y")) * scale)
+        for p in pins
+        if p.get("direction") == "INPUT"
     ]
     drc_out_pins = [
-        (pin["x"] * scale, pin["y"] * scale)
-        for pin in def_data.get("pins", [])
-        if pin.get("direction") == "OUTPUT"
+        (_as_float(p.get("x")) * scale, _as_float(p.get("y")) * scale)
+        for p in pins
+        if p.get("direction") == "OUTPUT"
     ]
     drc = BeltDrcChecker()
     violations = drc.check_entities(
@@ -1383,216 +1813,306 @@ def build_entities(
         fluids=placement.fluids,
     )
     if def_data.get("_macro_floorplan") is not None:
+        raw_hwy = _as_list(def_data.get("_highway_specs"))
+        hwy_specs = [s for s in raw_hwy if isinstance(s, RouterNetSpec)]
+        raw_bays = _as_list(def_data.get("_bay_blocks"))
+        bay_set: set[TileCoord] = {
+            (_as_int(b[0]), _as_int(b[1])) for b in raw_bays if isinstance(b, tuple) and len(b) == 2
+        }
         violations.extend(
             drc.check_chassis_matrix_discipline(
                 entities=entities,
                 macro_floorplan=def_data["_macro_floorplan"],
                 router_routes=getattr(placement, "router_routes", None),
-                highway_specs=def_data.get("_highway_specs"),
-                def_data=def_data,
-                netlist_data=netlist_data,
-                bay_blocks=def_data.get("_bay_blocks"),
+                highway_specs=hwy_specs,
+                def_data=dict(def_data),
+                netlist_data=dict(netlist_data),
+                bay_blocks=bay_set,
             )
         )
-    if violations:
-        for v in violations:
-            sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")
-        if strict_drc:
-            fatal = [v for v in violations if v.severity == "ERROR"]
-            if fatal:
-                raise ValueError(f"Physical DRC failed with {len(fatal)} violation(s)")
+    for v in violations:
+        sys.stderr.write(f"DRC {v.severity}: [{v.code}] at ({v.x}, {v.y}): {v.message}\n")
+    if not strict_drc:
+        return
 
-    if strict_drc:
-        router_routes = getattr(placement, "router_routes", None) or {}
-        failed_routes = [r for r in router_routes.values() if not r.is_success]
-        if failed_routes:
-            raise ValueError(
-                f"Router failed on {len(failed_routes)} net(s): "
-                + ", ".join(r.net_name for r in failed_routes[:5])
+    fatal = [v for v in violations if v.severity == "ERROR"]
+    if fatal:
+        raise ValueError(f"Physical DRC failed with {len(fatal)} violation(s)")
+
+    router_routes = getattr(placement, "router_routes", None) or {}
+    _check_and_raise_failed_routes(router_routes, strict_drc=True, prefix="Router")
+
+    verif_res = getattr(placement, "router_verif_res", None)
+    if verif_res is not None and not getattr(verif_res, "is_valid", True):
+        lvs_cnt = len(getattr(verif_res, "lvs_errors", ()))
+        drc_cnt = len(getattr(verif_res, "drc_violations", ()))
+        raise ValueError(
+            f"Native router verification failed with {lvs_cnt} LVS error(s) and {drc_cnt} DRC violation(s)"
+        )
+
+
+def _setup_blockage_chassis(
+    def_data: MutableJsonMap,
+    netlist_data: JsonMap,
+    placement: PlacementResult,
+    use_maze_router: bool,
+    units: float,
+    scale: float,
+    cfg: Def2BpConfig,
+) -> tuple[object | None, list[EntityDict], list[EntityDict], list[EntityDict]]:
+    die_area = _parse_die_area(def_data, units, cfg)
+    die_w, die_h = die_area[DIE_X_MAX_IDX] / units, die_area[DIE_Y_MAX_IDX] / units
+    grid_w = max(1, round(die_w / float(cfg.block_pitch)))
+    grid_h = max(1, round(die_h / float(cfg.block_pitch)))
+    chassis = _select_cityblock_chassis(grid_w, grid_h, cfg)
+    base_bp = _as_map(chassis.emit_base_blueprint(grid_w, grid_h).get("blueprint"))
+    chassis_base_entities = [dict(_as_map(e)) for e in _as_list(base_bp.get("entities"))]
+    def_data["_chassis_tiles"] = _as_list(base_bp.get("tiles"))
+    if use_maze_router:
+        _register_chassis_router_obstacles(
+            def_data, placement, chassis_base_entities, grid_w, grid_h, die_w, die_h, scale, cfg
+        )
+        return None, [], [], chassis_base_entities
+    floorplan, fabric_entities, input_channel_entities = _plan_legacy_macro_floorplan(
+        def_data, netlist_data, placement, chassis, grid_w, grid_h, cfg
+    )
+    return floorplan, fabric_entities, input_channel_entities, chassis_base_entities
+
+
+def _assert_physical_integrity(entities: list[EntityDict]) -> None:
+    collision_pairs = check_collisions(entities)
+    if collision_pairs:
+        raise RuntimeError(
+            f"Collision check failed: {len(collision_pairs)} overlapping entity pairs detected: {collision_pairs[:10]}"
+        )
+    unpaired_hoods = check_underground_pairing(entities)
+    if unpaired_hoods:
+        raise RuntimeError(
+            f"Underground check failed: {len(unpaired_hoods)} unpaired underground hoods detected: {unpaired_hoods}"
+        )
+
+
+def build_entities(
+    def_data: MutableJsonMap,
+    netlist_data: JsonMap,
+    strict_drc: bool = True,
+    use_maze_router: bool = True,
+    engine: object | None = None,
+    cfg: Def2BpConfig = DEFAULT_DEF2BP_CONFIG,
+) -> tuple[list[EntityDict], list[list[int]]]:
+    """Build Factorio entities and wire connections from DEF and netlist data."""
+    def_data["_netlist_data"] = netlist_data
+    untangle_def(def_data, dict(netlist_data), pins_only=use_maze_router)
+
+    units = _as_float(def_data.get("units"), cfg.default_units)
+    scale = 1.0 / units
+    placement = place_components(def_data, netlist_data)
+    def_data["_placement"] = placement
+
+    fabric_entities: list[EntityDict] = []
+    input_channel_entities: list[EntityDict] = []
+    floorplan: object | None = None
+    chassis_base_entities: list[EntityDict] = []
+    has_blockages = bool(def_data.get("blockages"))
+
+    if has_blockages:
+        floorplan, fabric_entities, input_channel_entities, chassis_base_entities = (
+            _setup_blockage_chassis(
+                def_data, netlist_data, placement, use_maze_router, units, scale, cfg
             )
-        verif_res = getattr(placement, "router_verif_res", None)
-        if verif_res is not None and not verif_res.is_valid:
-            raise ValueError(
-                f"Native router verification failed with {len(verif_res.lvs_errors)} LVS error(s) "
-                f"and {len(verif_res.drc_violations)} DRC violation(s)"
+        )
+
+    routes = route_with_maze_router(
+        def_data, netlist_data, placement, engine=engine, strict_drc=strict_drc, cfg=cfg
+    )
+    if floorplan is not None:
+        for ent in [*fabric_entities, *input_channel_entities]:
+            ex, ey = _entity_xy(ent)
+            routes.tile_to_nets.setdefault(
+                (round(ex, COORD_PRECISION), round(ey, COORD_PRECISION)), set()
             )
 
+    insert_pipeline_pumps(placement, routes, def_data, netlist_data)
+    pole_entities, mst_connections = generate_pdn(
+        placement.entities,
+        placement.occupied_positions,
+        routes.pin_tiles,
+        routes.valid_input_pins,
+        routes.valid_output_pins,
+    )
+    _assert_physical_integrity(placement.entities)
+
+    if use_maze_router:
+        entities = list(placement.entities)
+    else:
+        entities = prune_dead_end_belts(placement.entities, dict(def_data), dict(netlist_data))
+    occupied_tiles: set[GridCoord] = set()
+    if has_blockages:
+        entities, occupied_tiles = _merge_chassis_base_entities(
+            entities, chassis_base_entities, use_maze_router, cfg
+        )
+
+    grid_entities = {
+        (round(_entity_xy(e)[0], COORD_PRECISION), round(_entity_xy(e)[1], COORD_PRECISION)): e
+        for e in entities
+    }
+    wires = (
+        wire_telemetry(
+            entities,
+            dict(netlist_data),
+            placement.inst_to_entity,
+            routes.net_surface_tiles,
+            grid_entities,
+            mst_connections,
+            pole_entities,
+        )
+        or []
+    )
+    if has_blockages:
+        big_poles, med_poles = _wire_chassis_big_and_medium_poles(entities, wires, cfg)
+        _bridge_disconnected_chassis_poles(
+            entities, wires, big_poles, med_poles, routes, occupied_tiles, cfg
+        )
+
+    _run_drc_and_verify(
+        entities, wires, routes, placement, def_data, netlist_data, scale, strict_drc
+    )
     return entities, wires
 
 
+def _convert_chained_south_pole_jumper(
+    ent_map: dict[GridCoord, EntityDict],
+    to_remove: set[GridCoord],
+    e_in: EntityDict,
+    x: float,
+    y_lo: float,
+    y_hi: float,
+    out_pos: GridCoord,
+    cfg: Def2BpConfig,
+) -> bool:
+    for dist in range(1, cfg.max_underground_span + 1):
+        cand = ent_map.get((x, round(out_pos[1] + dist, COORD_PRECISION)))
+        if (
+            cand
+            and cand.get("name") == "underground-belt"
+            and cand.get("type") == "output"
+            and cand.get("direction") == DIRECTION_SOUTH
+        ):
+            span_req = dist + JUMPER_SPAN_PADDING
+            preferred = (
+                "fast-underground-belt"
+                if span_req <= cfg.mid_underground_span
+                else "express-underground-belt"
+            )
+            tier = get_compatible_underground_belt(span_req, preferred_name=preferred)
+            e_in["name"] = tier
+            e_in["type"] = "input"
+            cand["name"] = tier
+            cand["type"] = "output"
+            for r_pos in ((x, y_lo), (x, y_hi), out_pos):
+                to_remove.add(r_pos)
+                ent_map.pop(r_pos, None)
+            return True
+    return False
+
+
+def _try_convert_pole_jumper_line(
+    ent_map: dict[GridCoord, EntityDict],
+    to_remove: set[GridCoord],
+    lo_pos: GridCoord,
+    hi_pos: GridCoord,
+    in_pos: GridCoord,
+    out_pos: GridCoord,
+    expected_dir: int,
+    allow_chained_upgrade: bool,
+    cfg: Def2BpConfig,
+) -> None:
+    e_lo, e_hi = ent_map.get(lo_pos), ent_map.get(hi_pos)
+    if not (
+        e_lo
+        and e_hi
+        and e_lo.get("name") == "transport-belt"
+        and e_hi.get("name") == "transport-belt"
+        and e_lo.get("direction") == expected_dir
+        and e_hi.get("direction") == expected_dir
+    ):
+        return
+    e_in, e_out = ent_map.get(in_pos), ent_map.get(out_pos)
+    if not (e_in and e_in.get("direction") == expected_dir and e_out):
+        return
+    if (
+        allow_chained_upgrade
+        and e_out.get("name") == "underground-belt"
+        and e_out.get("type") == "input"
+    ):
+        _convert_chained_south_pole_jumper(
+            ent_map, to_remove, e_in, lo_pos[0], lo_pos[1], hi_pos[1], out_pos, cfg
+        )
+    elif e_out.get("direction") == expected_dir:
+        e_in["name"] = "underground-belt"
+        e_in["type"] = "input"
+        e_out["name"] = "underground-belt"
+        e_out["type"] = "output"
+        for r_pos in (lo_pos, hi_pos):
+            to_remove.add(r_pos)
+            ent_map.pop(r_pos, None)
+
+
 def jumper_belts_across_chassis_poles(
-    entities: list[dict[str, Any]], base_entities: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+    entities: Sequence[EntityDict],
+    base_entities: Sequence[EntityDict],
+    cfg: Def2BpConfig = DEFAULT_DEF2BP_CONFIG,
+) -> list[EntityDict]:
     """Convert straight transport belts that collide with chassis big electric poles into underground jumpers."""
-    ent_map: dict[tuple[float, float], dict[str, Any]] = {
-        (round(e["position"]["x"], 2), round(e["position"]["y"], 2)): e
+    ent_map: dict[GridCoord, EntityDict] = {
+        (round(_entity_xy(e)[0], COORD_PRECISION), round(_entity_xy(e)[1], COORD_PRECISION)): e
         for e in entities
         if "position" in e
     }
-    to_remove: set[tuple[float, float]] = set()
+    to_remove: set[GridCoord] = set()
 
     for be in base_entities:
         if be.get("name") != "big-electric-pole":
             continue
-        bpos = be.get("position", {})
-        bx = float(bpos.get("x", 0.0))
-        by = float(bpos.get("y", 0.0))
-
-        # Check for vertical colliding belts (direction 8: South, or 0: North)
-        for dx in (-0.5, 0.5):
-            x = round(bx + dx, 2)
-            y_lo = round(by - 0.5, 2)
-            y_hi = round(by + 0.5, 2)
-            e_lo = ent_map.get((x, y_lo))
-            e_hi = ent_map.get((x, y_hi))
-            if (
-                e_lo
-                and e_hi
-                and e_lo.get("name") == "transport-belt"
-                and e_hi.get("name") == "transport-belt"
-                and e_lo.get("direction") == e_hi.get("direction")
-            ):
-                d = e_lo.get("direction", 8)
-                if d == 8:  # South
-                    in_pos = (x, round(by - 1.5, 2))
-                    out_pos = (x, round(by + 1.5, 2))
-                    e_in = ent_map.get(in_pos)
-                    e_out = ent_map.get(out_pos)
-                    if e_in and e_in.get("direction") == 8:
-                        if (
-                            e_out
-                            and e_out.get("name") == "underground-belt"
-                            and e_out.get("type") == "input"
-                        ):
-                            dist = 1
-                            found_out = None
-                            while dist <= 9:
-                                cand_pos = (x, round(out_pos[1] + dist, 2))
-                                cand = ent_map.get(cand_pos)
-                                if (
-                                    cand
-                                    and cand.get("name") == "underground-belt"
-                                    and cand.get("type") == "output"
-                                    and cand.get("direction") == 8
-                                ):
-                                    found_out = cand
-                                    break
-                                dist += 1
-                            if found_out:
-                                tier = (
-                                    "fast-underground-belt"
-                                    if dist + 3 <= 7
-                                    else "express-underground-belt"
-                                )
-                                e_in["name"] = tier
-                                e_in["type"] = "input"
-                                found_out["name"] = tier
-                                found_out["type"] = "output"
-                                to_remove.add((x, y_lo))
-                                to_remove.add((x, y_hi))
-                                to_remove.add(out_pos)
-                                ent_map.pop((x, y_lo), None)
-                                ent_map.pop((x, y_hi), None)
-                                ent_map.pop(out_pos, None)
-                        elif e_out and e_out.get("direction") == 8:
-                            e_in["name"] = "underground-belt"
-                            e_in["type"] = "input"
-                            e_out["name"] = "underground-belt"
-                            e_out["type"] = "output"
-                            to_remove.add((x, y_lo))
-                            to_remove.add((x, y_hi))
-                            ent_map.pop((x, y_lo), None)
-                            ent_map.pop((x, y_hi), None)
-                elif d == 0:  # North
-                    in_pos = (x, round(by + 1.5, 2))
-                    out_pos = (x, round(by - 1.5, 2))
-                    e_in = ent_map.get(in_pos)
-                    e_out = ent_map.get(out_pos)
-                    if (
-                        e_in
-                        and e_out
-                        and e_in.get("direction") == 0
-                        and e_out.get("direction") == 0
-                    ):
-                        e_in["name"] = "underground-belt"
-                        e_in["type"] = "input"
-                        e_out["name"] = "underground-belt"
-                        e_out["type"] = "output"
-                        to_remove.add((x, y_lo))
-                        to_remove.add((x, y_hi))
-                        ent_map.pop((x, y_lo), None)
-                        ent_map.pop((x, y_hi), None)
-
-        # Check for horizontal colliding belts (direction 4: East, or 12: West)
-        for dy in (-0.5, 0.5):
-            y = round(by + dy, 2)
-            x_lo = round(bx - 0.5, 2)
-            x_hi = round(bx + 0.5, 2)
-            e_lo = ent_map.get((x_lo, y))
-            e_hi = ent_map.get((x_hi, y))
-            if (
-                e_lo
-                and e_hi
-                and e_lo.get("name") == "transport-belt"
-                and e_hi.get("name") == "transport-belt"
-                and e_lo.get("direction") == e_hi.get("direction")
-            ):
-                d = e_lo.get("direction", 4)
-                if d == 4:  # East
-                    in_pos = (round(bx - 1.5, 2), y)
-                    out_pos = (round(bx + 1.5, 2), y)
-                    e_in = ent_map.get(in_pos)
-                    e_out = ent_map.get(out_pos)
-                    if (
-                        e_in
-                        and e_out
-                        and e_in.get("direction") == 4
-                        and e_out.get("direction") == 4
-                    ):
-                        e_in["name"] = "underground-belt"
-                        e_in["type"] = "input"
-                        e_out["name"] = "underground-belt"
-                        e_out["type"] = "output"
-                        to_remove.add((x_lo, y))
-                        to_remove.add((x_hi, y))
-                        ent_map.pop((x_lo, y), None)
-                        ent_map.pop((x_hi, y), None)
-                elif d == 12:  # West
-                    in_pos = (round(bx + 1.5, 2), y)
-                    out_pos = (round(bx - 1.5, 2), y)
-                    e_in = ent_map.get(in_pos)
-                    e_out = ent_map.get(out_pos)
-                    if (
-                        e_in
-                        and e_out
-                        and e_in.get("direction") == 12
-                        and e_out.get("direction") == 12
-                    ):
-                        e_in["name"] = "underground-belt"
-                        e_in["type"] = "input"
-                        e_out["name"] = "underground-belt"
-                        e_out["type"] = "output"
-                        to_remove.add((x_lo, y))
-                        to_remove.add((x_hi, y))
-                        ent_map.pop((x_lo, y), None)
-                        ent_map.pop((x_hi, y), None)
-
-    if to_remove:
-        entities = [
-            e
-            for e in entities
-            if (
-                round(e.get("position", {}).get("x", 0.0), 2),
-                round(e.get("position", {}).get("y", 0.0), 2),
+        bx, by = _entity_xy(be)
+        for dx in BIG_POLE_DELTAS:
+            x = round(bx + dx, COORD_PRECISION)
+            lo_v = (x, round(by - TILE_HALF, COORD_PRECISION))
+            hi_v = (x, round(by + TILE_HALF, COORD_PRECISION))
+            s_in = (x, round(by - CHANNEL_IN_OFFSET, COORD_PRECISION))
+            s_out = (x, round(by + CHANNEL_IN_OFFSET, COORD_PRECISION))
+            _try_convert_pole_jumper_line(
+                ent_map, to_remove, lo_v, hi_v, s_in, s_out, DIRECTION_SOUTH, True, cfg
             )
-            not in to_remove
-        ]
-    return entities
+            _try_convert_pole_jumper_line(
+                ent_map, to_remove, lo_v, hi_v, s_out, s_in, DIRECTION_NORTH, False, cfg
+            )
+        for dy in BIG_POLE_DELTAS:
+            y = round(by + dy, COORD_PRECISION)
+            lo_h = (round(bx - TILE_HALF, COORD_PRECISION), y)
+            hi_h = (round(bx + TILE_HALF, COORD_PRECISION), y)
+            e_in = (round(bx - CHANNEL_IN_OFFSET, COORD_PRECISION), y)
+            e_out = (round(bx + CHANNEL_IN_OFFSET, COORD_PRECISION), y)
+            _try_convert_pole_jumper_line(
+                ent_map, to_remove, lo_h, hi_h, e_in, e_out, DIRECTION_EAST, False, cfg
+            )
+            _try_convert_pole_jumper_line(
+                ent_map, to_remove, lo_h, hi_h, e_out, e_in, DIRECTION_WEST, False, cfg
+            )
+
+    if not to_remove:
+        return list(entities)
+    return [
+        e
+        for e in entities
+        if (round(_entity_xy(e)[0], COORD_PRECISION), round(_entity_xy(e)[1], COORD_PRECISION))
+        not in to_remove
+    ]
 
 
 def def_to_blueprint(
     def_text: str,
-    netlist_data: dict[str, Any],
+    netlist_data: JsonMap,
     label: str = "factory",
     strict_drc: bool = True,
     use_maze_router: bool = True,
@@ -1605,50 +2125,34 @@ def def_to_blueprint(
         strict_drc=strict_drc,
         use_maze_router=use_maze_router,
     )
-    return blueprint.encode(entities, label, wires=wires, tiles=def_data.get("_chassis_tiles"))
+    tiles = def_data.get("_chassis_tiles")
+    tile_list = [dict(_as_map(t)) for t in _as_list(tiles)] if tiles else None
+    return blueprint.encode(entities, label, wires=wires, tiles=tile_list)
 
 
-def main() -> int:
-    """Main CLI entrypoint."""
+def _parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert placed and routed DEF to Factorio blueprint string."
     )
     parser.add_argument("def_file", type=Path, help="Path to input DEF file")
     parser.add_argument("netlist_file", type=Path, help="Path to input netlist JSON file")
     parser.add_argument(
-        "-o",
-        "--out",
-        type=Path,
-        default=None,
-        help="Path to write blueprint output",
+        "-o", "--out", type=Path, default=None, help="Path to write blueprint output"
     )
     parser.add_argument(
-        "--pins-out",
-        type=Path,
-        default=None,
-        help="Path to write extracted pins JSON",
+        "--pins-out", type=Path, default=None, help="Path to write extracted pins JSON"
     )
-    parser.add_argument(
-        "--label",
-        type=str,
-        default="factory",
-        help="Blueprint label text",
-    )
+    parser.add_argument("--label", type=str, default="factory", help="Blueprint label text")
     parser.add_argument(
         "--json",
         action="store_true",
         help="Emit raw blueprint JSON document instead of exchange string",
     )
     parser.add_argument(
-        "--time-out",
-        type=Path,
-        default=None,
-        help="Path to write execution time JSON",
+        "--time-out", type=Path, default=None, help="Path to write execution time JSON"
     )
     parser.add_argument(
-        "--no-strict-drc",
-        action="store_true",
-        help="Do not abort on physical DRC violations",
+        "--no-strict-drc", action="store_true", help="Do not abort on physical DRC violations"
     )
     parser.add_argument(
         "--use-maze-router",
@@ -1662,39 +2166,47 @@ def main() -> int:
         dest="use_maze_router",
         help="Disable maze router",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
+def _format_blueprint_output(
+    entities: list[EntityDict],
+    wires: list[list[int]],
+    tiles: list[EntityDict] | None,
+    label: str,
+    as_json: bool,
+) -> str:
+    if not as_json:
+        return blueprint.encode(entities, label, wires=wires, tiles=tiles)
+    bp_body: MutableJsonMap = {
+        "item": "blueprint",
+        "label": label,
+        "version": blueprint.VERSION_2_0,
+        "entities": entities,
+    }
+    if wires:
+        bp_body["wires"] = wires
+    if tiles:
+        bp_body["tiles"] = tiles
+    return json.dumps({"blueprint": bp_body}, indent=2)
+
+
+def main() -> int:
+    """Main CLI entrypoint."""
+    args = _parse_cli_args()
     t0 = time.perf_counter()
-    def_text = args.def_file.read_text()
+    def_data = parse_def(args.def_file.read_text())
     netlist_data = json.loads(args.netlist_file.read_text())
 
-    def_data = parse_def(def_text)
     entities, wires = build_entities(
         def_data,
         netlist_data,
         strict_drc=not args.no_strict_drc,
         use_maze_router=args.use_maze_router,
     )
-
-    tiles: list[dict[str, Any]] | None = def_data.get("_chassis_tiles")
-
-    if args.json:
-        document: dict[str, Any] = {
-            "blueprint": {
-                "item": "blueprint",
-                "label": args.label,
-                "version": blueprint.VERSION_2_0,
-                "entities": entities,
-            }
-        }
-        if wires:
-            document["blueprint"]["wires"] = wires
-        if tiles:
-            document["blueprint"]["tiles"] = tiles
-        output_text = json.dumps(document, indent=2)
-    else:
-        output_text = blueprint.encode(entities, args.label, wires=wires, tiles=tiles)
+    raw_tiles = def_data.get("_chassis_tiles")
+    tiles = [dict(_as_map(t)) for t in _as_list(raw_tiles)] if raw_tiles else None
+    output_text = _format_blueprint_output(entities, wires, tiles, args.label, args.json)
 
     if args.out:
         args.out.write_text(output_text + "\n")
@@ -1706,17 +2218,12 @@ def main() -> int:
         args.pins_out.parent.mkdir(parents=True, exist_ok=True)
         args.pins_out.write_text(json.dumps(pins_data, indent=2) + "\n")
 
-    t1 = time.perf_counter()
-    elapsed = round(t1 - t0, 3)
-
     if args.time_out:
+        elapsed = round(time.perf_counter() - t0, TIME_PRECISION)
         args.time_out.parent.mkdir(parents=True, exist_ok=True)
-        time_data = {
-            "stage": "bp",
-            "elapsed_seconds": elapsed,
-        }
-        args.time_out.write_text(json.dumps(time_data, indent=2) + "\n")
-
+        args.time_out.write_text(
+            json.dumps({"stage": "bp", "elapsed_seconds": elapsed}, indent=2) + "\n"
+        )
     return 0
 
 
