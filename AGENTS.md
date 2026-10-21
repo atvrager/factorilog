@@ -17,6 +17,8 @@ Communicate only in Simplified Technical English (ASD-STE100).
 - Do NOT execute scratch Python scripts for tests.
 - Write all tests in test suites under `test/`.
 - Execute all tests through Bazel (`bazel test //...`).
+- Format and fix Python files with `bazel run //tools:ruff_format`.
+- Run fast lint and type checks with `bazel test //tools:ruff_test //tools:ty_test //tools:ste_lint_test`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker

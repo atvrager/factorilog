@@ -12,5 +12,10 @@ fi
 
 cd "$ROOT"
 
-"$RUFF" check --config "$CONFIG" .
-"$RUFF" format --check --config "$CONFIG" .
+status=0
+"$RUFF" check --config "$CONFIG" . || status=$?
+"$RUFF" format --check --config "$CONFIG" . || status=$?
+if [ "$status" -ne 0 ]; then
+    echo "hint: run 'bazel run //tools:ruff_format' to format and fix Python files." >&2
+    exit "$status"
+fi

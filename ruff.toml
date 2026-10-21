@@ -2,6 +2,7 @@
 #
 # `bazel test //tools:ruff_test` runs `ruff check` and `ruff format --check`
 # over every Python file in the workspace.
+# `bazel run //tools:ruff_format` formats and fixes Python files in place.
 
 target-version = "py311"
 line-length = 100
