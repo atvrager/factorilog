@@ -734,6 +734,8 @@ class TestDef2Bp(unittest.TestCase):
                 {"name": "splitter", "position": [25.0, 15.5], "direction": 0},
                 {"name": "transport-belt", "position": [15.5, 15.5], "direction": 4},
                 {"name": "pipe", "position": [5.5, 5.5], "fluid": "water"},
+                {"name": "pipe", "position": [6.5, 5.5], "fluid": "steam"},
+                {"name": "pipe", "position": [5.5, 6.5], "fluid": "crude_oil"},
             ],
             occupied_positions=set(),
             grid_entities={},
@@ -772,6 +774,48 @@ class TestDef2Bp(unittest.TestCase):
         self.assertEqual(headings[(24, 15)], 0)
         self.assertEqual(headings[(25, 15)], 0)
         self.assertEqual(headings[(15, 15)], 4)
+        self.assertIn((16, 15), captured_init["no_hood_tiles"])
+        fluid_approaches = captured_init["fluid_port_approaches"]
+        self.assertEqual(fluid_approaches[(5, 5)], {"water", "steam", "crude-oil"})
+        self.assertEqual(fluid_approaches[(6, 5)], {"water", "steam"})
+        self.assertEqual(fluid_approaches[(4, 5)], {"water"})
+        self.assertEqual(fluid_approaches[(7, 5)], {"steam"})
+        self.assertEqual(fluid_approaches[(5, 6)], {"water", "crude-oil"})
+        self.assertEqual(fluid_approaches[(5, 7)], {"crude-oil"})
+        self.assertEqual(fluid_approaches[(5, 4)], {"water"})
+        self.assertIsNone(captured_init["engine"])
+
+        # Direct unit check for single pipe fluid_port_approaches with asymmetric odx/ody
+        _, _, fpa_single = def2bp._collect_router_constraints(
+            [],
+            [
+                {"name": "pipe", "position": [10.5, 20.5], "fluid": "water"},
+                {"name": "pipe", "position": [12.5, 22.5], "fluid": "steam"},
+            ],
+            set(),
+            set(),
+        )
+        self.assertEqual(fpa_single[(11, 20)], {"water"})
+        self.assertEqual(fpa_single[(10, 21)], {"water"})
+        self.assertEqual(fpa_single[(11, 22)], {"steam"})
+        self.assertEqual(fpa_single[(12, 21)], {"steam"})
+
+        # Also verify max_y / min_x / max_x / min_y pad expansion beyond die_area (10x10)
+        def_pad = {
+            "units": 1000,
+            "die_area": [0, 0, 10000, 10000],
+            "pins": [
+                {"name": "p_out", "net": "iron__p", "direction": "OUTPUT", "x": 20000, "y": 25000}
+            ],
+            "components": [
+                {"name": "s1", "macro": "belt_split2", "x": 5000, "y": 30000, "orient": "N"}
+            ],
+            "nets": [{"name": "iron__p", "connections": [("s1", "y1"), ("PIN", "p_out")]}],
+        }
+        with mock.patch("foundry.router.maze_router.DualLaneMazeRouter", FakeRouter):
+            def2bp.route_with_maze_router(def_pad, netlist_data, placement, engine=False)
+        self.assertEqual(captured_init["max_x"], 22)
+        self.assertEqual(captured_init["max_y"], 32)
 
     def test_build_entities_chassis_pole_bridging_and_fluid_sharing(self) -> None:
         """Verify chassis pole network bridging, lamp filtering, and same-fluid tile sharing."""
@@ -790,8 +834,10 @@ class TestDef2Bp(unittest.TestCase):
         fake_chassis_entities = [
             {"name": "big-electric-pole", "position": {"x": 5.0, "y": 5.0}},
             {"name": "big-electric-pole", "position": {"x": 5.0, "y": 35.0}},
-            {"name": "medium-electric-pole", "position": {"x": 5.5, "y": 55.5}},
+            {"name": "big-electric-pole", "position": {"x": 20.0, "y": 20.0}},
+            {"name": "medium-electric-pole", "position": {"x": 5.5, "y": 50.5}},
             {"name": "small-lamp", "position": {"x": 6.5, "y": 5.5}},
+            {"name": "small-lamp", "position": {"x": 11.5, "y": 20.5}},
             {"name": "small-lamp", "position": {"x": 150.5, "y": 150.5}},
             {"name": "radar", "position": {"x": 5.5, "y": 5.5}},
             {"name": "radar", "position": {"x": 12.5, "y": 20.5}},
@@ -801,8 +847,8 @@ class TestDef2Bp(unittest.TestCase):
             net_surface_tiles={"water__1": {(20.5, 20.5): 4}, "water__2": {(20.5, 20.5): 4}},
             tile_to_nets={(20.5, 20.5): {"water__1", "water__2"}},
             adjacent_fluid_conflicts=set(),
-            pin_tiles={(0.0, 50.0)},
-            valid_input_pins={(0.0, 50.0)},
+            pin_tiles={(2.0, 42.0)},
+            valid_input_pins={(2.0, 42.0)},
             valid_output_pins=set(),
         )
 
@@ -825,38 +871,90 @@ class TestDef2Bp(unittest.TestCase):
             )
             return res
 
+        untangle_kwargs: list[dict[str, Any]] = []
+
+        def spy_untangle(_d: dict, _n: dict, **kw: Any) -> None:
+            untangle_kwargs.append(kw)
+
         with (
             mock.patch(
                 "foundry.chassis.CityBlockChassis.emit_base_blueprint",
                 return_value={"blueprint": {"entities": fake_chassis_entities, "tiles": []}},
             ),
+            mock.patch.object(def2bp, "untangle_def", side_effect=spy_untangle),
             mock.patch.object(def2bp, "place_components", side_effect=place_with_assembler),
             mock.patch.object(def2bp, "route_with_maze_router", return_value=fake_routes),
             mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
         ):
             entities, wires = def2bp.build_entities(def_data, netlist_data, strict_drc=True)
 
+        self.assertEqual(untangle_kwargs[0].get("pins_only"), True)
         big_poles = [e for e in entities if e["name"] == "big-electric-pole"]
         med_poles = [e for e in entities if e["name"] == "medium-electric-pole"]
         lamps = [e for e in entities if e["name"] == "small-lamp"]
         radars = [e for e in entities if e["name"] == "radar"]
-        self.assertEqual(len(big_poles), 2)
+        self.assertEqual(len(big_poles), 3)
         self.assertEqual(len(lamps), 1)
         self.assertEqual(lamps[0]["position"], {"x": 6.5, "y": 5.5})
         self.assertGreaterEqual(len(med_poles), 3)
         self.assertEqual(len(radars), 0)
-        self.assertGreater(len(wires), 0)
+        # Diagonal big pole at (20.0, 20.0) must not get red/green aligned wire (wid 1 or 2)
+        diag_num = next(
+            e["entity_number"] for e in big_poles if e["position"] == {"x": 20.0, "y": 20.0}
+        )
+        red_green_nodes = {w[0] for w in wires if w[1] in (1, 2)} | {
+            w[2] for w in wires if w[3] in (1, 2)
+        }
+        self.assertNotIn(diag_num, red_green_nodes)
+        # Bridge poles from (5.0, 35.0) to (5.5, 50.5) step on half-integer tiles (.5) and avoid pin guard at (5.5, 42.5)
+        med_positions = [(mp["position"]["x"], mp["position"]["y"]) for mp in med_poles]
+        for _mx, my in med_positions:
+            self.assertEqual(my % 1.0, 0.5)
+        # First bridge pole from (5.0, 35.0) towards (5.5, 50.5) would land on (5.5, 43.5), so guard (5.5, 43.5) with pin at (2.0, 43.0)
+        self.assertIn((5.5, 43.5), med_positions)
+        self.assertEqual(len(med_poles), 5)
+
+        fake_routes_guard = RouteResult(
+            net_surface_tiles={"water__1": {(20.5, 20.5): 4}, "water__2": {(20.5, 20.5): 4}},
+            tile_to_nets={(20.5, 20.5): {"water__1", "water__2"}},
+            adjacent_fluid_conflicts=set(),
+            pin_tiles={(2.0, 43.0)},
+            valid_input_pins={(2.0, 43.0)},
+            valid_output_pins=set(),
+        )
+        with (
+            mock.patch(
+                "foundry.chassis.CityBlockChassis.emit_base_blueprint",
+                return_value={"blueprint": {"entities": fake_chassis_entities, "tiles": []}},
+            ),
+            mock.patch.object(def2bp, "untangle_def"),
+            mock.patch.object(def2bp, "place_components", side_effect=place_with_assembler),
+            mock.patch.object(def2bp, "route_with_maze_router", return_value=fake_routes_guard),
+            mock.patch.object(def2bp, "generate_pdn", return_value=([], [])),
+        ):
+            entities_g, _ = def2bp.build_entities(def_data, netlist_data, strict_drc=True)
+        med_positions_g = [
+            (e["position"]["x"], e["position"]["y"])
+            for e in entities_g
+            if e["name"] == "medium-electric-pole"
+        ]
+        self.assertNotIn((5.5, 43.5), med_positions_g)
+        self.assertIn((6.5, 43.5), med_positions_g)
+
+        # Direct unit assertion for _step_bridge_pole_toward when base_iy > 0 and dy varies
+        step_pt = def2bp._step_bridge_pole_toward(10.0, 20.0, 10.5, 29.0, set(), 9.0)
+        self.assertEqual(step_pt, (10.5, 28.5))
 
     def test_route_with_maze_router_hierarchical_and_verifier(self) -> None:
         """Verify hierarchical Stage 1/2 routing, obstacle masking, and NativeLayoutVerifier."""
         def_data = {
             "units": 1000,
-            "die_area": [0, 0, 200000, 100000],
+            "die_area": [0, 0, 200000, 200000],
             "blockages": [{"x1": 0, "y1": 0, "x2": 1000, "y2": 1000}],
             "pins": [],
             "components": [
                 {"name": "s1", "macro": "belt_split2", "x": 10000, "y": 10000, "orient": "N"},
-                {"name": "s2", "macro": "belt_split2", "x": 110000, "y": 10000, "orient": "N"},
+                {"name": "s2", "macro": "belt_split2", "x": 110000, "y": 110000, "orient": "N"},
             ],
             "nets": [
                 {"name": "iron__1", "connections": [("s1", "y1"), ("s2", "a")]},
@@ -928,11 +1026,29 @@ class TestDef2Bp(unittest.TestCase):
         self.assertIn("Stage 2: routing", err_out)
         self.assertIn("NativeLayoutVerifier completed in 1.00s", err_out)
         self.assertTrue(all(kw.get("flush") is True for kw in print_kwargs))
-        # Stage 2 highway router must mask core interiors starting at margin (3, 3) and not street channels at (2, 50)
-        hwy_obs = router_instances[-1]["obstacles"]
-        self.assertIn((3, 50), hwy_obs)
-        self.assertNotIn((2, 50), hwy_obs)
+        # Stage 2 highway router must mask core interiors starting at margin (4, 4) and not street channels at (3, 50)
+        hwy_init = router_instances[-1]
+        hwy_obs = hwy_init["obstacles"]
+        self.assertEqual(hwy_init["max_x"], 199)
+        self.assertEqual(hwy_init["max_y"], 199)
+        self.assertIn((4, 50), hwy_obs)
+        self.assertNotIn((3, 50), hwy_obs)
         self.assertIn((150, 50), hwy_obs)
+        # Bay block (0, 0) discards y in [4, 17), and bay block (1, 1) discards y in [104, 117)
+        self.assertNotIn((15, 10), hwy_obs)
+        self.assertIn((15, 17), hwy_obs)
+        self.assertNotIn((115, 105), hwy_obs)
+        self.assertNotIn((115, 110), hwy_obs)
+        self.assertIn((115, 117), hwy_obs)
+        self.assertIn((115, 95), hwy_obs)
+        # Direct unit assertion for _build_highway_obstacles with margin=3 vs BAY_Y_STOP=17
+        direct_obs = def2bp._build_highway_obstacles(2, 2, 3, 100, {(0, 0), (0, 1)}, set(), [])
+        self.assertNotIn((10, 4), direct_obs)
+        self.assertNotIn((10, 16), direct_obs)
+        self.assertIn((10, 17), direct_obs)
+        self.assertNotIn((10, 104), direct_obs)
+        self.assertNotIn((10, 116), direct_obs)
+        self.assertIn((10, 117), direct_obs)
 
     def test_build_entities_legacy_floorplan_and_grid_sizes(self) -> None:
         """Verify 2x2 vs 1x1 chassis obstacle handling and legacy floorplan input routing."""
@@ -1014,17 +1130,24 @@ class TestDef2Bp(unittest.TestCase):
                 },
             ],
             "components": [
+                {"name": "u_s0", "macro": "belt_split2", "x": 10000, "y": 25000, "orient": "N"},
                 {"name": "u_s1", "macro": "belt_split2", "x": 110000, "y": 10000, "orient": "N"},
+                {"name": "u_s2", "macro": "belt_split2", "x": 110000, "y": 25000, "orient": "N"},
             ],
             "nets": [
                 {"name": "iron_in", "connections": [("PIN", "iron_in"), ("u_s1", "a")]},
                 {"name": "no_pin_net", "connections": [("u_s1", "b")]},
+                {"name": "ib_net", "connections": [("u_s0", "y1"), ("u_s2", "b")]},
             ],
         }
         netlist_legacy = {
             "fluids": [],
-            "instances": [{"name": "u_s1", "cell": "belt_split2"}],
-            "cells": {},
+            "instances": [
+                {"name": "u_s0", "cell": "belt_split2"},
+                {"name": "u_s1", "cell": "belt_split2"},
+                {"name": "u_s2", "cell": "belt_split2"},
+            ],
+            "cells": {"belt_split2": {"inputs": ["a", "b"], "outputs": ["y1", "y2"]}},
         }
         with (
             mock.patch(
@@ -1042,6 +1165,7 @@ class TestDef2Bp(unittest.TestCase):
         # Pin x updated to 98000 (98.5 * 1000 - 500), while no_pin_net pin stays at 0
         self.assertEqual(def_legacy["pins"][0]["x"], 98000)
         self.assertEqual(def_legacy["pins"][1]["x"], 0)
+        self.assertEqual(def_legacy["nets"][2].get("wires"), [])
         self.assertGreater(len(ents_leg), 2)
 
 
