@@ -17,13 +17,19 @@ from pathlib import Path
 from foundry.native_engine.engine import FactorioNativeEngine
 from foundry.native_engine.symbol_finder import resolve_factorio_binary
 from foundry.router import (
+    DIRECTION_EAST,
     DualLaneMazeRouter,
     LANE_LEFT,
     LANE_RIGHT,
+    RouteEdge,
+    RouteNode,
+    RouteResult,
     RouterNetSpec,
+    build_blueprint_entities,
 )
 from foundry.router.grid import RoutingGrid
-from foundry.router.pathfinder import route_single_net
+from foundry.router.transitions import get_legal_transitions
+from foundry.router.types import LAYER_SURFACE
 
 
 class TestDualLaneMazeRouter(unittest.TestCase):
@@ -692,31 +698,132 @@ class TestDualLaneMazeRouter(unittest.TestCase):
         self.assertGreater(len(entities), 0)
 
     def test_perf_cases_smoke(self) -> None:
-        """Smoke-test router pathfinder perf_* generator benchmark."""
-        for _ in perf_pathfinder_astar_leaps(32):
+        """Smoke-test router component perf_* generator benchmarks."""
+        for _ in perf_build_blueprint_entities(16):
+            pass
+        for _ in perf_get_legal_transitions(16):
             pass
 
 
-def perf_pathfinder_astar_leaps(
+class TestRouterComponents(unittest.TestCase):
+    """Hermetic unit tests for build_blueprint_entities and get_legal_transitions."""
+
+    def test_build_blueprint_entities_and_transitions(self) -> None:
+        """Verify blueprint entity synthesis and legal transition generation."""
+        grid = RoutingGrid(min_x=0, max_x=12, min_y=0, max_y=12, obstacles={(3, 2)})
+        belt_z = grid.belt_tier_keys[0]
+        net = RouterNetSpec(
+            name="net_belt",
+            source=(1, 2),
+            sink=(5, 2),
+            commodity="iron-plate",
+            start_heading=DIRECTION_EAST,
+            end_heading=DIRECTION_EAST,
+        )
+        grid.register_terminals([net])
+        surf_node = RouteNode(2, 2, LAYER_SURFACE, DIRECTION_EAST)
+        moves = get_legal_transitions(surf_node, grid, net)
+        self.assertTrue(any(m[2] == "dive" for m in moves))
+
+        dive_node = RouteNode(2, 2, belt_z, DIRECTION_EAST)
+        leap_moves = get_legal_transitions(dive_node, grid, net)
+        self.assertTrue(any(m[2] == "leap" for m in leap_moves))
+
+        n0 = RouteNode(1, 2, LAYER_SURFACE, DIRECTION_EAST)
+        n1 = RouteNode(2, 2, LAYER_SURFACE, DIRECTION_EAST)
+        n2 = RouteNode(2, 2, belt_z, DIRECTION_EAST)
+        n3 = RouteNode(4, 2, LAYER_SURFACE, DIRECTION_EAST)
+        n4 = RouteNode(5, 2, LAYER_SURFACE, DIRECTION_EAST)
+        edges = [
+            RouteEdge(n0, n1, "straight", "transport-belt", 1.0),
+            RouteEdge(n1, n2, "dive", "underground-belt", 4.0),
+            RouteEdge(n2, n3, "leap", "underground-belt", 6.0),
+            RouteEdge(n3, n4, "straight", "transport-belt", 1.0),
+        ]
+        routes = {"net_belt": RouteResult("net_belt", [n0, n1, n2, n3, n4], edges, 12.0)}
+        entities = build_blueprint_entities(routes, [net])
+        self.assertEqual(len(entities), 4)
+        self.assertEqual([e["entity_number"] for e in entities], [1, 2, 3, 4])
+
+
+def perf_build_blueprint_entities(
     n: int = 64,
     *,
     _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for build_blueprint_entities across multi-segment routes."""
+    routes: dict[str, RouteResult] = {}
+    specs: list[RouterNetSpec] = []
+    for i in range(n):
+        name = f"net_{i}"
+        y = i * 2
+        n0 = RouteNode(0, y, LAYER_SURFACE, DIRECTION_EAST)
+        n1 = RouteNode(1, y, LAYER_SURFACE, DIRECTION_EAST)
+        n2 = RouteNode(1, y, 1, DIRECTION_EAST)
+        n3 = RouteNode(4, y, LAYER_SURFACE, DIRECTION_EAST)
+        edges = [
+            RouteEdge(n0, n1, "straight", "transport-belt", 1.0),
+            RouteEdge(n1, n2, "dive", "underground-belt", 4.0),
+            RouteEdge(n2, n3, "leap", "underground-belt", 6.0),
+        ]
+        routes[name] = RouteResult(name, [n0, n1, n2, n3], edges, 11.0)
+        specs.append(RouterNetSpec(name=name, source=(0, y), sink=(4, y)))
+    yield
+    build_blueprint_entities(routes, specs)
+
+
+def perf_get_legal_transitions(
+    n: int = 64,
+    *,
+    _scales: tuple[int, ...] = (32, 64, 128, 256),
+    _max_complexity: str = "O(N)",
+    _rounds: int = 3,
+) -> Iterator[None]:
+    """Scale benchmark for get_legal_transitions across surface and subterranean nodes."""
+    obstacles = {(i * 3 + 2, 4) for i in range(n)}
+    grid = RoutingGrid(min_x=0, max_x=n * 3 + 10, min_y=0, max_y=10, obstacles=obstacles)
+    belt_z = grid.belt_tier_keys[0]
+    net = RouterNetSpec("net_0", (0, 4), (n * 3 + 5, 4))
+    nodes = [
+        RouteNode(i * 3 + 1, 4, LAYER_SURFACE if i % 2 == 0 else belt_z, DIRECTION_EAST)
+        for i in range(n)
+    ]
+    yield
+    for node in nodes:
+        get_legal_transitions(node, grid, net)
+
+
+def perf_maze_router_route(
+    n: int = 16,
+    *,
+    _scales: tuple[int, ...] = (8, 16, 32, 64),
     _max_complexity: str = "O(N log N)",
     _rounds: int = 3,
 ) -> Iterator[None]:
-    """Scale benchmark for 3D A* pathfinding across obstacle-interrupted corridors."""
-    obstacles = {(x, 12) for x in range(14, n + 10, 4)}
-    grid = RoutingGrid(min_x=10, max_x=n + 16, min_y=10, max_y=16, obstacles=obstacles)
-    net = RouterNetSpec(
-        name="perf_corridor",
-        source=(10, 12),
-        sink=(n + 10, 12),
-        commodity="iron-plate",
-        start_heading=4,
-        end_heading=4,
+    """Scale benchmark for DualLaneMazeRouter.route orchestration without native simulation."""
+    base_grid = RoutingGrid(min_x=0, max_x=10, min_y=0, max_y=10)
+    router = DualLaneMazeRouter(
+        min_x=0,
+        max_x=20,
+        min_y=0,
+        max_y=n * 2 + 10,
+        prototypes=base_grid.prototypes,
     )
+    nets = [
+        RouterNetSpec(
+            name=f"net_{i}",
+            source=(2, i * 2 + 2),
+            sink=(6, i * 2 + 2),
+            commodity="iron-plate",
+            start_heading=DIRECTION_EAST,
+            end_heading=DIRECTION_EAST,
+        )
+        for i in range(n)
+    ]
     yield
-    route_single_net(net, grid)
+    router.route(nets, max_iterations=2, verify=False)
 
 
 if __name__ == "__main__":

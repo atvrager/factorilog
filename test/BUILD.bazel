@@ -295,6 +295,32 @@ py_test(
 )
 
 py_test(
+    name = "grid_test",
+    size = "small",
+    srcs = ["test_grid.py"],
+    data = [
+        "data/dump-fixture.json",
+    ],
+    main = "test_grid.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "pathfinder_test",
+    size = "small",
+    srcs = ["test_pathfinder.py"],
+    data = [
+        "data/dump-fixture.json",
+    ],
+    main = "test_pathfinder.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
     name = "router_test",
     size = "medium",
     srcs = ["test_router.py"],
