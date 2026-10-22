@@ -7,6 +7,8 @@ All docstrings and comments follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
+import json
+import math
 import socket
 import struct
 import threading
@@ -48,10 +50,12 @@ PLAYER_INDEX_MASK = (1 << 16) - 1
 MAX_UDP_PAYLOAD = (1 << 16) - 1
 FIXED_POINT_SCALE = 256
 
+ACTION_NOTHING = 0x0000
 ACTION_STOP_WALKING = 0x0001
 ACTION_BEGIN_MINING = 0x0002
 ACTION_STOP_MINING = 0x0003
-ACTION_CLEAR_CURSOR = 0x000B
+ACTION_SELECTED_ENTITY_CLEARED = 0x0009
+ACTION_CLEAR_CURSOR = 0x000A
 ACTION_BUILD = 0x0045
 ACTION_START_WALKING = 0x0046
 ACTION_BEGIN_MINING_TERRAIN = 0x0047
@@ -59,14 +63,19 @@ ACTION_CRAFT = 0x0056
 ACTION_SETUP_ASSEMBLING_MACHINE = 0x0059
 ACTION_SELECTED_ENTITY_CHANGED = 0x005A
 ACTION_PIPETTE = 0x005B
+ACTION_SELECT_ENTITY_VERY_CLOSE = 0x010A
+ACTION_SELECT_ENTITY_VERY_CLOSE_PRECISE = 0x010B
+ACTION_SELECT_ENTITY_RELATIVE = 0x010C
 ACTION_SELECT_ENTITY_UNIT_NUMBER = 0x010D
 ACTION_ACHIEVEMENT_GAINED = 0x0159
 ACTION_CHECK_CRC_HEURISTIC = 0x015D
 
 KNOWN_ACTION_PAYLOAD_SIZES: dict[int, int] = {
+    ACTION_NOTHING: 0,
     ACTION_STOP_WALKING: 0,
     ACTION_BEGIN_MINING: 0,
     ACTION_STOP_MINING: 0,
+    ACTION_SELECTED_ENTITY_CLEARED: 0,
     ACTION_CLEAR_CURSOR: 0,
     ACTION_BUILD: 12,
     ACTION_START_WALKING: 16,
@@ -75,10 +84,26 @@ KNOWN_ACTION_PAYLOAD_SIZES: dict[int, int] = {
     ACTION_SETUP_ASSEMBLING_MACHINE: 3,
     ACTION_SELECTED_ENTITY_CHANGED: 8,
     ACTION_PIPETTE: 10,
+    ACTION_SELECT_ENTITY_VERY_CLOSE: 1,
+    ACTION_SELECT_ENTITY_VERY_CLOSE_PRECISE: 2,
+    ACTION_SELECT_ENTITY_RELATIVE: 4,
     ACTION_SELECT_ENTITY_UNIT_NUMBER: 8,
     ACTION_ACHIEVEMENT_GAINED: 2,
     ACTION_CHECK_CRC_HEURISTIC: 12,
 }
+
+DEFAULT_SUPPRESSED_CLIENT_ACTIONS: frozenset[int] = frozenset(
+    {
+        ACTION_STOP_WALKING,
+        ACTION_STOP_MINING,
+        ACTION_SELECTED_ENTITY_CLEARED,
+        ACTION_SELECTED_ENTITY_CHANGED,
+        ACTION_SELECT_ENTITY_VERY_CLOSE,
+        ACTION_SELECT_ENTITY_VERY_CLOSE_PRECISE,
+        ACTION_SELECT_ENTITY_RELATIVE,
+        ACTION_SELECT_ENTITY_UNIT_NUMBER,
+    }
+)
 
 
 def decode_uint16v(buf: bytes, pos: int) -> tuple[int, int]:
@@ -397,22 +422,215 @@ def extract_save_id_mappings(save_zip_path: Path) -> dict[str, dict[str, int]]:
     return merged
 
 
-def augment_save_freeplay_created_items(save_zip_path: Path, extra_items: dict[str, int]) -> None:
-    """Append a freeplay created_items hook to control.lua inside save_zip_path."""
+@dataclass(frozen=True)
+class ResourcePatchTile:
+    """Nearest hand-mineable resource entity reported by world telemetry."""
+
+    name: str
+    x: float
+    y: float
+    amount: int
+
+
+@dataclass(frozen=True)
+class PlayerWorldState:
+    """Snapshot of player position, activity, selection, inventory, and nearest resource."""
+
+    tick: int
+    player_x: float
+    player_y: float
+    walking: bool
+    mining: bool
+    selected_name: str | None
+    selected_x: float | None
+    selected_y: float | None
+    inventory: dict[str, int]
+    nearest_resource: ResourcePatchTile | None
+
+
+def read_world_state(state_path: Path) -> PlayerWorldState | None:
+    """Read and parse the latest world state JSON written by the scenario telemetry hook."""
+    if not state_path.is_file():
+        return None
+    try:
+        raw_text = state_path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw_text:
+            return None
+        payload = json.loads(raw_text)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    player = payload.get("player")
+    if not isinstance(player, dict):
+        return None
+
+    inv_raw = player.get("inventory")
+    inventory: dict[str, int] = {}
+    if isinstance(inv_raw, dict):
+        for k, v in inv_raw.items():
+            if isinstance(k, str) and isinstance(v, (int, float)):
+                inventory[k] = int(v)
+
+    sel_raw = player.get("selected")
+    sel_name: str | None = None
+    sel_x: float | None = None
+    sel_y: float | None = None
+    if isinstance(sel_raw, dict):
+        sel_name = str(sel_raw.get("name", "")) or None
+        if "x" in sel_raw and "y" in sel_raw:
+            sel_x = float(sel_raw["x"])
+            sel_y = float(sel_raw["y"])
+
+    res_raw = payload.get("nearest_resource")
+    nearest: ResourcePatchTile | None = None
+    if isinstance(res_raw, dict) and "name" in res_raw and "x" in res_raw and "y" in res_raw:
+        nearest = ResourcePatchTile(
+            name=str(res_raw["name"]),
+            x=float(res_raw["x"]),
+            y=float(res_raw["y"]),
+            amount=int(res_raw.get("amount", 0)),
+        )
+
+    return PlayerWorldState(
+        tick=int(payload.get("tick", 0)),
+        player_x=float(player.get("x", 0.0)),
+        player_y=float(player.get("y", 0.0)),
+        walking=bool(player.get("walking", False)),
+        mining=bool(player.get("mining", False)),
+        selected_name=sel_name,
+        selected_x=sel_x,
+        selected_y=sel_y,
+        inventory=inventory,
+        nearest_resource=nearest,
+    )
+
+
+def compute_walking_vector(
+    cur_x: float,
+    cur_y: float,
+    target_x: float,
+    target_y: float,
+) -> tuple[float, float]:
+    """Compute a normalized 2D movement vector from (cur_x, cur_y) toward (target_x, target_y)."""
+    vx = target_x - cur_x
+    vy = target_y - cur_y
+    dist = math.hypot(vx, vy)
+    if dist <= 1e-6:
+        return 0.0, 0.0
+    return vx / dist, vy / dist
+
+
+def augment_save_freeplay_created_items(
+    save_zip_path: Path,
+    extra_items: dict[str, int],
+    enable_telemetry: bool = True,
+) -> None:
+    """Augment control.lua inside save_zip_path to skip cutscene, add items, and emit telemetry."""
     lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in extra_items.items())
-    hook = (
+    pre_hook = (
+        "local handler = require('event_handler')\n"
+        "handler.add_lib({\n"
+        "  events = {\n"
+        "    [defines.events.on_player_created] = function(e)\n"
+        "      storage.disable_crashsite = true\n"
+        "      storage.skip_intro = true\n"
+        "      storage.chart_distance = 64\n"
+        "    end\n"
+        "  }\n"
+        "})\n"
+    )
+    telemetry_block = ""
+    if enable_telemetry:
+        telemetry_block = (
+            ",\n"
+            "  on_nth_tick = {\n"
+            "    [5] = function(e)\n"
+            "      local p = game.get_player(1)\n"
+            "      if not p then return end\n"
+            "      local inv = p.get_main_inventory()\n"
+            "      local contents = {}\n"
+            "      if inv then\n"
+            "        for _, item in ipairs(inv.get_contents()) do\n"
+            "          contents[item.name] = (contents[item.name] or 0) + item.count\n"
+            "        end\n"
+            "      end\n"
+            "      if not storage.nearest_resource or not storage.nearest_resource_entity or not storage.nearest_resource_entity.valid then\n"
+            "        local resources = p.surface.find_entities_filtered({\n"
+            "          type = 'resource',\n"
+            "          position = p.position,\n"
+            "          radius = 96\n"
+            "        })\n"
+            "        local best = nil\n"
+            "        local best_d2 = 1e18\n"
+            "        for _, r in ipairs(resources) do\n"
+            "          local mp = r.prototype.mineable_properties\n"
+            "          if mp and mp.minable and not mp.required_fluid then\n"
+            "            local dx = r.position.x - p.position.x\n"
+            "            local dy = r.position.y - p.position.y\n"
+            "            local d2 = dx * dx + dy * dy\n"
+            "            if d2 < best_d2 then\n"
+            "              best_d2 = d2\n"
+            "              best = r\n"
+            "            end\n"
+            "          end\n"
+            "        end\n"
+            "        if best then\n"
+            "          storage.nearest_resource_entity = best\n"
+            "          storage.nearest_resource = {\n"
+            "            name = best.name,\n"
+            "            x = best.position.x,\n"
+            "            y = best.position.y,\n"
+            "            amount = best.amount\n"
+            "          }\n"
+            "        else\n"
+            "          storage.nearest_resource = nil\n"
+            "        end\n"
+            "      else\n"
+            "        storage.nearest_resource.amount = storage.nearest_resource_entity.amount\n"
+            "      end\n"
+            "      local sel = nil\n"
+            "      if p.selected and p.selected.valid then\n"
+            "        sel = {\n"
+            "          name = p.selected.name,\n"
+            "          x = p.selected.position.x,\n"
+            "          y = p.selected.position.y\n"
+            "        }\n"
+            "      end\n"
+            "      local state = {\n"
+            "        tick = e.tick,\n"
+            "        player = {\n"
+            "          x = p.position.x,\n"
+            "          y = p.position.y,\n"
+            "          walking = p.walking_state.walking,\n"
+            "          mining = p.mining_state.mining,\n"
+            "          selected = sel,\n"
+            "          inventory = contents\n"
+            "        },\n"
+            "        nearest_resource = storage.nearest_resource\n"
+            "      }\n"
+            "      helpers.write_file('factorilog_state.json', helpers.table_to_json(state) .. '\\n', false)\n"
+            "    end\n"
+            "  }\n"
+        )
+    post_hook = (
         "\nlocal handler = require('event_handler')\n"
         "handler.add_lib({\n"
         "  events = {\n"
         "    [defines.events.on_player_created] = function(e)\n"
         "      local p = game.get_player(e.player_index)\n"
         "      if p then\n"
+        "        if p.controller_type == defines.controllers.cutscene then\n"
+        "          p.exit_cutscene()\n"
+        "        end\n"
+        "        if p.character then\n"
+        "          p.character.destructible = true\n"
+        "        end\n"
         f"        for k, v in pairs({{{lua_entries}}}) do\n"
         "          p.insert({name = k, count = v})\n"
         "        end\n"
         "      end\n"
         "    end\n"
-        "  }\n"
+        f"  }}{telemetry_block}"
         "})\n"
     )
     temp_zip = save_zip_path.with_suffix(".tmp.zip")
@@ -423,9 +641,120 @@ def augment_save_freeplay_created_items(save_zip_path: Path, extra_items: dict[s
         for item in zin.infolist():
             raw = zin.read(item.filename)
             if item.filename.endswith("/control.lua") or item.filename == "control.lua":
-                raw = raw + hook.encode("utf-8")
+                raw = pre_hook.encode("utf-8") + raw + post_hook.encode("utf-8")
             zout.writestr(item, raw)
     temp_zip.replace(save_zip_path)
+
+
+def strip_client_cancellation_actions(
+    buf: bytes,
+    suppressed_actions: frozenset[int] = DEFAULT_SUPPRESSED_CLIENT_ACTIONS,
+) -> bytes:
+    """Remove suppressed client-idle InputActions from an unfragmented ClientToServerHeartbeat."""
+    try:
+        hdr = parse_network_header(buf)
+    except ValueError:
+        return buf
+    if hdr.msg_type != MSG_CLIENT_TO_SERVER_HEARTBEAT or hdr.fragmented:
+        return buf
+
+    pos = hdr.payload_offset
+    if pos + 5 > len(buf):
+        return buf
+    hb_flags = buf[pos]
+    if not (hb_flags & HB_HAS_TICK_CLOSURES) or (hb_flags & HB_ALL_TICK_CLOSURES_EMPTY):
+        return buf
+
+    cur_pos = pos + 5  # flags (1B) + sequence_number (4B)
+    single_closure = bool(hb_flags & HB_HAS_SINGLE_TICK_CLOSURE)
+    if single_closure:
+        closure_count = 1
+        closures_start = cur_pos
+    else:
+        if cur_pos >= len(buf):
+            return buf
+        closure_count = buf[cur_pos]
+        cur_pos += 1
+        closures_start = cur_pos
+
+    parsed_closures: list[tuple[bytes, list[InputActionRecord]]] = []
+    any_removed = False
+    all_kept_empty = True
+
+    for _ in range(closure_count):
+        if cur_pos + 8 > len(buf):
+            return buf
+        tick_bytes = buf[cur_pos : cur_pos + 8]
+        cur_pos += 8
+        try:
+            count_flagged, cur_pos = decode_uint32v(buf, cur_pos)
+        except ValueError:
+            return buf
+        action_count = count_flagged >> 1
+        has_segments = bool(count_flagged & 1)
+        if has_segments:
+            return buf
+
+        prev_player = PLAYER_INDEX_INIT
+        kept_actions: list[InputActionRecord] = []
+        for _ in range(action_count):
+            try:
+                act_type, cur_pos = decode_uint16v(buf, cur_pos)
+                delta, cur_pos = decode_uint16v(buf, cur_pos)
+            except ValueError:
+                return buf
+            if act_type not in KNOWN_ACTION_PAYLOAD_SIZES:
+                return buf
+            p_size = KNOWN_ACTION_PAYLOAD_SIZES[act_type]
+            if cur_pos + p_size > len(buf):
+                return buf
+            act_payload = buf[cur_pos : cur_pos + p_size]
+            cur_pos += p_size
+            player_idx = (prev_player + delta) & PLAYER_INDEX_MASK
+            prev_player = player_idx
+            if act_type in suppressed_actions:
+                any_removed = True
+            else:
+                kept_actions.append(
+                    InputActionRecord(
+                        action_type=act_type,
+                        player_index=player_idx,
+                        payload=act_payload,
+                    )
+                )
+
+        if kept_actions:
+            all_kept_empty = False
+        parsed_closures.append((tick_bytes, kept_actions))
+
+    if not any_removed:
+        return buf
+
+    rest = buf[cur_pos:]
+    if all_kept_empty:
+        new_hb_flags = hb_flags | HB_ALL_TICK_CLOSURES_EMPTY
+        ticks_only = b"".join(tick_bytes for tick_bytes, _ in parsed_closures)
+        return buf[:pos] + bytes([new_hb_flags]) + buf[pos + 1 : closures_start] + ticks_only + rest
+
+    encoded_closures = bytearray()
+    for tick_bytes, kept_actions in parsed_closures:
+        encoded_closures.extend(tick_bytes)
+        encoded_closures.extend(encode_uint32v(len(kept_actions) << 1))
+        prev_player = PLAYER_INDEX_INIT
+        for act in kept_actions:
+            delta = (act.player_index - prev_player) & PLAYER_INDEX_MASK
+            prev_player = act.player_index
+            encoded_closures.extend(encode_uint16v(act.action_type))
+            encoded_closures.extend(encode_uint16v(delta))
+            encoded_closures.extend(act.payload)
+
+    return (
+        buf[:pos]
+        + bytes([hb_flags])
+        + buf[pos + 1 : closures_start]
+        + bytes(encoded_closures)
+        + rest
+    )
 
 
 def scan_heartbeat_for_achievement(
@@ -535,6 +864,7 @@ class LockstepProxyStats:
     server_broadcast_achievement_ids: list[int] = field(default_factory=list)
     injected_actions: int = 0
     empty_client_heartbeats_seen: int = 0
+    suppressed_client_packets: int = 0
 
 
 class FactorioLockstepProxy:
@@ -547,10 +877,14 @@ class FactorioLockstepProxy:
         server_host: str,
         server_port: int,
         achievement_action_id: int = ACTION_ACHIEVEMENT_GAINED,
+        suppress_client_cancellation: bool = True,
+        suppressed_client_actions: frozenset[int] = DEFAULT_SUPPRESSED_CLIENT_ACTIONS,
     ) -> None:
         self.listen_addr = (listen_host, listen_port)
         self.server_addr = (server_host, server_port)
         self.achievement_action_id = achievement_action_id
+        self.suppress_client_cancellation = suppress_client_cancellation
+        self.suppressed_client_actions = suppressed_client_actions
         self.stats = LockstepProxyStats()
         self._pending_injections: list[tuple[int, int, bytes, int]] = []
         self._lock = threading.Lock()
@@ -571,6 +905,11 @@ class FactorioLockstepProxy:
             self._pending_injections.append(
                 (action_type, player_index, payload, min_empty_heartbeats)
             )
+
+    def pending_action_count(self) -> int:
+        """Return the number of queued InputActions waiting for injection."""
+        with self._lock:
+            return len(self._pending_injections)
 
     def start(self) -> None:
         """Bind UDP socket and start forwarding thread."""
@@ -627,6 +966,14 @@ class FactorioLockstepProxy:
                             self.stats.client_emitted_achievement_ids.append(ach_id)
                         if ach_id not in self.stats.gained_achievement_ids:
                             self.stats.gained_achievement_ids.append(ach_id)
+
+                    if self.suppress_client_cancellation:
+                        stripped = strip_client_cancellation_actions(
+                            data, self.suppressed_client_actions
+                        )
+                        if stripped != data:
+                            data = stripped
+                            self.stats.suppressed_client_packets += 1
 
                     pos = hdr.payload_offset
                     required = (
