@@ -135,24 +135,30 @@ class RecipeHeuristicVisitor(ast.NodeVisitor):
                 f"literal '{val}' used in conditional logic. Physical layout must be recipe-agnostic."
             )
 
+    def _inspect_child_node(self, child: ast.AST) -> None:
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            self._check_string_constant(child, child.value, "conditional expression")
+        elif isinstance(child, (ast.Tuple, ast.List)):
+            for elt in child.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    self._check_string_constant(elt, elt.value, "collection test")
+
     def _inspect_condition_node(self, node: ast.AST) -> None:
         for child in ast.walk(node):
-            if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                self._check_string_constant(child, child.value, "conditional expression")
-            elif isinstance(child, (ast.Tuple, ast.List)):
-                for elt in child.elts:
-                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                        self._check_string_constant(elt, elt.value, "collection test")
+            self._inspect_child_node(child)
 
     def visit_If(self, node: ast.If) -> None:
+        """Inspect if statement test expressions for recipe literals."""
         self._inspect_condition_node(node.test)
         self.generic_visit(node)
 
     def visit_IfExp(self, node: ast.IfExp) -> None:
+        """Inspect ternary if expressions for recipe literals."""
         self._inspect_condition_node(node.test)
         self.generic_visit(node)
 
     def visit_comprehension(self, node: ast.comprehension) -> None:
+        """Inspect comprehension filter clauses for recipe literals."""
         for if_clause in node.ifs:
             self._inspect_condition_node(if_clause)
         self.generic_visit(node)

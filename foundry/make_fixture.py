@@ -59,9 +59,50 @@ TABLES = [
     "decider-combinator",
 ]
 TRANSPORT_TABLES = frozenset(TABLES[TABLES.index("transport-belt") :])
+BYTES_PER_KIB = 1024
+
+
+def _collect_kept_names(
+    recipes: solve.RecipeMap,
+    data: solve.Data,
+    demand: dict[str, float],
+) -> set[str]:
+    """Collect entity and item names that kept recipes place or produce."""
+    keep: set[str] = set()
+    for recipe in recipes.values():
+        proto_machine = data.machine_for(recipe)
+        if proto_machine:
+            keep.add(proto_machine[0])
+        entries = solve.Data.results_of(recipe)
+        ingredients = solve.Data.ingredients_of(recipe)
+        if isinstance(ingredients, dict):
+            # Degenerate placeholder shapes. Nothing to keep.
+            continue
+        for entry in ingredients + entries:
+            keep.add(solve.name_of(entry))
+    keep |= set(demand) | set(solve.PLANET_RAW["nauvis"])
+    return keep
+
+
+def _filter_technologies(
+    raw_techs: dict[str, dict[str, object]],
+    packs: set[str],
+) -> dict[str, dict[str, object]]:
+    """Keep technologies whose research unit requires only kept science packs."""
+    techs: dict[str, dict[str, object]] = {}
+    for name, tech in raw_techs.items():
+        unit = tech.get("unit")
+        if isinstance(unit, dict):
+            ingredients = unit.get("ingredients", [])
+            if isinstance(ingredients, list) and all(
+                solve.name_of(e) in packs for e in ingredients
+            ):
+                techs[name] = tech
+    return techs
 
 
 def main() -> int:
+    """Build a minimal prototype dump fixture from a full Factorio data dump."""
     src, out = sys.argv[1], sys.argv[2]
     with Path(src).open() as stream:
         raw = json.load(stream)
@@ -71,50 +112,27 @@ def main() -> int:
     allowed = data.allowed_recipes(planets)
     demand = {k: v for k, v in DEMAND.items() if k in data.recipes}
     recipes, _items = solve.closure(data, demand, allowed)
+    kept_names = _collect_kept_names(recipes, data, demand)
 
     proto = {}
     for table in TABLES:
         full = raw.get(table, {})
         if table == "recipe":
-            keep = set(recipes) & set(full)
+            proto[table] = {n: p for n, p in full.items() if n in recipes}
         elif table in TRANSPORT_TABLES:
             # Small tables. The tech layer needs them whole.
             proto[table] = full
-            continue
-        elif table == "technology":
-            keep = None  # the code fills this set below, from the packs
-        else:
-            # Names any kept recipe can place or produce.
-            keep = set()
-            for name in recipes:
-                recipe = recipes[name]
-                proto_machine = data.machine_for(recipe)
-                if proto_machine:
-                    keep.add(proto_machine[0])
-                entries = solve.Data.results_of(recipe)
-                ingredients = solve.Data.ingredients_of(recipe)
-                if isinstance(ingredients, dict):
-                    # Degenerate placeholder shapes. Nothing to keep.
-                    continue
-                for entry in ingredients + entries:
-                    item = solve.name_of(entry)
-                    keep.add(item)
-            keep |= set(demand) | set(solve.PLANET_RAW["nauvis"])
-        if keep is not None:
-            proto[table] = {n: p for n, p in full.items() if n in keep}
+        elif table != "technology":
+            proto[table] = {n: p for n, p in full.items() if n in kept_names}
 
     # Technologies whose research unit asks only for kept packs.
     packs = set(demand) & set(raw.get("item", {}))
-    techs = {}
-    for name, tech in raw.get("technology", {}).items():
-        unit = tech.get("unit")
-        if unit and all(solve.name_of(e) in packs for e in unit["ingredients"]):
-            techs[name] = tech
+    techs = _filter_technologies(raw.get("technology", {}), packs)
     proto["technology"] = techs
 
     Path(out).write_text(json.dumps(proto))
     print(
-        f"fixture: {out} {Path(out).stat().st_size / 1024:.0f} KiB, "
+        f"fixture: {out} {Path(out).stat().st_size / BYTES_PER_KIB:.0f} KiB, "
         f"{len(recipes)} recipes, {len(techs)} technologies"
     )
     return 0

@@ -10,17 +10,64 @@ import argparse
 import collections
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from foundry.blueprint import decode
 
+STANDARD_MACHINE_AREA = 9.0
+REFINERY_MACHINE_AREA = 25.0
+PERCENT_SCALE = 100.0
+REPORT_RULE_WIDTH = 80
+TABLE_RULE_WIDTH = 90
+COL_NAME_MAX_LEN = 18
+MAX_PREVIEW_INSERTERS = 20
+DEFAULT_TILE_SEARCH_RADIUS = 3.0
+MISSING_COORD_SENTINEL = 1e9
+WIRE_TUPLE_MIN_LEN = 4
+WIRE_SECOND_CONN_INDEX = 3
 
-def analyze_blueprint(bp_data: dict[str, Any]) -> dict[str, Any]:
+
+def _as_mapping(val: object) -> Mapping[str, object]:
+    """Return val if it is a Mapping, or an empty dictionary."""
+    if isinstance(val, Mapping):
+        return val
+    return {}
+
+
+def _as_float(val: object, default: float = 0.0) -> float:
+    """Return val converted to float, or default."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    return default
+
+
+def _pos_xy(entity: Mapping[str, object], default: float = 0.0) -> tuple[float, float]:
+    """Extract (x, y) coordinates from an entity mapping."""
+    pos = _as_mapping(entity.get("position"))
+    return _as_float(pos.get("x"), default), _as_float(pos.get("y"), default)
+
+
+def _entity_machine_area(name: str) -> float:
+    """Return machine footprint area in tiles, or 0.0 if not a machine."""
+    if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
+        return STANDARD_MACHINE_AREA
+    if "oil-refinery" in name:
+        return REFINERY_MACHINE_AREA
+    return 0.0
+
+
+def analyze_blueprint(bp_data: Mapping[str, object]) -> dict[str, Any]:
     """Analyze blueprint entities and compute factory metrics."""
-    bp = bp_data.get("blueprint", {})
-    label = bp.get("label", "unnamed")
-    entities = bp.get("entities", [])
+    bp = _as_mapping(bp_data.get("blueprint"))
+    label = str(bp.get("label", "unnamed"))
+    raw_entities = bp.get("entities")
+    entities = (
+        [e for e in raw_entities if isinstance(e, Mapping)]
+        if isinstance(raw_entities, list)
+        else []
+    )
 
     if not entities:
         return {
@@ -36,8 +83,8 @@ def analyze_blueprint(bp_data: dict[str, Any]) -> dict[str, Any]:
             "recipes": {},
         }
 
-    xs = [e["position"]["x"] for e in entities if "position" in e]
-    ys = [e["position"]["y"] for e in entities if "position" in e]
+    xs = [_pos_xy(e)[0] for e in entities if "position" in e]
+    ys = [_pos_xy(e)[1] for e in entities if "position" in e]
 
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
@@ -52,20 +99,17 @@ def analyze_blueprint(bp_data: dict[str, Any]) -> dict[str, Any]:
     machine_area = 0.0
 
     for e in entities:
-        name = e.get("name", "unknown")
+        name = str(e.get("name", "unknown"))
         counts[name] += 1
         recipe = e.get("recipe")
-        if recipe:
+        if isinstance(recipe, str) and recipe:
             recipes[recipe] += 1
-
-        if "assembling-machine" in name or "furnace" in name or "chemical-plant" in name:
+        footprint = _entity_machine_area(name)
+        if footprint > 0.0:
             machine_count += 1
-            machine_area += 9.0
-        elif "oil-refinery" in name:
-            machine_count += 1
-            machine_area += 25.0
+            machine_area += footprint
 
-    density = (machine_area / area * 100.0) if area > 0 else 0.0
+    density = (machine_area / area * PERCENT_SCALE) if area > 0 else 0.0
 
     return {
         "label": label,
@@ -85,9 +129,12 @@ def analyze_blueprint(bp_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def read_blueprint(path_or_str: str) -> dict[str, Any]:
+def read_blueprint(
+    path_or_str: str,
+    env: Mapping[str, str] = os.environ,
+) -> dict[str, Any]:
     """Read blueprint data from file or raw string."""
-    workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    workspace = env.get("BUILD_WORKSPACE_DIRECTORY", "")
     path = Path(path_or_str)
     if workspace and not path.is_file() and not path.is_absolute():
         cand = Path(workspace) / path_or_str
@@ -98,119 +145,224 @@ def read_blueprint(path_or_str: str) -> dict[str, Any]:
     return decode(content)
 
 
-def print_single_report(metrics: dict[str, Any], path: str) -> None:
+def print_single_report(metrics: Mapping[str, object], path: str) -> None:
     """Print detailed metric report for one blueprint."""
-    print("=" * 80)
+    counts = _as_mapping(metrics.get("counts"))
+    recipes = _as_mapping(metrics.get("recipes"))
+    width = _as_float(metrics.get("width"))
+    height = _as_float(metrics.get("height"))
+    area = _as_float(metrics.get("area"))
+    machine_area = _as_float(metrics.get("machine_area"))
+    density = _as_float(metrics.get("density"))
+    print("=" * REPORT_RULE_WIDTH)
     print(f"BLUEPRINT ANALYSIS: {path}")
     print(f"Label: {metrics['label']}")
-    print("=" * 80)
-    print(
-        f"Dimensions        : {metrics['width']:.1f} x {metrics['height']:.1f} tiles "
-        f"(area = {metrics['area']:.1f} tiles)"
-    )
+    print("=" * REPORT_RULE_WIDTH)
+    print(f"Dimensions        : {width:.1f} x {height:.1f} tiles (area = {area:.1f} tiles)")
     if "min_x" in metrics:
-        print(
-            f"Bounds            : ({metrics['min_x']:.1f}, {metrics['min_y']:.1f}) to ({metrics['max_x']:.1f}, {metrics['max_y']:.1f})"
-        )
+        min_x = _as_float(metrics.get("min_x"))
+        min_y = _as_float(metrics.get("min_y"))
+        max_x = _as_float(metrics.get("max_x"))
+        max_y = _as_float(metrics.get("max_y"))
+        print(f"Bounds            : ({min_x:.1f}, {min_y:.1f}) to ({max_x:.1f}, {max_y:.1f})")
     print(f"Total entities    : {metrics['entity_count']}")
     print(
         f"Machine entities  : {metrics['machine_count']} machines "
-        f"({metrics['machine_area']:.1f} tiles machine footprint)"
+        f"({machine_area:.1f} tiles machine footprint)"
     )
-    print(f"Packing density   : {metrics['density']:.2f}% (machine footprint / bounding area)")
-    print("-" * 80)
+    print(f"Packing density   : {density:.2f}% (machine footprint / bounding area)")
+    print("-" * REPORT_RULE_WIDTH)
     print("Entity breakdown:")
-    for name, cnt in sorted(metrics["counts"].items(), key=lambda kv: (-kv[1], kv[0])):
+    count_items = [(str(k), int(_as_float(v))) for k, v in counts.items()]
+    for name, cnt in sorted(count_items, key=lambda kv: (-kv[1], kv[0])):
         print(f"  {cnt:5d} x {name}")
-    if metrics["recipes"]:
-        print("-" * 80)
+    if recipes:
+        print("-" * REPORT_RULE_WIDTH)
         print("Recipe breakdown:")
-        for rec, cnt in sorted(metrics["recipes"].items(), key=lambda kv: (-kv[1], kv[0])):
+        recipe_items = [(str(k), int(_as_float(v))) for k, v in recipes.items()]
+        for rec, cnt in sorted(recipe_items, key=lambda kv: (-kv[1], kv[0])):
             print(f"  {cnt:5d} x {rec}")
-    print("=" * 80)
+    print("=" * REPORT_RULE_WIDTH)
 
 
-def print_comparison_table(results: list[tuple[str, dict[str, Any]]]) -> None:
+def _count_matching(counts: Mapping[str, object], substring: str) -> int:
+    """Sum counts of all keys that contain substring."""
+    return sum(int(_as_float(v)) for k, v in counts.items() if substring in k)
+
+
+def print_comparison_table(results: Sequence[tuple[str, Mapping[str, object]]]) -> None:
     """Print side-by-side comparison table for multiple blueprints."""
-    print("=" * 90)
+    print("=" * TABLE_RULE_WIDTH)
     print("BLUEPRINT COMPARISON")
-    print("=" * 90)
-    header = f"{'Metric':<25s}"
-    for path, _ in results:
-        short_name = Path(path).name[:18]
-        header += f" | {short_name:<18s}"
-    print(header)
-    print("-" * 90)
+    print("=" * TABLE_RULE_WIDTH)
+    header_cols = [f" | {Path(path).name[:COL_NAME_MAX_LEN]:<18s}" for path, _ in results]
+    print(f"{'Metric':<25s}{''.join(header_cols)}")
+    print("-" * TABLE_RULE_WIDTH)
 
     rows = [
-        ("Label", lambda m: str(m["label"])[:18]),
+        ("Label", lambda m: str(m["label"])[:COL_NAME_MAX_LEN]),
         ("Total Entities", lambda m: str(m["entity_count"])),
-        ("Dimensions (W x H)", lambda m: f"{m['width']:.0f} x {m['height']:.0f}"),
-        ("Total Area (tiles)", lambda m: f"{m['area']:,.0f}"),
+        (
+            "Dimensions (W x H)",
+            lambda m: f"{_as_float(m['width']):.0f} x {_as_float(m['height']):.0f}",
+        ),
+        ("Total Area (tiles)", lambda m: f"{_as_float(m['area']):,.0f}"),
         ("Machine Count", lambda m: str(m["machine_count"])),
-        ("Machine Area", lambda m: f"{m['machine_area']:.0f}"),
-        ("Packing Density", lambda m: f"{m['density']:.2f}%"),
-        ("Belts (surface)", lambda m: str(m["counts"].get("transport-belt", 0))),
-        ("Underground Belts", lambda m: str(m["counts"].get("underground-belt", 0))),
-        ("Splitters", lambda m: str(m["counts"].get("splitter", 0))),
-        ("Inserters", lambda m: str(sum(v for k, v in m["counts"].items() if "inserter" in k))),
-        ("Poles", lambda m: str(sum(v for k, v in m["counts"].items() if "pole" in k))),
+        ("Machine Area", lambda m: f"{_as_float(m['machine_area']):.0f}"),
+        ("Packing Density", lambda m: f"{_as_float(m['density']):.2f}%"),
+        (
+            "Belts (surface)",
+            lambda m: str(_as_mapping(m["counts"]).get("transport-belt", 0)),
+        ),
+        (
+            "Underground Belts",
+            lambda m: str(_as_mapping(m["counts"]).get("underground-belt", 0)),
+        ),
+        ("Splitters", lambda m: str(_as_mapping(m["counts"]).get("splitter", 0))),
+        ("Inserters", lambda m: str(_count_matching(_as_mapping(m["counts"]), "inserter"))),
+        ("Poles", lambda m: str(_count_matching(_as_mapping(m["counts"]), "pole"))),
     ]
 
     for label, fn in rows:
-        row_str = f"{label:<25s}"
-        for _, m in results:
-            val = fn(m)
-            row_str += f" | {val:<18s}"
-        print(row_str)
-    print("=" * 90)
+        val_cols = [f" | {fn(m):<18s}" for _, m in results]
+        print(f"{label:<25s}{''.join(val_cols)}")
+    print("=" * TABLE_RULE_WIDTH)
 
 
-def print_details(bp_data: dict[str, Any]) -> None:
+def print_details(bp_data: Mapping[str, object]) -> None:
     """Print machine positions and belt bus tracks."""
-    bp = bp_data.get("blueprint", {})
-    entities = bp.get("entities", [])
+    bp = _as_mapping(bp_data.get("blueprint"))
+    raw_entities = bp.get("entities")
+    entities = (
+        [e for e in raw_entities if isinstance(e, Mapping)]
+        if isinstance(raw_entities, list)
+        else []
+    )
     machines = [
         e
         for e in entities
-        if "assembling-machine" in e.get("name", "") or "furnace" in e.get("name", "")
+        if "assembling-machine" in str(e.get("name", "")) or "furnace" in str(e.get("name", ""))
     ]
-    machines.sort(key=lambda m: (m["position"]["y"], m["position"]["x"]))
+    machines.sort(key=lambda m: (_pos_xy(m)[1], _pos_xy(m)[0]))
 
-    print("-" * 80)
+    print("-" * REPORT_RULE_WIDTH)
     print(f"MACHINES ({len(machines)} total):")
     for m in machines:
-        p = m["position"]
+        px, py = _pos_xy(m)
         rec = m.get("recipe", "no-recipe")
-        print(f"  at ({p['x']:5.1f}, {p['y']:5.1f}): {m['name']} recipe={rec}")
+        print(f"  at ({px:5.1f}, {py:5.1f}): {m['name']} recipe={rec}")
 
-    inserters = [e for e in entities if "inserter" in e.get("name", "")]
-    inserters.sort(key=lambda ins: (ins["position"]["y"], ins["position"]["x"]))
-    print("-" * 80)
+    inserters = [e for e in entities if "inserter" in str(e.get("name", ""))]
+    inserters.sort(key=lambda ins: (_pos_xy(ins)[1], _pos_xy(ins)[0]))
+    print("-" * REPORT_RULE_WIDTH)
     print(f"INSERTERS ({len(inserters)} total):")
-    for ins in inserters[:20]:
-        p = ins["position"]
+    for ins in inserters[:MAX_PREVIEW_INSERTERS]:
+        px, py = _pos_xy(ins)
         d = ins.get("direction", 0)
-        print(f"  at ({p['x']:5.1f}, {p['y']:5.1f}): {ins['name']} dir={d}")
-    if len(inserters) > 20:
-        print(f"  ... and {len(inserters) - 20} more inserters")
+        print(f"  at ({px:5.1f}, {py:5.1f}): {ins['name']} dir={d}")
+    if len(inserters) > MAX_PREVIEW_INSERTERS:
+        print(f"  ... and {len(inserters) - MAX_PREVIEW_INSERTERS} more inserters")
 
-    belts = [e for e in entities if "belt" in e.get("name", "")]
-    by_y = collections.defaultdict(list)
+    belts = [e for e in entities if "belt" in str(e.get("name", ""))]
+    by_y: dict[float, list[Mapping[str, object]]] = collections.defaultdict(list)
     for b in belts:
-        by_y[round(b["position"]["y"], 1)].append(b)
+        by_y[round(_pos_xy(b)[1], 1)].append(b)
 
-    print("-" * 80)
+    print("-" * REPORT_RULE_WIDTH)
     print("BELT ROWS (horizontal channels):")
     for y_coord in sorted(by_y.keys()):
         row_belts = by_y[y_coord]
-        xs = [b["position"]["x"] for b in row_belts]
-        dirs = [b.get("direction", 0) for b in row_belts]
+        xs = [_pos_xy(b)[0] for b in row_belts]
+        dirs = [int(_as_float(b.get("direction", 0))) for b in row_belts]
         dir_summary = collections.Counter(dirs)
         dir_str = ", ".join(f"dir={d}:{cnt}" for d, cnt in sorted(dir_summary.items()))
         print(
-            f"  y={y_coord:5.1f}: {len(row_belts):3d} belts from x={min(xs):5.1f} to {max(xs):5.1f} [{dir_str}]"
+            f"  y={y_coord:5.1f}: {len(row_belts):3d} belts "
+            f"from x={min(xs):5.1f} to {max(xs):5.1f} [{dir_str}]"
         )
+
+
+def _format_other_entity(
+    other_id: int,
+    ent_by_num: Mapping[int, Mapping[str, object]],
+) -> str:
+    """Format a wire endpoint entity label."""
+    other_e = ent_by_num.get(other_id)
+    if other_e and "position" in other_e:
+        ox, oy = _pos_xy(other_e)
+        return f"{other_e.get('name')}@({ox:.1f},{oy:.1f})"
+    return f"#{other_id}"
+
+
+def _build_wire_map(
+    wires: Sequence[object],
+    ent_by_num: Mapping[int, Mapping[str, object]],
+) -> dict[int, list[str]]:
+    """Index formatted wire descriptions by entity number."""
+    by_entity: dict[int, list[str]] = collections.defaultdict(list)
+    for w in wires:
+        if not isinstance(w, list) or len(w) < WIRE_TUPLE_MIN_LEN:
+            continue
+        id0 = int(_as_float(w[0]))
+        id1 = int(_as_float(w[2]))
+        str1 = _format_other_entity(id1, ent_by_num)
+        str0 = _format_other_entity(id0, ent_by_num)
+        by_entity[id0].append(f"c{w[1]}->{str1}(#{id1})")
+        by_entity[id1].append(f"c{w[WIRE_SECOND_CONN_INDEX]}->{str0}(#{id0})")
+    return by_entity
+
+
+def _print_nearby_entities(
+    bp_path: str,
+    raw: Mapping[str, object],
+    tx: float,
+    ty: float,
+    radius: float,
+) -> None:
+    """Print entities and wire connections near (tx, ty) in one blueprint."""
+    print(f"\nENTITIES NEAR ({tx:.1f}, {ty:.1f}) in {bp_path} (radius={radius}):")
+    bp = _as_mapping(raw.get("blueprint"))
+    ents_raw = bp.get("entities")
+    ents = [e for e in ents_raw if isinstance(e, Mapping)] if isinstance(ents_raw, list) else []
+    wires_raw = bp.get("wires")
+    wires = wires_raw if isinstance(wires_raw, list) else []
+    ent_by_num = {int(_as_float(e["entity_number"])): e for e in ents if "entity_number" in e}
+    wire_map = _build_wire_map(wires, ent_by_num)
+    matches = [
+        e
+        for e in ents
+        if abs(_pos_xy(e, MISSING_COORD_SENTINEL)[0] - tx) <= radius
+        and abs(_pos_xy(e, MISSING_COORD_SENTINEL)[1] - ty) <= radius
+    ]
+    matches.sort(key=lambda e: (_pos_xy(e)[0], _pos_xy(e)[1]))
+    for e in matches:
+        px, py = _pos_xy(e)
+        enum = e.get("entity_number")
+        w_list = wire_map.get(enum, []) if isinstance(enum, int) else []
+        w_str = f" wires=[{', '.join(w_list)}]" if w_list else ""
+        print(
+            f"  #{enum} {e.get('name')} at ({px:.1f}, {py:.1f}) "
+            f"dir={e.get('direction', 0)} type={e.get('type')}{w_str}"
+        )
+
+
+def _display_reports(
+    results: Sequence[tuple[str, Mapping[str, object]]],
+    raw_data: Sequence[Mapping[str, object]],
+    show_details: bool,
+) -> None:
+    """Display either a single blueprint report or a comparison table."""
+    if len(results) == 1:
+        print_single_report(results[0][1], results[0][0])
+        if show_details:
+            print_details(raw_data[0])
+        return
+
+    print_comparison_table(results)
+    if show_details:
+        for idx, (path, _) in enumerate(results):
+            print(f"\nDETAILS FOR: {path}")
+            print_details(raw_data[idx])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,18 +376,18 @@ def main(argv: list[str] | None = None) -> int:
         "--find-tile",
         type=str,
         default="",
-        help="Find entities near X,Y (e.g. '186.5,35.5')",
+        help="Find entities near X,Y (for example '186.5,35.5')",
     )
     parser.add_argument(
         "--radius",
         type=float,
-        default=3.0,
+        default=DEFAULT_TILE_SEARCH_RADIUS,
         help="Radius for --find-tile search (default 3.0)",
     )
     args = parser.parse_args(argv)
 
-    results = []
-    raw_data = []
+    results: list[tuple[str, Mapping[str, object]]] = []
+    raw_data: list[Mapping[str, object]] = []
     for bp_path in args.blueprints:
         try:
             data = read_blueprint(bp_path)
@@ -246,51 +398,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR reading '{bp_path}': {e}", file=sys.stderr)
             return 1
 
-    if len(results) == 1:
-        print_single_report(results[0][1], results[0][0])
-        if args.details:
-            print_details(raw_data[0])
-    else:
-        print_comparison_table(results)
-        if args.details:
-            for idx, (path, _) in enumerate(results):
-                print(f"\nDETAILS FOR: {path}")
-                print_details(raw_data[idx])
+    _display_reports(results, raw_data, args.details)
 
     if args.find_tile:
         tx, ty = (float(v) for v in args.find_tile.split(","))
         for bp_path, raw in zip(args.blueprints, raw_data, strict=True):
-            print(f"\nENTITIES NEAR ({tx:.1f}, {ty:.1f}) in {bp_path} (radius={args.radius}):")
-            ents = raw.get("blueprint", {}).get("entities", [])
-            wires = raw.get("blueprint", {}).get("wires", [])
-            ent_by_num = {int(e["entity_number"]): e for e in ents if "entity_number" in e}
-            matches = [
-                e
-                for e in ents
-                if abs(e.get("position", {}).get("x", 1e9) - tx) <= args.radius
-                and abs(e.get("position", {}).get("y", 1e9) - ty) <= args.radius
-            ]
-            matches.sort(key=lambda e: (e["position"]["x"], e["position"]["y"]))
-            for e in matches:
-                p = e["position"]
-                enum = e.get("entity_number")
-                w_list = []
-                if enum is not None:
-                    for w in wires:
-                        if len(w) >= 4 and (w[0] == enum or w[2] == enum):
-                            other_id = w[2] if w[0] == enum else w[0]
-                            conn_type = w[1] if w[0] == enum else w[3]
-                            other_e = ent_by_num.get(int(other_id))
-                            other_str = (
-                                f"{other_e.get('name')}@({other_e['position']['x']:.1f},{other_e['position']['y']:.1f})"
-                                if other_e and "position" in other_e
-                                else f"#{other_id}"
-                            )
-                            w_list.append(f"c{conn_type}->{other_str}(#{other_id})")
-                w_str = f" wires=[{', '.join(w_list)}]" if w_list else ""
-                print(
-                    f"  #{enum} {e.get('name')} at ({p['x']:.1f}, {p['y']:.1f}) dir={e.get('direction', 0)} type={e.get('type')}{w_str}"
-                )
+            _print_nearby_entities(bp_path, raw, tx, ty, args.radius)
 
     return 0
 

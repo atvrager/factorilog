@@ -590,20 +590,8 @@ class TestCircuitPower(unittest.TestCase):
 
         # Place combinators and switch in a compact test grid (within 9 tiles reach)
         for idx, c in enumerate(synth_result.cells):
-            ename = (
-                "constant-combinator"
-                if "constant" in c.cell
-                else (
-                    "power-switch"
-                    if "switch" in c.cell
-                    else (
-                        "arithmetic-combinator" if "arithmetic" in c.cell else "decider-combinator"
-                    )
-                )
-            )
-            extra: dict[str, Any] = {}
-            if c.control_behavior:
-                extra["control_behavior"] = c.control_behavior
+            ename = self._cell_entity_name(c.cell)
+            extra = {"control_behavior": c.control_behavior} if c.control_behavior else {}
             ent = {
                 "name": ename,
                 "position": {"x": 2.0 * (idx % 5), "y": 2.0 * (idx // 5)},
@@ -904,6 +892,50 @@ class TestCircuitPower(unittest.TestCase):
 
         self.assertTrue(matched, f"Test result pattern not found in simulation output: {results}")
 
+    @staticmethod
+    def _cell_entity_name(cell_type: str) -> str:
+        """Map synthesized combinator cell type to Factorio entity name."""
+        if "constant" in cell_type:
+            return "constant-combinator"
+        if "switch" in cell_type:
+            return "power-switch"
+        if "arithmetic" in cell_type:
+            return "arithmetic-combinator"
+        return "decider-combinator"
+
+    @staticmethod
+    def _find_copper_components(
+        entities: list[dict[str, Any]],
+        wires: list[list[int]],
+        ps_num: int,
+    ) -> list[list[int]]:
+        """Partition entities into connected copper components excluding power switch ps_num."""
+        copper_adj: dict[int, list[int]] = {}
+        for e1, c1, e2, c2 in wires:
+            if c1 in (5, 6) and c2 in (5, 6):
+                copper_adj.setdefault(e1, []).append(e2)
+                copper_adj.setdefault(e2, []).append(e1)
+
+        visited: set[int] = set()
+        components: list[list[int]] = []
+        for e in entities:
+            num = e.get("entity_number")
+            if not isinstance(num, int) or num == ps_num or num not in copper_adj or num in visited:
+                continue
+            comp: list[int] = []
+            q = [num]
+            visited.add(num)
+            while q:
+                curr = q.pop(0)
+                comp.append(curr)
+                new_nbrs = [
+                    nbr for nbr in copper_adj.get(curr, []) if nbr != ps_num and nbr not in visited
+                ]
+                visited.update(new_nbrs)
+                q.extend(new_nbrs)
+            components.append(comp)
+        return components
+
     def test_multi_domain_pdn_isolation_and_power_gating(self) -> None:
         """Verify multi-domain PDN synthesizes isolated copper networks bridged by switch."""
         entities = [
@@ -1002,33 +1034,9 @@ class TestCircuitPower(unittest.TestCase):
             pole_entities=pole_entities,
         )
 
-        copper_adj: dict[int, list[int]] = {}
-        for w in wires:
-            e1, c1, e2, c2 = w
-            if c1 in (5, 6) and c2 in (5, 6):
-                copper_adj.setdefault(e1, []).append(e2)
-                copper_adj.setdefault(e2, []).append(e1)
-
-        ps_ent = [e for e in entities if e.get("name") == "power-switch"][0]
+        ps_ent = next(e for e in entities if e.get("name") == "power-switch")
         ps_num = ps_ent["entity_number"]
-
-        visited = set()
-        components = []
-        for e in entities:
-            num = e.get("entity_number")
-            if num == ps_num or num not in copper_adj or num in visited:
-                continue
-            comp = []
-            q = [num]
-            visited.add(num)
-            while q:
-                curr = q.pop(0)
-                comp.append(curr)
-                for nbr in copper_adj.get(curr, []):
-                    if nbr != ps_num and nbr not in visited:
-                        visited.add(nbr)
-                        q.append(nbr)
-            components.append(comp)
+        components = self._find_copper_components(entities, wires, ps_num)
 
         self.assertEqual(
             len(components), 2, "Must partition into exactly 2 isolated copper domains"

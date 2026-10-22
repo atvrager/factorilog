@@ -18,6 +18,7 @@ BASE = Path(__file__).resolve().parent
 
 
 def load_linter() -> types.ModuleType:
+    """Load the STE linter module from disk."""
     spec = importlib.util.spec_from_file_location("ste_lint", BASE / "ste-lint.py")
     assert spec is not None
     assert spec.loader is not None
@@ -34,6 +35,7 @@ CHECKS = 0
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
+    """Record a test assertion result."""
     global CHECKS
     CHECKS += 1
     if not ok:
@@ -41,14 +43,17 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 def lint(text: str, name: str = "t.md", strict: bool = False) -> list[ste.Finding]:
+    """Run the STE linter on a text snippet."""
     return ste.lint_text(name, ste.prose_lines(Path(name), text), strict)
 
 
 def rules(findings: list[ste.Finding]) -> set[str]:
+    """Extract the set of rule codes from findings."""
     return {f.rule for f in findings}
 
 
 def severities(findings: list[ste.Finding], rule: str) -> list[ste.Severity]:
+    """Extract severities for a specific rule from findings."""
     return [f.severity for f in findings if f.rule == rule]
 
 

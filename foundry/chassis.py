@@ -11,11 +11,33 @@ import math
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from foundry.blueprint import decode, encode
 from foundry.channel_router import RouterIntersection, StreetChannel
 from foundry.entity_helpers import entity_size
+
+if TYPE_CHECKING:
+    from foundry.native_engine.engine import FactorioNativeEngine
+    from foundry.router.types import RouterNetSpec
+
+JsonDict: TypeAlias = dict[str, Any]
+
+DEFAULT_BLOCK_PITCH = 100
+DEFAULT_CORE_WIDTH = 94
+DEFAULT_CORE_HEIGHT = 94
+DEFAULT_CHANNEL_WIDTH = 6
+POLE_RIM_SPACING = 30.0
+LAMP_PERP_OFFSET = 0.5
+LAMP_ALONG_OFFSET = 1.5
+RADAR_CORNER_OFFSET = 2.5
+DEFAULT_DBU = 1000
+CORE_BOUNDS_TOL = 1e-4
+BIG_POLE_WIRE_REACH = 30.5
+AXIS_ALIGN_TOL = 0.1
+WIRE_COPPER_ID = 5
+WIRE_RED_ID = 1
+WIRE_GREEN_ID = 2
 
 
 class ChassisTemplate(ABC):
@@ -32,7 +54,7 @@ class ChassisTemplate(ABC):
         pass
 
     @abstractmethod
-    def emit_base_blueprint(self, grid_w: int, grid_h: int) -> dict[str, Any]:
+    def emit_base_blueprint(self, grid_w: int, grid_h: int) -> JsonDict:
         """Emit base entities and tiles for an N x M chassis grid."""
         pass
 
@@ -54,14 +76,18 @@ class CityBlockChassis(ChassisTemplate):
 
     def __init__(
         self,
-        pitch: int = 100,
-        core_width: int = 94,
-        core_height: int = 94,
-        channel_width: int = 6,
-        template_document: dict[str, Any] | None = None,
+        pitch: int = DEFAULT_BLOCK_PITCH,
+        core_width: int = DEFAULT_CORE_WIDTH,
+        core_height: int = DEFAULT_CORE_HEIGHT,
+        channel_width: int = DEFAULT_CHANNEL_WIDTH,
+        template_document: JsonDict | None = None,
         programmatic: bool = False,
     ) -> None:
-        if channel_width != 6 and core_width == 94 and core_height == 94:
+        if (
+            channel_width != DEFAULT_CHANNEL_WIDTH
+            and core_width == DEFAULT_CORE_WIDTH
+            and core_height == DEFAULT_CORE_HEIGHT
+        ):
             core_width = pitch - channel_width
             core_height = pitch - channel_width
         self.pitch_x = pitch
@@ -72,8 +98,8 @@ class CityBlockChassis(ChassisTemplate):
         self.core_margin_x = (pitch - core_width) // 2
         self.core_margin_y = (pitch - core_height) // 2
 
-        self.template_tiles: list[dict[str, Any]] = []
-        self.template_entities: list[dict[str, Any]] = []
+        self.template_tiles: list[JsonDict] = []
+        self.template_entities: list[JsonDict] = []
         if template_document:
             bp = template_document.get("blueprint", template_document)
             self.template_tiles = bp.get("tiles", [])
@@ -81,101 +107,130 @@ class CityBlockChassis(ChassisTemplate):
         elif programmatic:
             self._build_programmatic_template()
 
-    def _build_programmatic_template(self) -> None:
-        """Generate street pavement tiles and perimeter power poles programmatically."""
-        mx = self.core_margin_x
-        my = self.core_margin_y
-        px = self.pitch_x
-        py = self.pitch_y
+    @staticmethod
+    def _is_channel_border_tile(x: int, y: int, mx: int, my: int, px: int, py: int) -> bool:
+        """Return True if `(x, y)` sits on the inner hazard-concrete border of the core."""
+        v_border = x in (mx - 1, px - mx) and my <= y < py - my
+        h_border = y in (my - 1, py - my) and mx <= x < px - mx
+        return v_border or h_border
+
+    def _populate_programmatic_tiles(self) -> None:
+        """Populate concrete and hazard concrete border tiles for one chassis block."""
+        mx, my = self.core_margin_x, self.core_margin_y
+        px, py = self.pitch_x, self.pitch_y
         for y in range(py):
             for x in range(px):
-                if x < mx or x >= px - mx or y < my or y >= py - my:
-                    is_border = (x in (mx - 1, px - mx) and my <= y < py - my) or (
-                        y in (my - 1, py - my) and mx <= x < px - mx
-                    )
-                    t_name = "refined-hazard-concrete-left" if is_border else "refined-concrete"
-                    self.template_tiles.append({"position": {"x": x, "y": y}, "name": t_name})
+                if mx <= x < px - mx and my <= y < py - my:
+                    continue
+                is_border = self._is_channel_border_tile(x, y, mx, my, px, py)
+                t_name = "refined-hazard-concrete-left" if is_border else "refined-concrete"
+                self.template_tiles.append({"position": {"x": x, "y": y}, "name": t_name})
 
-        # Place perimeter big-electric-poles along the outer rim at 30-tile intervals
+    def _add_template_entity(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        seen: set[tuple[float, float]] | None = None,
+    ) -> None:
+        """Append a template entity at `(x, y)` if not already in `seen`."""
+        pt = (round(x, 2), round(y, 2))
+        if seen is not None:
+            if pt in seen:
+                return
+            seen.add(pt)
+        self.template_entities.append(
+            {
+                "entity_number": len(self.template_entities) + 1,
+                "name": name,
+                "position": {"x": pt[0], "y": pt[1]},
+            }
+        )
+
+    def _add_horizontal_rim_pole_and_lamps(
+        self,
+        x_val: float,
+        y_val: float,
+        lo_x: float,
+        hi_x: float,
+        lo_y: float,
+        seen_p: set[tuple[float, float]],
+        seen_l: set[tuple[float, float]],
+    ) -> None:
+        """Place one horizontal rim electric pole and its flanking lamps."""
+        self._add_template_entity("big-electric-pole", x_val, y_val, seen_p)
+        ly_off = -LAMP_PERP_OFFSET if y_val == lo_y else LAMP_PERP_OFFSET
+        if x_val > lo_x:
+            self._add_template_entity(
+                "small-lamp", x_val - LAMP_ALONG_OFFSET, y_val + ly_off, seen_l
+            )
+        if x_val < hi_x:
+            self._add_template_entity(
+                "small-lamp", x_val + LAMP_ALONG_OFFSET, y_val + ly_off, seen_l
+            )
+
+    def _add_vertical_rim_pole_and_lamps(
+        self,
+        x_val: float,
+        y_val: float,
+        lo_x: float,
+        lo_y: float,
+        hi_y: float,
+        seen_p: set[tuple[float, float]],
+        seen_l: set[tuple[float, float]],
+    ) -> None:
+        """Place one vertical rim electric pole and its flanking lamps."""
+        self._add_template_entity("big-electric-pole", x_val, y_val, seen_p)
+        lx_off = -LAMP_PERP_OFFSET if x_val == lo_x else LAMP_PERP_OFFSET
+        if y_val > lo_y:
+            self._add_template_entity(
+                "small-lamp", x_val + lx_off, y_val - LAMP_ALONG_OFFSET, seen_l
+            )
+        if y_val < hi_y:
+            self._add_template_entity(
+                "small-lamp", x_val + lx_off, y_val + LAMP_ALONG_OFFSET, seen_l
+            )
+
+    def _build_programmatic_template(self) -> None:
+        """Generate street pavement tiles and perimeter power poles programmatically."""
+        self._populate_programmatic_tiles()
+        mx, my = self.core_margin_x, self.core_margin_y
+        px, py = self.pitch_x, self.pitch_y
+
         lo_x = float(mx) + 1.0
         hi_x = float(px - mx) - 1.0
         lo_y = float(my) + 1.0
         hi_y = float(py - my) - 1.0
         span_x = max(1.0, hi_x - lo_x)
-        n_segs_x = max(1, math.ceil(span_x / 30.0))
+        n_segs_x = max(1, math.ceil(span_x / POLE_RIM_SPACING))
         xs = [round(lo_x + i * (span_x / n_segs_x), 1) for i in range(n_segs_x + 1)]
         span_y = max(1.0, hi_y - lo_y)
-        n_segs_y = max(1, math.ceil(span_y / 30.0))
+        n_segs_y = max(1, math.ceil(span_y / POLE_RIM_SPACING))
         ys = [round(lo_y + i * (span_y / n_segs_y), 1) for i in range(n_segs_y + 1)]
         seen_p: set[tuple[float, float]] = set()
         seen_l: set[tuple[float, float]] = set()
-        ent_num = 1
-
-        def _add_lamp(lx: float, ly: float) -> None:
-            nonlocal ent_num
-            pt = (round(lx, 2), round(ly, 2))
-            if pt not in seen_l:
-                seen_l.add(pt)
-                self.template_entities.append(
-                    {
-                        "entity_number": ent_num,
-                        "name": "small-lamp",
-                        "position": {"x": pt[0], "y": pt[1]},
-                    }
-                )
-                ent_num += 1
 
         for x_val in xs:
             for y_val in (lo_y, hi_y):
-                if (x_val, y_val) not in seen_p:
-                    seen_p.add((x_val, y_val))
-                    self.template_entities.append(
-                        {
-                            "entity_number": ent_num,
-                            "name": "big-electric-pole",
-                            "position": {"x": x_val, "y": y_val},
-                        }
-                    )
-                    ent_num += 1
-                ly_off = -0.5 if y_val == lo_y else 0.5
-                if x_val > lo_x:
-                    _add_lamp(x_val - 1.5, y_val + ly_off)
-                if x_val < hi_x:
-                    _add_lamp(x_val + 1.5, y_val + ly_off)
+                self._add_horizontal_rim_pole_and_lamps(
+                    x_val, y_val, lo_x, hi_x, lo_y, seen_p, seen_l
+                )
         for y_val in ys:
             for x_val in (lo_x, hi_x):
-                if (x_val, y_val) not in seen_p:
-                    seen_p.add((x_val, y_val))
-                    self.template_entities.append(
-                        {
-                            "entity_number": ent_num,
-                            "name": "big-electric-pole",
-                            "position": {"x": x_val, "y": y_val},
-                        }
-                    )
-                    ent_num += 1
-                lx_off = -0.5 if x_val == lo_x else 0.5
-                if y_val > lo_y:
-                    _add_lamp(x_val + lx_off, y_val - 1.5)
-                if y_val < hi_y:
-                    _add_lamp(x_val + lx_off, y_val + 1.5)
+                self._add_vertical_rim_pole_and_lamps(
+                    x_val, y_val, lo_x, lo_y, hi_y, seen_p, seen_l
+                )
 
-        self.template_entities.append(
-            {
-                "entity_number": ent_num,
-                "name": "radar",
-                "position": {"x": round(hi_x - 2.5, 2), "y": round(lo_y + 2.5, 2)},
-            }
-        )
+        self._add_template_entity("radar", hi_x - RADAR_CORNER_OFFSET, lo_y + RADAR_CORNER_OFFSET)
 
     @classmethod
     def from_blueprint_file(
         cls,
         path: str | Path,
-        pitch: int = 100,
-        core_width: int = 94,
-        core_height: int = 94,
-        channel_width: int = 6,
+        pitch: int = DEFAULT_BLOCK_PITCH,
+        core_width: int = DEFAULT_CORE_WIDTH,
+        core_height: int = DEFAULT_CORE_HEIGHT,
+        channel_width: int = DEFAULT_CHANNEL_WIDTH,
     ) -> CityBlockChassis:
         """Construct CityBlockChassis from an exported blueprint exchange file."""
         with Path(path).open() as f:
@@ -193,10 +248,10 @@ class CityBlockChassis(ChassisTemplate):
     def from_blueprint_string(
         cls,
         blueprint_string: str,
-        pitch: int = 100,
-        core_width: int = 94,
-        core_height: int = 94,
-        channel_width: int = 6,
+        pitch: int = DEFAULT_BLOCK_PITCH,
+        core_width: int = DEFAULT_CORE_WIDTH,
+        core_height: int = DEFAULT_CORE_HEIGHT,
+        channel_width: int = DEFAULT_CHANNEL_WIDTH,
     ) -> CityBlockChassis:
         """Construct CityBlockChassis from a blueprint exchange string."""
         doc = decode(blueprint_string)
@@ -244,34 +299,24 @@ class CityBlockChassis(ChassisTemplate):
         total_w = grid_w * self.pitch_x
         total_h = grid_h * self.pitch_y
 
-        # Bottom channel / outer margin
         blockages.append((0, 0, total_w, self.core_margin_y))
-        # Top channel / outer margin
         top_y = (grid_h - 1) * self.pitch_y + self.core_margin_y + self.core_height
         blockages.append((0, top_y, total_w, total_h - top_y))
-        # Left channel / outer margin
         blockages.append((0, 0, self.core_margin_x, total_h))
-        # Right channel / outer margin
         right_x = (grid_w - 1) * self.pitch_x + self.core_margin_x + self.core_width
         blockages.append((right_x, 0, total_w - right_x, total_h))
 
-        # Internal horizontal street channels
         for by in range(grid_h - 1):
             y_start = by * self.pitch_y + self.core_margin_y + self.core_height
-            y_height = self.channel_width
-            blockages.append((0, y_start, total_w, y_height))
+            blockages.append((0, y_start, total_w, self.channel_width))
 
-        # Internal vertical street channels
         for bx in range(grid_w - 1):
             x_start = bx * self.pitch_x + self.core_margin_x + self.core_width
-            x_width = self.channel_width
-            blockages.append((x_start, 0, x_width, total_h))
+            blockages.append((x_start, 0, self.channel_width, total_h))
 
-        # Blockages for unused / empty interior blocks
         if empty_blocks:
             for bx, by in sorted(empty_blocks):
-                mx, my, mw, mh = self.get_core_bounds(bx, by)
-                blockages.append((mx, my, mw, mh))
+                blockages.append(self.get_core_bounds(bx, by))
 
         return blockages
 
@@ -298,9 +343,7 @@ class CityBlockChassis(ChassisTemplate):
             "# Placement blockages covering street transit channels",
         ]
         for x, y, w, h in self.get_placement_blockages(grid_w, grid_h, empty_blocks=empty_blocks):
-            x2 = x + w
-            y2 = y + h
-            lines.append(f"create_blockage -region [list {x} {y} {x2} {y2}]")
+            lines.append(f"create_blockage -region [list {x} {y} {x + w} {y + h}]")
 
         return "\n".join(lines) + "\n"
 
@@ -308,7 +351,7 @@ class CityBlockChassis(ChassisTemplate):
         self,
         grid_w: int,
         grid_h: int,
-        dbu: int = 1000,
+        dbu: int = DEFAULT_DBU,
         empty_blocks: set[tuple[int, int]] | None = None,
     ) -> str:
         """Emit DEF BLOCKAGES section covering all street transit channels."""
@@ -326,7 +369,7 @@ class CityBlockChassis(ChassisTemplate):
     def apply_floorplan_to_def(self, def_text: str, grid_w: int, grid_h: int) -> str:
         """Update DIEAREA and insert BLOCKAGES for chassis grid in DEF text."""
         m_units = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", def_text)
-        dbu = int(m_units.group(1)) if m_units else 1000
+        dbu = int(m_units.group(1)) if m_units else DEFAULT_DBU
 
         total_w = grid_w * self.pitch_x * dbu
         total_h = grid_h * self.pitch_y * dbu
@@ -356,24 +399,25 @@ class CityBlockChassis(ChassisTemplate):
 
     def verify_cells_in_cores(
         self,
-        def_data: dict[str, Any],
+        def_data: JsonDict,
         grid_w: int = 1,
         grid_h: int = 1,
-        netlist_data: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
+        netlist_data: JsonDict | None = None,
+    ) -> list[JsonDict]:
         """Verify that all placed components sit strictly within chassis machine cores.
 
         Returns list of violating components that spill into street channels or margins.
         """
-        scale = 1.0 / float(def_data.get("units", 1000))
-        violations: list[dict[str, Any]] = []
+        scale = 1.0 / float(def_data.get("units", DEFAULT_DBU))
+        violations: list[JsonDict] = []
 
         cell_dims: dict[str, tuple[float, float]] = {}
         if netlist_data:
             for cname, cinfo in netlist_data.get("cells", {}).items():
-                w = float(cinfo.get("width", 1))
-                h = float(cinfo.get("height", 1))
-                cell_dims[cname] = (w, h)
+                cell_dims[cname] = (
+                    float(cinfo.get("width", 1)),
+                    float(cinfo.get("height", 1)),
+                )
 
         core_boxes = [self.get_core_bounds(bx, by) for bx in range(grid_w) for by in range(grid_h)]
 
@@ -383,17 +427,13 @@ class CityBlockChassis(ChassisTemplate):
             macro = comp.get("macro", "")
             cw, ch = cell_dims.get(macro, entity_size(macro))
 
-            in_any_core = False
-            for min_x, min_y, w, h in core_boxes:
-                if (
-                    cx >= min_x - 1e-4
-                    and (cx + cw) <= (min_x + w) + 1e-4
-                    and cy >= min_y - 1e-4
-                    and (cy + ch) <= (min_y + h) + 1e-4
-                ):
-                    in_any_core = True
-                    break
-
+            in_any_core = any(
+                cx >= min_x - CORE_BOUNDS_TOL
+                and (cx + cw) <= (min_x + w) + CORE_BOUNDS_TOL
+                and cy >= min_y - CORE_BOUNDS_TOL
+                and (cy + ch) <= (min_y + h) + CORE_BOUNDS_TOL
+                for min_x, min_y, w, h in core_boxes
+            )
             if not in_any_core:
                 violations.append(
                     {
@@ -408,50 +448,51 @@ class CityBlockChassis(ChassisTemplate):
 
         return violations
 
-    def emit_base_blueprint(self, grid_w: int, grid_h: int) -> dict[str, Any]:
-        """Emit tiled base entities and pavement for an N x M grid.
+    def _stamp_single_block(
+        self,
+        offset_x: int,
+        offset_y: int,
+        tiles_map: dict[tuple[int, int], str],
+        entities_map: dict[tuple[float, float, str], JsonDict],
+    ) -> None:
+        """Stamp template tiles and entities for one block at `(offset_x, offset_y)`."""
+        for t in self.template_tiles:
+            pos = t.get("position", {})
+            tx = int(pos.get("x", 0) + offset_x)
+            ty = int(pos.get("y", 0) + offset_y)
+            tiles_map[(tx, ty)] = t.get("name", "refined-concrete")
+        for e in self.template_entities:
+            pos = e.get("position", {})
+            ex = round(float(pos.get("x", 0)) + offset_x, 2)
+            ey = round(float(pos.get("y", 0)) + offset_y, 2)
+            ename = str(e.get("name", ""))
+            key = (ex, ey, ename)
+            if key not in entities_map:
+                new_e = dict(e)
+                new_e.pop("neighbours", None)
+                new_e.pop("connections", None)
+                new_e["position"] = {"x": ex, "y": ey}
+                entities_map[key] = new_e
 
-        Deduplicates shared boundaries between adjacent city blocks.
-        """
+    def _tile_grid_blocks(
+        self, grid_w: int, grid_h: int
+    ) -> tuple[dict[tuple[int, int], str], dict[tuple[float, float, str], JsonDict]]:
+        """Stamp template tiles and entities across a `grid_w` by `grid_h` block array."""
         tiles_map: dict[tuple[int, int], str] = {}
-        entities_map: dict[tuple[float, float, str], dict[str, Any]] = {}
-
+        entities_map: dict[tuple[float, float, str], JsonDict] = {}
         for bx in range(grid_w):
             for by in range(grid_h):
-                offset_x = bx * self.pitch_x
-                offset_y = by * self.pitch_y
+                self._stamp_single_block(
+                    bx * self.pitch_x, by * self.pitch_y, tiles_map, entities_map
+                )
+        return tiles_map, entities_map
 
-                for t in self.template_tiles:
-                    pos = t.get("position", {})
-                    tx = int(pos.get("x", 0) + offset_x)
-                    ty = int(pos.get("y", 0) + offset_y)
-                    tiles_map[(tx, ty)] = t.get("name", "refined-concrete")
-
-                for e in self.template_entities:
-                    pos = e.get("position", {})
-                    ex = round(float(pos.get("x", 0)) + offset_x, 2)
-                    ey = round(float(pos.get("y", 0)) + offset_y, 2)
-                    ename = str(e.get("name", ""))
-                    key = (ex, ey, ename)
-                    if key not in entities_map:
-                        new_e = dict(e)
-                        new_e.pop("neighbours", None)
-                        new_e.pop("connections", None)
-                        new_e["position"] = {"x": ex, "y": ey}
-                        entities_map[key] = new_e
-
-        # Build clean sequential entities list
-        sorted_ents = sorted(
-            entities_map.values(), key=lambda ent: (ent["position"]["y"], ent["position"]["x"])
-        )
-        for idx, ent in enumerate(sorted_ents, start=1):
-            ent["entity_number"] = idx
-
-        # Wire chassis big electric poles together into a unified power and circuit bus grid
+    @staticmethod
+    def _wire_big_electric_poles(sorted_ents: list[JsonDict]) -> list[list[int]]:
+        """Connect aligned big-electric-pole pairs within reach using copper, red, and green wires."""
         big_poles = [e for e in sorted_ents if e.get("name") == "big-electric-pole"]
         seen_pairs: set[tuple[int, int]] = set()
         wires: list[list[int]] = []
-
         for i, bp1 in enumerate(big_poles):
             p1_num = int(bp1.get("entity_number", 0))
             p1_pos = bp1.get("position", {})
@@ -462,23 +503,36 @@ class CityBlockChassis(ChassisTemplate):
                 x2, y2 = float(p2_pos.get("x", 0.0)), float(p2_pos.get("y", 0.0))
                 dx = abs(x1 - x2)
                 dy = abs(y1 - y2)
-                dist = math.hypot(dx, dy)
-                if dist <= 30.5 and (dx < 0.1 or dy < 0.1):
+                if math.hypot(dx, dy) <= BIG_POLE_WIRE_REACH and (
+                    dx < AXIS_ALIGN_TOL or dy < AXIS_ALIGN_TOL
+                ):
                     pair = (min(p1_num, p2_num), max(p1_num, p2_num))
                     if pair not in seen_pairs:
                         seen_pairs.add(pair)
-                        # 5: copper wire, 1: red wire, 2: green wire
-                        wires.append([pair[0], 5, pair[1], 5])
-                        wires.append([pair[0], 1, pair[1], 1])
-                        wires.append([pair[0], 2, pair[1], 2])
+                        wires.append([pair[0], WIRE_COPPER_ID, pair[1], WIRE_COPPER_ID])
+                        wires.append([pair[0], WIRE_RED_ID, pair[1], WIRE_RED_ID])
+                        wires.append([pair[0], WIRE_GREEN_ID, pair[1], WIRE_GREEN_ID])
+        return wires
 
-        # Build clean tiles list
+    def emit_base_blueprint(self, grid_w: int, grid_h: int) -> JsonDict:
+        """Emit tiled base entities and pavement for an N x M grid.
+
+        Deduplicates shared boundaries between adjacent city blocks.
+        """
+        tiles_map, entities_map = self._tile_grid_blocks(grid_w, grid_h)
+        sorted_ents = sorted(
+            entities_map.values(), key=lambda ent: (ent["position"]["y"], ent["position"]["x"])
+        )
+        for idx, ent in enumerate(sorted_ents, start=1):
+            ent["entity_number"] = idx
+
+        wires = self._wire_big_electric_poles(sorted_ents)
         sorted_tiles = [
             {"position": {"x": x, "y": y}, "name": name}
             for (x, y), name in sorted(tiles_map.items(), key=lambda item: (item[0][1], item[0][0]))
         ]
 
-        bp_content: dict[str, Any] = {
+        bp_content: JsonDict = {
             "item": "blueprint",
             "label": f"City Block Grid {grid_w}x{grid_h}",
             "snap-to-grid": {"x": self.pitch_x, "y": self.pitch_y},
@@ -489,8 +543,7 @@ class CityBlockChassis(ChassisTemplate):
         if wires:
             bp_content["wires"] = wires
 
-        bp_doc: dict[str, Any] = {"blueprint": bp_content}
-        return bp_doc
+        return {"blueprint": bp_content}
 
     def emit_base_blueprint_string(self, grid_w: int, grid_h: int) -> str:
         """Emit base blueprint exchange string for an N x M grid."""
@@ -564,14 +617,14 @@ class CityBlockChassis(ChassisTemplate):
 
     def route_chassis_nets(
         self,
-        nets: list[Any],
+        nets: list[RouterNetSpec],
         grid_w: int = 1,
         grid_h: int = 1,
         obstacles: set[tuple[int, int]] | None = None,
-        prototypes: dict[str, Any] | None = None,
-        engine: Any = None,
+        prototypes: JsonDict | None = None,
+        engine: FactorioNativeEngine | None = None,
         verify_oracle: bool = True,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], Any]:
+    ) -> tuple[JsonDict, list[JsonDict], Any]:
         """Route factory nets across the chassis grid using the dual lane maze router.
 
         This method initializes a multi-layer maze router with the chassis bounds.

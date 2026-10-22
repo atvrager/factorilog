@@ -18,94 +18,119 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
+
+PinsPayload: TypeAlias = dict[str, Any]
 
 DEFAULT_GAME_PATH = Path("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio").expanduser()
+SCRATCH_OPT_GAME_PATH = Path("/scratch/opt/factorio/bin/x64/factorio")
+OPT_GAME_PATH = Path("/opt/factorio/bin/x64/factorio")
+HOME_ROOT_PATH = Path("/home")
+DEFAULT_BOUND_EXTENT = 150.0
+CHUNK_SIZE_TILES = 32
+CHUNK_SIZE_FLOAT = 32.0
+HALF_DIVISOR = 2.0
+MIN_CHUNK_RADIUS = 10
+ELAPSED_ROUND_DIGITS = 3
 
 
-def find_factorio_binary(override: Path | None = None) -> Path:
+def find_factorio_binary(
+    override: Path | None = None,
+    env: Mapping[str, str] = os.environ,
+) -> Path:
     """Find the Factorio executable binary."""
-    if override and override.is_file():
-        return override
-    env_game = os.environ.get("FACTORIO_BIN")
-    if env_game and Path(env_game).is_file():
-        return Path(env_game)
+    env_game = env.get("FACTORIO_BIN")
     which_bin = shutil.which("factorio")
-    if which_bin and Path(which_bin).is_file():
-        return Path(which_bin)
-    if DEFAULT_GAME_PATH.is_file():
-        return DEFAULT_GAME_PATH
-    for candidate in [
-        Path("/scratch/opt/factorio/bin/x64/factorio"),
-        Path("/opt/factorio/bin/x64/factorio"),
-    ]:
-        if candidate.is_file():
-            return candidate
-    for candidate in Path("/home").glob(
-        "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
-    ):
-        if candidate.is_file():
+    direct_candidates = [
+        override,
+        Path(env_game) if env_game else None,
+        Path(which_bin) if which_bin else None,
+        DEFAULT_GAME_PATH,
+        SCRATCH_OPT_GAME_PATH,
+        OPT_GAME_PATH,
+        *HOME_ROOT_PATH.glob("*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"),
+    ]
+    for candidate in direct_candidates:
+        if candidate is not None and candidate.is_file():
             return candidate
     raise FileNotFoundError("Factorio binary not found.")
 
 
-def generate_control_lua(blueprint_string: str, pins_data: dict[str, Any]) -> str:
-    """Generate control.lua for scenario initialization and factory execution."""
-    pins_json = json.dumps(pins_data)
-    bp_clean = blueprint_string.strip()
+def _collect_entity_and_pin_coords(
+    bp_ents: list[PinsPayload], pins_data: PinsPayload
+) -> tuple[list[float], list[float]]:
+    """Collect x and y coordinates from blueprint entities and external pins."""
+    xs = [
+        float(e["position"]["x"])
+        for e in bp_ents
+        if isinstance(e.get("position"), Mapping) and "x" in e["position"]
+    ]
+    ys = [
+        float(e["position"]["y"])
+        for e in bp_ents
+        if isinstance(e.get("position"), Mapping) and "y" in e["position"]
+    ]
+    for pin in pins_data.get("inputs", []) + pins_data.get("outputs", []):
+        if "x" in pin and "y" in pin:
+            xs.append(float(pin["x"]))
+            ys.append(float(pin["y"]))
+    return xs, ys
 
+
+def _compute_blueprint_bounds(
+    bp_clean: str, pins_data: PinsPayload
+) -> tuple[float, float, float, float, bool, str]:
+    """Extract tile bounds and custom tile payload from a blueprint string."""
     try:
         from foundry.blueprint import decode
     except ImportError:
         from blueprint import decode
 
-    min_x, max_x = -150.0, 150.0
-    min_y, max_y = -150.0, 150.0
-
+    min_x, max_x = -DEFAULT_BOUND_EXTENT, DEFAULT_BOUND_EXTENT
+    min_y, max_y = -DEFAULT_BOUND_EXTENT, DEFAULT_BOUND_EXTENT
     has_custom_tiles = False
     tiles_json = "[]"
     try:
-        doc = decode(bp_clean)
-        bp_ents = doc.get("blueprint", {}).get("entities", [])
-        bp_tiles = doc.get("blueprint", {}).get("tiles", [])
+        bp_doc = decode(bp_clean).get("blueprint", {})
+        bp_ents = bp_doc.get("entities", [])
+        bp_tiles = bp_doc.get("tiles", [])
         if bp_tiles:
             has_custom_tiles = True
             tiles_json = json.dumps(bp_tiles)
         if bp_ents:
-            xs = [e["position"]["x"] for e in bp_ents if "position" in e and "x" in e["position"]]
-            ys = [e["position"]["y"] for e in bp_ents if "position" in e and "y" in e["position"]]
-            for pin in pins_data.get("inputs", []) + pins_data.get("outputs", []):
-                if "x" in pin and "y" in pin:
-                    xs.append(pin["x"])
-                    ys.append(pin["y"])
+            xs, ys = _collect_entity_and_pin_coords(bp_ents, pins_data)
             if xs and ys:
-                min_x = min(xs)
-                max_x = max(xs)
-                min_y = min(ys)
-                max_y = max(ys)
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
     except Exception as exc:
         sys.stderr.write(f"Warning: could not decode blueprint bounds: {exc}\n")
+    return min_x, max_x, min_y, max_y, has_custom_tiles, tiles_json
+
+
+def generate_control_lua(blueprint_string: str, pins_data: PinsPayload) -> str:
+    """Generate control.lua for scenario initialization and factory execution."""
+    pins_json = json.dumps(pins_data)
+    bp_clean = blueprint_string.strip()
+    min_x, max_x, min_y, max_y, has_custom_tiles, tiles_json = _compute_blueprint_bounds(
+        bp_clean, pins_data
+    )
 
     span_x = max_x - min_x
     span_y = max_y - min_y
-    half_w = (span_x / 2.0) + 32.0
-    half_h = (span_y / 2.0) + 32.0
+    half_w = (span_x / HALF_DIVISOR) + CHUNK_SIZE_FLOAT
+    half_h = (span_y / HALF_DIVISOR) + CHUNK_SIZE_FLOAT
 
-    chunk_min_x = math.floor(-half_w / 32.0) - 1
-    chunk_max_x = math.ceil(half_w / 32.0) + 1
-    chunk_min_y = math.floor(-half_h / 32.0) - 1
-    chunk_max_y = math.ceil(half_h / 32.0) + 1
+    chunk_min_x = min(math.floor(-half_w / CHUNK_SIZE_FLOAT) - 1, -MIN_CHUNK_RADIUS)
+    chunk_max_x = max(math.ceil(half_w / CHUNK_SIZE_FLOAT) + 1, MIN_CHUNK_RADIUS)
+    chunk_min_y = min(math.floor(-half_h / CHUNK_SIZE_FLOAT) - 1, -MIN_CHUNK_RADIUS)
+    chunk_max_y = max(math.ceil(half_h / CHUNK_SIZE_FLOAT) + 1, MIN_CHUNK_RADIUS)
 
-    chunk_min_x = min(chunk_min_x, -10)
-    chunk_max_x = max(chunk_max_x, 10)
-    chunk_min_y = min(chunk_min_y, -10)
-    chunk_max_y = max(chunk_max_y, 10)
-
-    clear_min_x = chunk_min_x * 32
-    clear_max_x = (chunk_max_x + 1) * 32
-    clear_min_y = chunk_min_y * 32
-    clear_max_y = (chunk_max_y + 1) * 32
+    clear_min_x = chunk_min_x * CHUNK_SIZE_TILES
+    clear_max_x = (chunk_max_x + 1) * CHUNK_SIZE_TILES
+    clear_min_y = chunk_min_y * CHUNK_SIZE_TILES
+    clear_max_y = (chunk_max_y + 1) * CHUNK_SIZE_TILES
 
     return f"""-- Control script for factorilog compiled factory save.
 local BP = [==[{bp_clean}]==]
@@ -680,6 +705,34 @@ def build_scenario_archive(
         zf.writestr(f"{scenario_name}/README.txt", readme_text)
 
 
+def _check_save_pin_log(log_file: Path) -> None:
+    """Emit pin diagnostic lines and raise an error if external pin placement failed."""
+    if not log_file.is_file():
+        return
+    pin_lines = [
+        line for line in log_file.read_text().splitlines() if "PIN" in line or "ERROR" in line
+    ]
+    for pl in pin_lines:
+        sys.stderr.write(f"bp2save: {pl}\n")
+    err_lines = [line for line in pin_lines if "ERROR:" in line]
+    if err_lines:
+        raise RuntimeError(
+            "bp2save failed to place external pin entities:\n" + "\n".join(err_lines)
+        )
+
+
+def _run_factorio_checked(cmd: list[str], work_dir: Path, label: str) -> None:
+    """Execute a Factorio subprocess and raise RuntimeError with log text on failure."""
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        log_file = work_dir / "factorio-current.log"
+        log_text = log_file.read_text() if log_file.is_file() else "No log"
+        raise RuntimeError(
+            f"Factorio {label} failed with code {res.returncode}:\n"
+            f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}\nLOG:\n{log_text}"
+        )
+
+
 def build_save(
     blueprint_file: Path,
     pins_file: Path | None,
@@ -741,29 +794,8 @@ def build_save(
             "--scenario2map",
             scenario_name,
         ]
-        res_create = subprocess.run(cmd_create, capture_output=True, text=True)
-        if res_create.returncode != 0:
-            log_file = work_dir / "factorio-current.log"
-            log_text = log_file.read_text() if log_file.is_file() else "No log"
-            raise RuntimeError(
-                f"Factorio scenario2map failed with code {res_create.returncode}:\n"
-                f"STDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}"
-            )
-
-        log_file = work_dir / "factorio-current.log"
-        if log_file.is_file():
-            pin_lines = [
-                line
-                for line in log_file.read_text().splitlines()
-                if "PIN" in line or "ERROR" in line
-            ]
-            for pl in pin_lines:
-                sys.stderr.write(f"bp2save: {pl}\n")
-            err_lines = [line for line in pin_lines if "ERROR:" in line]
-            if err_lines:
-                raise RuntimeError(
-                    "bp2save failed to place external pin entities:\n" + "\n".join(err_lines)
-                )
+        _run_factorio_checked(cmd_create, work_dir, "scenario2map")
+        _check_save_pin_log(work_dir / "factorio-current.log")
 
         generated_save = work_dir / "saves" / f"{scenario_name}.zip"
         if not generated_save.is_file():
@@ -781,14 +813,7 @@ def build_save(
             "--benchmark-ticks",
             "60",
         ]
-        res_verify = subprocess.run(cmd_verify, capture_output=True, text=True)
-        if res_verify.returncode != 0:
-            log_file = work_dir / "factorio-current.log"
-            log_text = log_file.read_text() if log_file.is_file() else "No log"
-            raise RuntimeError(
-                f"Factorio verification benchmark failed with code {res_verify.returncode}:\n"
-                f"STDOUT:\n{res_verify.stdout}\nSTDERR:\n{res_verify.stderr}\nLOG:\n{log_text}"
-            )
+        _run_factorio_checked(cmd_verify, work_dir, "verification benchmark")
 
         out_save_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(generated_save, out_save_file)
@@ -859,7 +884,7 @@ def main() -> int:
             def_file=args.def_file,
         )
         t1 = time.perf_counter()
-        elapsed = round(t1 - t0, 3)
+        elapsed = round(t1 - t0, ELAPSED_ROUND_DIGITS)
 
         if args.time_file:
             args.time_file.parent.mkdir(parents=True, exist_ok=True)
@@ -886,7 +911,7 @@ def main() -> int:
     )
 
     t1 = time.perf_counter()
-    elapsed = round(t1 - t0, 3)
+    elapsed = round(t1 - t0, ELAPSED_ROUND_DIGITS)
 
     if args.time_file:
         args.time_file.parent.mkdir(parents=True, exist_ok=True)

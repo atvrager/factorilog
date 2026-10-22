@@ -14,34 +14,79 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 DEFAULT_GAME_PATH = Path("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio").expanduser()
+FALLBACK_GAME_PATHS = (
+    Path("/scratch/opt/factorio/bin/x64/factorio"),
+    Path("/opt/factorio/bin/x64/factorio"),
+)
+HOME_DIR = Path("/home")
+STEAM_REL_GLOB = "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
+DEFAULT_MICRON_UNITS = 1000.0
+DEFAULT_MIN_PRODUCED = 20
+DEFAULT_MIN_ACTIVE_RATIO = 0.70
+DEFAULT_SIM_TICKS = 7200
+MIN_WARMUP_TICKS = 60
+MIN_SAMPLE_INTERVAL = 300
+SAMPLE_INTERVAL_DIVISOR = 800
+BENCHMARK_EXTRA_TICKS = 5
+PERCENT_SCALE = 100.0
+
+DIAGNOSTIC_LOG_MARKERS = (
+    "ASM_INFO:",
+    "SILO_INFO:",
+    "SILO_INSERTER",
+    "LANDING_PAD_INFO:",
+    "ZERO_PROD_ASM:",
+    "ZERO_PROD_FURNACE:",
+    "FURNACE_INV:",
+    "FURNACE_INSERTER",
+    "INSERTER at",
+    "SPLITTER at",
+    "PIPE at",
+    "TRACE step",
+    "UPSTREAM_",
+    "FORCE_BONUSES:",
+    "LAB_COUNT:",
+    "PRODUCTION_STAT:",
+    "STEADY_PRODUCTION:",
+    "CONSUMPTION_STAT:",
+    "STEADY_CONSUMPTION:",
+    "FLUID_PRODUCTION_STAT:",
+    "FLUID_CONSUMPTION_STAT:",
+    "RECIPE_BOTTLENECK:",
+    "BELT_INVENTORY:",
+    "NEARBY_BELTS_WITH_ITEMS",
+    "UNPOWERED_ENT:",
+    "DISCONNECTED_BIG_POLE:",
+    "INFINITY_PIPE:",
+    "ADJ_TO_INFINITY:",
+    "FLUID_PATH_",
+)
+DIAGNOSTIC_LOG_RE = re.compile("|".join(re.escape(m) for m in DIAGNOSTIC_LOG_MARKERS))
 
 
-def find_factorio_binary(override: Path | None = None) -> Path:
+def find_factorio_binary(
+    override: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Find the Factorio executable binary."""
-    if override and override.is_file():
-        return override
-    env_game = os.environ.get("FACTORIO_BIN")
-    if env_game and Path(env_game).is_file():
-        return Path(env_game)
+    env_map = os.environ if env is None else env
+    env_game = env_map["FACTORIO_BIN"] if "FACTORIO_BIN" in env_map else ""
     which_bin = shutil.which("factorio")
-    if which_bin and Path(which_bin).is_file():
-        return Path(which_bin)
-    if DEFAULT_GAME_PATH.is_file():
-        return DEFAULT_GAME_PATH
-    for candidate in [
-        Path("/scratch/opt/factorio/bin/x64/factorio"),
-        Path("/opt/factorio/bin/x64/factorio"),
-    ]:
-        if candidate.is_file():
-            return candidate
-    for candidate in Path("/home").glob(
-        "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
-    ):
-        if candidate.is_file():
+    direct_candidates = [
+        override,
+        Path(env_game) if env_game else None,
+        Path(which_bin) if which_bin else None,
+        DEFAULT_GAME_PATH,
+        *FALLBACK_GAME_PATHS,
+        *HOME_DIR.glob(STEAM_REL_GLOB),
+    ]
+    for candidate in direct_candidates:
+        if candidate is not None and candidate.is_file():
             return candidate
     raise FileNotFoundError("Factorio executable binary not found.")
 
@@ -91,7 +136,7 @@ def check_def_area(def_path: Path, max_area: float | None = None) -> tuple[float
     """Parse die area from DEF file and assert maximum tile area."""
     content = def_path.read_text(encoding="utf-8")
     m_units = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", content)
-    units = float(m_units.group(1)) if m_units else 1000.0
+    units = float(m_units.group(1)) if m_units else DEFAULT_MICRON_UNITS
 
     m_die = re.search(
         r"DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;",
@@ -116,17 +161,15 @@ def check_def_area(def_path: Path, max_area: float | None = None) -> tuple[float
     return width, height, area
 
 
-def run_factory_simulation(
-    save_zip: Path,
-    expected_item: str,
-    ticks: int,
-    game_bin: Path,
+def _write_simulation_harness(
     work_dir: Path,
-    expected_items: list[str] | None = None,
-    min_produced: int = 20,
-    min_active_ratio: float = 0.70,
-) -> dict[str, Any]:
-    """Execute save in headless Factorio and extract production metrics."""
+    expected_item: str,
+    expected_items: Sequence[str] | None,
+    ticks: int,
+    min_produced: int,
+    min_active_ratio: float,
+) -> tuple[Path, Path, Path]:
+    """Create the Factorio mod harness files and configuration for headless simulation."""
     mods_dir = work_dir / "mods"
     mod_dir = mods_dir / "factory_test_harness"
     data_dir = work_dir / "data"
@@ -163,13 +206,13 @@ def run_factory_simulation(
     (mods_dir / "mod-list.json").write_text(json.dumps(mod_list, indent=2), encoding="utf-8")
 
     exp_list = (
-        expected_items
+        list(expected_items)
         if expected_items
         else [it.strip() for it in expected_item.split(",") if it.strip()]
     )
     lua_exp_items = ", ".join(f'"{it}"' for it in exp_list)
-    warmup_tick = max(60, ticks // 2)
-    sample_interval = max(300, ticks // 800)
+    warmup_tick = max(MIN_WARMUP_TICKS, ticks // 2)
+    sample_interval = max(MIN_SAMPLE_INTERVAL, ticks // SAMPLE_INTERVAL_DIVISOR)
     control_lua = f"""
 local warmup_tick = {warmup_tick}
 local warmup_done = false
@@ -1188,42 +1231,42 @@ script.on_event(defines.events.on_tick, function(event)
 end)
 """
     (mod_dir / "control.lua").write_text(control_lua, encoding="utf-8")
+    return config_file, mods_dir, data_dir
 
-    cmd = [
-        str(game_bin),
-        "-c",
-        str(config_file),
-        "--mod-directory",
-        str(mods_dir),
-        "--benchmark",
-        str(save_zip),
-        "--benchmark-ticks",
-        str(ticks + 5),
-        "--benchmark-sanitize",
-    ]
 
+def _consume_simulation_stdout(
+    proc: subprocess.Popen[str],
+    default_tick: int,
+) -> tuple[list[str], bool, int]:
+    """Stream subprocess stdout, log progress lines, and stop early on pass marker."""
     stdout_lines: list[str] = []
-    early_pass = False
-    completed_tick = ticks
+    if proc.stdout is None:
+        return stdout_lines, False, default_tick
+    for raw_line in proc.stdout:
+        stdout_lines.append(raw_line)
+        if "PROGRESS:" in raw_line:
+            print(f"factorilog: {raw_line.strip()}", flush=True)
+        if "FACTORY_TEST_EARLY_PASS:" in raw_line:
+            completed_tick = _extract_int_field(r"tick=(\d+)", raw_line, default_tick)
+            proc.kill()
+            return stdout_lines, True, completed_tick
+    return stdout_lines, False, default_tick
+
+
+def _execute_simulation_process(
+    cmd: Sequence[str],
+    data_dir: Path,
+    ticks: int,
+) -> tuple[list[str], bool, int]:
+    """Run headless Factorio benchmark subprocess and monitor stdout for early pass."""
     with subprocess.Popen(
-        cmd,
+        list(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     ) as proc:
-        if proc.stdout is not None:
-            for raw_line in proc.stdout:
-                stdout_lines.append(raw_line)
-                if "PROGRESS:" in raw_line:
-                    print(f"factorilog: {raw_line.strip()}", flush=True)
-                if "FACTORY_TEST_EARLY_PASS:" in raw_line:
-                    m_ep = re.search(r"tick=(\d+)", raw_line)
-                    if m_ep:
-                        completed_tick = int(m_ep.group(1))
-                    early_pass = True
-                    proc.kill()
-                    break
+        stdout_lines, early_pass, completed_tick = _consume_simulation_stdout(proc, ticks)
         returncode = proc.wait()
 
     if returncode != 0 and not early_pass:
@@ -1235,13 +1278,13 @@ end)
             f"Factorio headless benchmark failed with code {returncode}:\n"
             f"OUTPUT:\n{''.join(stdout_lines)}\nLOG:\n{log_text}"
         )
+    return stdout_lines, early_pass, completed_tick
 
-    log_file = data_dir / "factorio-current.log"
-    if not early_pass and not log_file.is_file():
-        raise FileNotFoundError(f"Simulation log not written at {log_file}")
 
-    log_text = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
-    source_lines = (log_text.splitlines() + stdout_lines) if log_text else stdout_lines
+def _scan_simulation_lines(
+    source_lines: Sequence[str],
+) -> tuple[dict[str, int], dict[str, int], int, str]:
+    """Extract production stats, consumption stats, lab count, and result line from logs."""
     production_stats: dict[str, int] = {}
     consumption_stats: dict[str, int] = {}
     lab_count = 0
@@ -1256,40 +1299,87 @@ end)
         m_lcnt = re.search(r"LAB_COUNT:\s*(\d+)", line)
         if m_lcnt:
             lab_count = int(m_lcnt.group(1))
-        if (
-            "ASM_INFO:" in line
-            or "SILO_INFO:" in line
-            or "SILO_INSERTER" in line
-            or "LANDING_PAD_INFO:" in line
-            or "ZERO_PROD_ASM:" in line
-            or "ZERO_PROD_FURNACE:" in line
-            or "FURNACE_INV:" in line
-            or "FURNACE_INSERTER" in line
-            or "INSERTER at" in line
-            or "SPLITTER at" in line
-            or "PIPE at" in line
-            or "TRACE step" in line
-            or "UPSTREAM_" in line
-            or "FORCE_BONUSES:" in line
-            or "LAB_COUNT:" in line
-            or "PRODUCTION_STAT:" in line
-            or "STEADY_PRODUCTION:" in line
-            or "CONSUMPTION_STAT:" in line
-            or "STEADY_CONSUMPTION:" in line
-            or "FLUID_PRODUCTION_STAT:" in line
-            or "FLUID_CONSUMPTION_STAT:" in line
-            or "RECIPE_BOTTLENECK:" in line
-            or "BELT_INVENTORY:" in line
-            or "NEARBY_BELTS_WITH_ITEMS" in line
-            or "UNPOWERED_ENT:" in line
-            or "DISCONNECTED_BIG_POLE:" in line
-            or "INFINITY_PIPE:" in line
-            or "ADJ_TO_INFINITY:" in line
-            or "FLUID_PATH_" in line
-        ):
+        if DIAGNOSTIC_LOG_RE.search(line):
             print(f"factorilog: {line.strip()}")
         if "FACTORY_TEST_RESULT:" in line:
             result_line = line
+    return production_stats, consumption_stats, lab_count, result_line
+
+
+def _extract_int_field(pattern: str, text: str, default: int = 0) -> int:
+    """Extract an integer regex capture group from a text line."""
+    match = re.search(pattern, text)
+    return int(match.group(1)) if match else default
+
+
+def _extract_pair_field(pattern: str, text: str) -> tuple[int, int]:
+    """Extract a pair of integer regex capture groups from a text line."""
+    match = re.search(pattern, text)
+    if not match:
+        return 0, 0
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_result_summary(result_line: str, default_tick: int) -> dict[str, Any]:
+    """Parse machine counts, ratios, and production metrics from a FACTORY_TEST_RESULT line."""
+    active_machines, total_machines = _extract_pair_field(r"active=(\d+)/(\d+)", result_line)
+    productive_machines, _ = _extract_pair_field(r"productive=(\d+)/(\d+)", result_line)
+    m_ratio = re.search(r"ratio=([\d.]+)", result_line)
+    m_zero_prod = re.search(r"zero_prod=\[(.*?)\]", result_line)
+    return {
+        "completed_tick": _extract_int_field(r"tick=(\d+)", result_line, default_tick),
+        "produced": _extract_int_field(r"produced=(\d+)", result_line),
+        "active_machines": active_machines,
+        "total_machines": total_machines,
+        "active_ratio": float(m_ratio.group(1)) if m_ratio else 0.0,
+        "productive_machines": productive_machines,
+        "unpowered": _extract_int_field(r"unpowered=(\d+)", result_line),
+        "zero_prod": m_zero_prod.group(1) if m_zero_prod else "",
+    }
+
+
+def run_factory_simulation(
+    save_zip: Path,
+    expected_item: str,
+    ticks: int,
+    game_bin: Path,
+    work_dir: Path,
+    expected_items: list[str] | None = None,
+    min_produced: int = DEFAULT_MIN_PRODUCED,
+    min_active_ratio: float = DEFAULT_MIN_ACTIVE_RATIO,
+) -> dict[str, Any]:
+    """Execute save in headless Factorio and extract production metrics."""
+    config_file, mods_dir, data_dir = _write_simulation_harness(
+        work_dir,
+        expected_item,
+        expected_items,
+        ticks,
+        min_produced,
+        min_active_ratio,
+    )
+    cmd = [
+        str(game_bin),
+        "-c",
+        str(config_file),
+        "--mod-directory",
+        str(mods_dir),
+        "--benchmark",
+        str(save_zip),
+        "--benchmark-ticks",
+        str(ticks + BENCHMARK_EXTRA_TICKS),
+        "--benchmark-sanitize",
+    ]
+    stdout_lines, early_pass, completed_tick = _execute_simulation_process(cmd, data_dir, ticks)
+
+    log_file = data_dir / "factorio-current.log"
+    if not early_pass and not log_file.is_file():
+        raise FileNotFoundError(f"Simulation log not written at {log_file}")
+
+    log_text = log_file.read_text(encoding="utf-8") if log_file.is_file() else ""
+    source_lines = (log_text.splitlines() + stdout_lines) if log_text else stdout_lines
+    production_stats, consumption_stats, lab_count, result_line = _scan_simulation_lines(
+        source_lines
+    )
 
     if not result_line:
         raise RuntimeError(
@@ -1297,33 +1387,15 @@ end)
             f"STDOUT:\n{''.join(stdout_lines)}\nLOG:\n{log_text}"
         )
 
-    m_tick = re.search(r"tick=(\d+)", result_line)
-    if m_tick:
-        completed_tick = int(m_tick.group(1))
-    m_prod = re.search(r"produced=(\d+)", result_line)
-    m_active = re.search(r"active=(\d+)/(\d+)", result_line)
-    m_ratio = re.search(r"ratio=([\d.]+)", result_line)
-    m_productive = re.search(r"productive=(\d+)/(\d+)", result_line)
-    m_unpowered = re.search(r"unpowered=(\d+)", result_line)
-    m_zero_prod = re.search(r"zero_prod=\[(.*?)\]", result_line)
-
-    return {
-        "completed_tick": completed_tick,
-        "produced": int(m_prod.group(1)) if m_prod else 0,
-        "production_stats": production_stats,
-        "consumption_stats": consumption_stats,
-        "lab_count": lab_count,
-        "active_machines": int(m_active.group(1)) if m_active else 0,
-        "total_machines": int(m_active.group(2)) if m_active else 0,
-        "active_ratio": float(m_ratio.group(1)) if m_ratio else 0.0,
-        "productive_machines": int(m_productive.group(1)) if m_productive else 0,
-        "unpowered": int(m_unpowered.group(1)) if m_unpowered else 0,
-        "zero_prod": m_zero_prod.group(1) if m_zero_prod else "",
-    }
+    summary = _parse_result_summary(result_line, completed_tick)
+    summary["production_stats"] = production_stats
+    summary["consumption_stats"] = consumption_stats
+    summary["lab_count"] = lab_count
+    return summary
 
 
-def main() -> None:
-    """Entry point for factory regression test."""
+def _parse_test_args() -> argparse.Namespace:
+    """Parse command-line arguments for the factory regression test runner."""
     parser = argparse.ArgumentParser(description="Factorilog automated factory test runner.")
     parser.add_argument(
         "--save", type=Path, required=True, help="Path to playable Factorio save .zip"
@@ -1335,11 +1407,22 @@ def main() -> None:
         help="Expected produced item name (or comma-separated list of item names)",
     )
     parser.add_argument(
-        "--min-produced", type=int, default=20, help="Minimum produced items required"
+        "--min-produced",
+        type=int,
+        default=DEFAULT_MIN_PRODUCED,
+        help="Minimum produced items required",
     )
-    parser.add_argument("--ticks", type=int, default=7200, help="Simulation duration in game ticks")
     parser.add_argument(
-        "--min-active-ratio", type=float, default=0.70, help="Minimum machine activity ratio"
+        "--ticks",
+        type=int,
+        default=DEFAULT_SIM_TICKS,
+        help="Simulation duration in game ticks",
+    )
+    parser.add_argument(
+        "--min-active-ratio",
+        type=float,
+        default=DEFAULT_MIN_ACTIVE_RATIO,
+        help="Minimum machine activity ratio",
     )
     parser.add_argument(
         "--def-file", type=Path, default=None, help="Optional routed DEF file for area validation"
@@ -1356,14 +1439,13 @@ def main() -> None:
     parser.add_argument(
         "--factorio-bin", type=Path, default=None, help="Optional override for Factorio executable"
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
-    expected_items = [it.strip() for it in args.expected_item.split(",") if it.strip()]
-    primary_expected_item = expected_items[-1] if expected_items else args.expected_item
 
-    print(f"factorilog: Starting physical test for {', '.join(expected_items)}")
-
-    # 1. Routing DRC check
+def _run_static_validations(
+    args: argparse.Namespace,
+) -> tuple[float | None, float, float, float]:
+    """Run DRC, timing slack, and DEF area checks before simulation."""
     if args.drc_rpt:
         violations = check_drc_report(args.drc_rpt)
         if violations:
@@ -1373,7 +1455,6 @@ def main() -> None:
             sys.exit(1)
         print("factorilog: DRC validation passed (0 violations)")
 
-    # 2. Timing slack check
     slack = None
     if args.sta_rpt:
         slack = check_timing_report(args.sta_rpt, min_slack=args.min_slack)
@@ -1382,20 +1463,125 @@ def main() -> None:
                 f"factorilog: Timing validation passed (worst slack = {slack:.4f} >= {args.min_slack:.4f})"
             )
 
-    # 3. Area check
     width, height, area = 0.0, 0.0, 0.0
     if args.def_file and args.def_file.is_file():
         width, height, area = check_def_area(args.def_file, max_area=args.max_area)
         print(f"factorilog: Area validation passed ({width:.0f}x{height:.0f} = {area:.1f} tiles)")
+    return slack, width, height, area
 
-    # 4. Headless simulation
+
+def _print_simulation_summary(
+    metrics: Mapping[str, object],
+    expected_items: Sequence[str],
+    primary_expected_item: str,
+    ticks: int,
+    min_produced: int,
+) -> None:
+    """Print a summary of simulation metrics to stdout."""
+    completed_tick = int(str(metrics.get("completed_tick", ticks)))
+    produced = int(str(metrics.get("produced", 0)))
+    raw_prod = metrics.get("production_stats")
+    production_stats = raw_prod if isinstance(raw_prod, Mapping) else {}
+    active_ratio = float(str(metrics.get("active_ratio", 0.0)))
+    active_cnt = int(str(metrics.get("active_machines", 0)))
+    total_cnt = int(str(metrics.get("total_machines", 0)))
+    productive_cnt = int(str(metrics.get("productive_machines", 0)))
+    unpowered = int(str(metrics.get("unpowered", 0)))
+    zero_prod = str(metrics.get("zero_prod", ""))
+    prod_pct = (productive_cnt / total_cnt * PERCENT_SCALE) if total_cnt > 0 else 0.0
+
+    prod_summary = ", ".join(
+        f"{production_stats.get(it, produced if it == primary_expected_item else 0)} {it}"
+        for it in expected_items
+    )
+    print(
+        f"factorilog: Simulation completed at tick {completed_tick} (max {ticks}): "
+        f"{prod_summary} produced (required >= {min_produced} each), "
+        f"active machines: {active_cnt}/{total_cnt} ({active_ratio * PERCENT_SCALE:.1f}%), "
+        f"productive machines: {productive_cnt}/{total_cnt} ({prod_pct:.1f}%), "
+        f"unpowered machines: {unpowered}"
+    )
+    if zero_prod:
+        print(f"factorilog: Zero-production machines: {zero_prod}")
+
+
+def _check_item_production_targets(
+    metrics: Mapping[str, object],
+    expected_items: Sequence[str],
+    primary_expected_item: str,
+    min_produced: int,
+) -> list[str]:
+    """Check produced and consumed counts for each expected item against targets."""
+    produced = int(str(metrics.get("produced", 0)))
+    raw_prod = metrics.get("production_stats")
+    production_stats = raw_prod if isinstance(raw_prod, Mapping) else {}
+    raw_cons = metrics.get("consumption_stats")
+    consumption_stats = raw_cons if isinstance(raw_cons, Mapping) else {}
+    lab_count = int(str(metrics.get("lab_count", 0)))
+
+    failures: list[str] = []
+    for it in expected_items:
+        fallback = produced if it == primary_expected_item else 0
+        it_prod = int(str(production_stats.get(it, fallback)))
+        if it_prod < min_produced:
+            failures.append(
+                f"Production below target: {it_prod} {it} < minimum {min_produced}"
+            )
+        if lab_count > 0 and int(str(consumption_stats.get(it, 0))) == 0:
+            failures.append(f"Lab consumption is zero for science pack: {it}")
+    return failures
+
+
+def _evaluate_simulation_failures(
+    metrics: Mapping[str, object],
+    expected_items: Sequence[str],
+    primary_expected_item: str,
+    min_produced: int,
+    min_active_ratio: float,
+) -> list[str]:
+    """Evaluate simulation metrics against production, utilization, and power targets."""
+    productive_cnt = int(str(metrics.get("productive_machines", 0)))
+    total_cnt = int(str(metrics.get("total_machines", 0)))
+    active_ratio = float(str(metrics.get("active_ratio", 0.0)))
+    unpowered = int(str(metrics.get("unpowered", 0)))
+    zero_prod = str(metrics.get("zero_prod", ""))
+
+    failures = _check_item_production_targets(
+        metrics,
+        expected_items,
+        primary_expected_item,
+        min_produced,
+    )
+    if productive_cnt < total_cnt:
+        failures.append(
+            f"Machine productivity below 100%: {productive_cnt}/{total_cnt} machines produced items. "
+            f"Zero-production machines: {zero_prod}"
+        )
+    if active_ratio < min_active_ratio:
+        failures.append(
+            f"Machine utilization below target: {active_ratio * PERCENT_SCALE:.1f}% < minimum {min_active_ratio * PERCENT_SCALE:.1f}%"
+        )
+    if unpowered > 0:
+        failures.append(f"Unpowered machines detected: {unpowered}")
+    return failures
+
+
+def main() -> None:
+    """Entry point for factory regression test."""
+    args = _parse_test_args()
+    expected_items = [it.strip() for it in args.expected_item.split(",") if it.strip()]
+    primary_expected_item = expected_items[-1] if expected_items else args.expected_item
+
+    print(f"factorilog: Starting physical test for {', '.join(expected_items)}")
+    slack, width, height, area = _run_static_validations(args)
+
     try:
         game_bin = find_factorio_binary(args.factorio_bin)
     except FileNotFoundError as err:
         sys.stderr.write(f"Warning: {err}. Skipping simulation test.\n")
         sys.exit(0)
 
-    with tempfile.TemporaryDirectory(dir="/tmp", prefix="factorilog-sim-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="factorilog-sim-") as tmp:
         metrics = run_factory_simulation(
             save_zip=args.save,
             expected_item=primary_expected_item,
@@ -1407,64 +1593,31 @@ def main() -> None:
             min_active_ratio=args.min_active_ratio,
         )
 
-    completed_tick = metrics.get("completed_tick", args.ticks)
-    produced = metrics["produced"]
-    production_stats = metrics.get("production_stats", {})
-    consumption_stats = metrics.get("consumption_stats", {})
-    lab_count = metrics.get("lab_count", 0)
-    active_ratio = metrics["active_ratio"]
-    active_cnt = metrics["active_machines"]
-    total_cnt = metrics["total_machines"]
-    unpowered = metrics["unpowered"]
-
-    productive_cnt = metrics["productive_machines"]
-    zero_prod = metrics["zero_prod"]
-
-    prod_summary = ", ".join(
-        f"{production_stats.get(it, produced if it == primary_expected_item else 0)} {it}"
-        for it in expected_items
+    _print_simulation_summary(
+        metrics,
+        expected_items,
+        primary_expected_item,
+        args.ticks,
+        args.min_produced,
     )
-    print(
-        f"factorilog: Simulation completed at tick {completed_tick} (max {args.ticks}): "
-        f"{prod_summary} produced (required >= {args.min_produced} each), "
-        f"active machines: {active_cnt}/{total_cnt} ({active_ratio * 100:.1f}%), "
-        f"productive machines: {productive_cnt}/{total_cnt} ({productive_cnt / total_cnt * 100:.1f}%), "
-        f"unpowered machines: {unpowered}"
+    failures = _evaluate_simulation_failures(
+        metrics,
+        expected_items,
+        primary_expected_item,
+        args.min_produced,
+        args.min_active_ratio,
     )
-    if zero_prod:
-        print(f"factorilog: Zero-production machines: {zero_prod}")
-
-    failures = []
-    for it in expected_items:
-        it_prod = production_stats.get(it, produced if it == primary_expected_item else 0)
-        if it_prod < args.min_produced:
-            failures.append(
-                f"Production below target: {it_prod} {it} < minimum {args.min_produced}"
-            )
-        if lab_count > 0 and consumption_stats.get(it, 0) == 0:
-            failures.append(f"Lab consumption is zero for science pack: {it}")
-    if productive_cnt < total_cnt:
-        failures.append(
-            f"Machine productivity below 100%: {productive_cnt}/{total_cnt} machines produced items. "
-            f"Zero-production machines: {zero_prod}"
-        )
-    if active_ratio < args.min_active_ratio:
-        failures.append(
-            f"Machine utilization below target: {active_ratio * 100:.1f}% < minimum {args.min_active_ratio * 100:.1f}%"
-        )
-    if unpowered > 0:
-        failures.append(f"Unpowered machines detected: {unpowered}")
 
     if args.report_out:
         report_data = {
             "item": args.expected_item,
             "ticks": args.ticks,
-            "produced": produced,
+            "produced": metrics["produced"],
             "min_produced": args.min_produced,
-            "active_machines": active_cnt,
-            "total_machines": total_cnt,
-            "active_ratio": active_ratio,
-            "unpowered": unpowered,
+            "active_machines": metrics["active_machines"],
+            "total_machines": metrics["total_machines"],
+            "active_ratio": metrics["active_ratio"],
+            "unpowered": metrics["unpowered"],
             "width": width,
             "height": height,
             "area": area,

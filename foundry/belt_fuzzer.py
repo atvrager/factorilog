@@ -7,11 +7,27 @@ import importlib
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
+
+ExperimentMap: TypeAlias = dict[str, dict[str, Any]]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "test"))
+
+FUZZ_SIMULATION_TICKS = 190
+YELLOW_SPEED_IPS = 15.0
+RED_SPEED_IPS = 30.0
+BLUE_SPEED_IPS = 45.0
+TURBO_SPEED_IPS = 60.0
+YELLOW_UG_MAX_TILES = 5
+RED_UG_MAX_TILES = 7
+BLUE_UG_MAX_TILES = 9
+TURBO_UG_MAX_TILES = 11
+YELLOW_LATENCY_TICKS = 32
+RED_LATENCY_TICKS = 16
+BLUE_LATENCY_TICKS = 11
+TURBO_LATENCY_TICKS = 8
 
 
 def get_simulation_runner() -> Any:
@@ -147,9 +163,9 @@ def run_empirical_fuzzing() -> dict[str, Any]:
     end
     """
 
-    results = runner(init_lua, tick_lua, ticks=190)
+    results = runner(init_lua, tick_lua, ticks=FUZZ_SIMULATION_TICKS)
 
-    parsed_results: dict[str, dict[str, Any]] = {}
+    parsed_results: ExperimentMap = {}
     for line in results:
         if "TEST_EXP: " in line:
             payload = line.split("TEST_EXP: ")[1].strip()
@@ -165,7 +181,7 @@ def run_empirical_fuzzing() -> dict[str, Any]:
     return build_rule_database(parsed_results)
 
 
-def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_rule_database(exp_data: ExperimentMap) -> dict[str, Any]:
     """Compile raw simulation outputs into an empirical rule database."""
     straight_exp = exp_data.get("STRAIGHT", {})
     turn_exp = exp_data.get("TURN", {})
@@ -264,7 +280,7 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "primitive": "straight",
             "compatible": True,
             "lane_mapping": {"1": 1, "2": 2},
-            "speed_tiles_per_sec": 15.0,
+            "speed_tiles_per_sec": YELLOW_SPEED_IPS,
             "drc_code": None,
             "summary": "Collinear belts transfer items across both lanes with zero latency penalty.",
         },
@@ -299,10 +315,10 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "compatible": True,
             "lane_mapping": {"1": 1, "2": 2},
             "max_span_tiles": {
-                "underground-belt": 5,
-                "fast-underground-belt": 7,
-                "express-underground-belt": 9,
-                "turbo-underground-belt": 11,
+                "underground-belt": YELLOW_UG_MAX_TILES,
+                "fast-underground-belt": RED_UG_MAX_TILES,
+                "express-underground-belt": BLUE_UG_MAX_TILES,
+                "turbo-underground-belt": TURBO_UG_MAX_TILES,
             },
             "drc_code": "DRC-02",
             "summary": "Underground inputs must pair with collinear outputs within tier span limits.",
@@ -328,33 +344,33 @@ def build_rule_database(exp_data: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "belt": "transport-belt",
             "underground": "underground-belt",
             "splitter": "splitter",
-            "speed_items_per_sec": 15.0,
-            "max_underground_span_tiles": 5,
-            "latency_ticks_per_tile": 32,
+            "speed_items_per_sec": YELLOW_SPEED_IPS,
+            "max_underground_span_tiles": YELLOW_UG_MAX_TILES,
+            "latency_ticks_per_tile": YELLOW_LATENCY_TICKS,
         },
         "red": {
             "belt": "fast-transport-belt",
             "underground": "fast-underground-belt",
             "splitter": "fast-splitter",
-            "speed_items_per_sec": 30.0,
-            "max_underground_span_tiles": 7,
-            "latency_ticks_per_tile": 16,
+            "speed_items_per_sec": RED_SPEED_IPS,
+            "max_underground_span_tiles": RED_UG_MAX_TILES,
+            "latency_ticks_per_tile": RED_LATENCY_TICKS,
         },
         "blue": {
             "belt": "express-transport-belt",
             "underground": "express-underground-belt",
             "splitter": "express-splitter",
-            "speed_items_per_sec": 45.0,
-            "max_underground_span_tiles": 9,
-            "latency_ticks_per_tile": 11,
+            "speed_items_per_sec": BLUE_SPEED_IPS,
+            "max_underground_span_tiles": BLUE_UG_MAX_TILES,
+            "latency_ticks_per_tile": BLUE_LATENCY_TICKS,
         },
         "turbo": {
             "belt": "turbo-transport-belt",
             "underground": "turbo-underground-belt",
             "splitter": "turbo-splitter",
-            "speed_items_per_sec": 60.0,
-            "max_underground_span_tiles": 11,
-            "latency_ticks_per_tile": 8,
+            "speed_items_per_sec": TURBO_SPEED_IPS,
+            "max_underground_span_tiles": TURBO_UG_MAX_TILES,
+            "latency_ticks_per_tile": TURBO_LATENCY_TICKS,
         },
     }
 

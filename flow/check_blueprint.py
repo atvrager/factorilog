@@ -12,32 +12,47 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 DEFAULT_GAME_PATH = Path(
     os.path.expanduser("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio")
 )
+FALLBACK_GAME_PATHS: tuple[Path, ...] = (
+    Path("/scratch/opt/factorio/bin/x64/factorio"),
+    Path("/opt/factorio/bin/x64/factorio"),
+)
+HOME_DIR = Path("/home")
+STEAM_REL_GLOB = "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
+LOG_PREFIXES: tuple[str, ...] = (
+    "RESULT_",
+    "COUNT_",
+    "UNPLACED_",
+    "REASON_",
+    "BOUNDS_",
+    "SAMPLE_FAILURE:",
+    "FLUID_CLASH:",
+)
 
 
-def find_factorio_binary(override: Path | None = None) -> Path:
+def find_factorio_binary(
+    override: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Find the Factorio executable binary."""
     if override and override.is_file():
         return override
-    env_game = os.environ.get("FACTORIO_BIN")
+    env_map = os.environ if env is None else env
+    env_game = env_map["FACTORIO_BIN"] if "FACTORIO_BIN" in env_map else ""
     if env_game and Path(env_game).is_file():
         return Path(env_game)
     which_bin = shutil.which("factorio")
+    if which_bin and Path(which_bin).is_file():
+        return Path(which_bin)
     if DEFAULT_GAME_PATH.is_file():
         return DEFAULT_GAME_PATH
-    for candidate in [
-        Path("/scratch/opt/factorio/bin/x64/factorio"),
-        Path("/opt/factorio/bin/x64/factorio"),
-    ]:
-        if candidate.is_file():
-            return candidate
-    for candidate in Path("/home").glob(
-        "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
-    ):
+    for candidate in (*FALLBACK_GAME_PATHS, *HOME_DIR.glob(STEAM_REL_GLOB)):
         if candidate.is_file():
             return candidate
     raise FileNotFoundError("Factorio binary not found.")
@@ -337,65 +352,135 @@ end)
     ]
 
     subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return _parse_validation_log(data_dir / "factorio-current.log")
 
-    log_path = data_dir / "factorio-current.log"
-    results: dict[str, Any] = {
+
+def _parse_int_or_str(val_str: str) -> int | str:
+    """Parse an integer string if numeric, otherwise return the original string."""
+    if val_str.isdigit() or (val_str.startswith("-") and val_str[1:].isdigit()):
+        return int(val_str)
+    return val_str
+
+
+def _record_key_val(
+    results: dict[str, dict[str, object]],
+    prefix: str,
+    payload: str,
+) -> None:
+    """Parse a colon-delimited log payload into the structured results dictionary."""
+    if ":" not in payload:
+        return
+    key, val = payload.split(":", 1)
+    key = key.strip()
+    val_str = val.strip()
+    if prefix == "BOUNDS_":
+        results["bounds"][key.replace("BOUNDS_", "")] = val_str
+        return
+    parsed = _parse_int_or_str(val_str)
+    bucket_map = {
+        "RESULT_": ("results", ""),
+        "COUNT_": ("counts", "COUNT_"),
+        "UNPLACED_": ("unplaced", "UNPLACED_"),
+        "REASON_": ("reasons", "REASON_"),
+    }
+    if prefix in bucket_map:
+        bucket, strip_prefix = bucket_map[prefix]
+        results[bucket][key.replace(strip_prefix, "")] = parsed
+
+
+def _process_log_line(
+    results: dict[str, dict[str, object]],
+    samples: list[str],
+    fluid_clashes: list[str],
+    line: str,
+) -> None:
+    """Match known validation log prefixes on a single log line."""
+    for prefix in LOG_PREFIXES:
+        if prefix not in line:
+            continue
+        payload = line[line.find(prefix) :].strip()
+        if prefix == "SAMPLE_FAILURE:":
+            samples.append(payload.replace("SAMPLE_FAILURE:", "").strip())
+        elif prefix == "FLUID_CLASH:":
+            fluid_clashes.append(payload.replace("FLUID_CLASH:", "").strip())
+        else:
+            _record_key_val(results, prefix, payload)
+
+
+def _parse_validation_log(log_path: Path) -> dict[str, Any]:
+    """Parse headless Factorio blueprint validation log into result dictionaries."""
+    buckets: dict[str, dict[str, object]] = {
         "results": {},
         "counts": {},
         "unplaced": {},
         "reasons": {},
         "bounds": {},
-        "samples": [],
-        "fluid_clashes": [],
     }
+    samples: list[str] = []
+    fluid_clashes: list[str] = []
     if log_path.is_file():
         for line in log_path.read_text().splitlines():
-            for prefix in (
-                "RESULT_",
-                "COUNT_",
-                "UNPLACED_",
-                "REASON_",
-                "BOUNDS_",
-                "SAMPLE_FAILURE:",
-                "FLUID_CLASH:",
-            ):
-                if prefix in line:
-                    idx = line.find(prefix)
-                    payload = line[idx:].strip()
-                    if prefix == "SAMPLE_FAILURE:":
-                        sample_text = payload.replace("SAMPLE_FAILURE:", "").strip()
-                        results["samples"].append(sample_text)
-                    elif prefix == "FLUID_CLASH:":
-                        clash_text = payload.replace("FLUID_CLASH:", "").strip()
-                        results["fluid_clashes"].append(clash_text)
-                    elif ":" in payload:
-                        key, val = payload.split(":", 1)
-                        key = key.strip()
-                        val_str = val.strip()
-                        if prefix == "BOUNDS_":
-                            results["bounds"][key.replace("BOUNDS_", "")] = val_str
-                        else:
-                            val_int = (
-                                int(val_str)
-                                if val_str.isdigit()
-                                or (val_str.startswith("-") and val_str[1:].isdigit())
-                                else val_str
-                            )
-                            if prefix == "RESULT_":
-                                results["results"][key] = val_int
-                            elif prefix == "COUNT_":
-                                results["counts"][key.replace("COUNT_", "")] = val_int
-                            elif prefix == "UNPLACED_":
-                                results["unplaced"][key.replace("UNPLACED_", "")] = val_int
-                            elif prefix == "REASON_":
-                                results["reasons"][key.replace("REASON_", "")] = val_int
+            _process_log_line(buckets, samples, fluid_clashes, line)
 
-    # Flat compatibility keys for existing callers
-    flat: dict[str, Any] = {**results["results"]}
-    for k, v in results["counts"].items():
+    details: dict[str, Any] = {
+        **buckets,
+        "samples": samples,
+        "fluid_clashes": fluid_clashes,
+    }
+    flat: dict[str, Any] = {**buckets["results"]}
+    for k, v in buckets["counts"].items():
         flat[f"COUNT_{k}"] = v
-    flat["_details"] = results
+    flat["_details"] = details
     return flat
+
+
+def _print_dict_section(title: str, mapping: Mapping[str, object]) -> None:
+    """Print a titled section for a non-empty string-keyed mapping."""
+    if not mapping:
+        return
+    print(f"\n{title}:")
+    for name, count in sorted(mapping.items()):
+        print(f"  {name:25s}: {count}")
+
+
+def _print_list_section(title: str, items: list[str]) -> None:
+    """Print a titled bulleted section for a non-empty list of strings."""
+    if not items:
+        return
+    print(f"\n{title}:")
+    for item in items:
+        print(f"  - {item}")
+
+
+def _print_validation_summary(results: Mapping[str, object]) -> None:
+    """Print human-readable blueprint validation results to stdout."""
+    details_obj = results.get("_details", {})
+    details: dict[str, Any] = dict(details_obj) if isinstance(details_obj, Mapping) else {}
+    print("Headless Factorio Validation Results:")
+    print(f"  Import return code: {results.get('RESULT_IMPORT', -1)}")
+    print(f"  Total blueprint:   {results.get('RESULT_TOTAL', 0)}")
+    print(f"  Built entities:    {results.get('RESULT_BUILT', 0)}")
+    print(f"  Total ghost count: {results.get('RESULT_GHOSTS', 0)}")
+    bounds = details.get("bounds", {})
+    if bounds:
+        print("Entity Coordinate Bounds:")
+        for k, v in bounds.items():
+            print(f"  {k}: {v}")
+
+    _print_dict_section("Placed entities breakdown", details.get("counts", {}))
+    _print_dict_section("Unplaced entities breakdown", details.get("unplaced", {}))
+
+    reasons = details.get("reasons", {})
+    if reasons:
+        print("\nFailure reasons:")
+        for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True):
+            print(f"  [{count:4d}] {reason}")
+
+    _print_list_section("Sample failures", details.get("samples", []))
+    print("\nFluid network validation:")
+    print(f"  Injection conflicts    : {results.get('RESULT_FLUID_INJECT_CONFLICTS', 0)}")
+    print(f"  Surface pipe clashes   : {results.get('RESULT_SURFACE_PIPE_CLASHES', 0)}")
+    _print_list_section("Fluid clashes", details.get("fluid_clashes", []))
 
 
 def main() -> int:
@@ -429,53 +514,11 @@ def main() -> int:
         work_dir = Path(tmp)
         results = validate_blueprint(bp_string, game_bin, work_dir)
 
-    details = results.get("_details", {})
-    print("Headless Factorio Validation Results:")
-    print(f"  Import return code: {results.get('RESULT_IMPORT', -1)}")
-    print(f"  Total blueprint:   {results.get('RESULT_TOTAL', 0)}")
-    print(f"  Built entities:    {results.get('RESULT_BUILT', 0)}")
-    print(f"  Total ghost count: {results.get('RESULT_GHOSTS', 0)}")
-    bounds = details.get("bounds", {})
-    if bounds:
-        print("Entity Coordinate Bounds:")
-        for k, v in bounds.items():
-            print(f"  {k}: {v}")
-
-    print("\nPlaced entities breakdown:")
-    for name, count in sorted(details.get("counts", {}).items()):
-        print(f"  {name:25s}: {count}")
-
-    unplaced = details.get("unplaced", {})
-    if unplaced:
-        print("\nUnplaced entities breakdown:")
-        for name, count in sorted(unplaced.items()):
-            print(f"  {name:25s}: {count}")
-
-    reasons = details.get("reasons", {})
-    if reasons:
-        print("\nFailure reasons:")
-        for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True):
-            print(f"  [{count:4d}] {reason}")
-
-    samples = details.get("samples", [])
-    if samples:
-        print("\nSample failures:")
-        for s in samples:
-            print(f"  - {s}")
-
-    fluid_conflicts = results.get("RESULT_FLUID_INJECT_CONFLICTS", 0)
-    surface_clashes = results.get("RESULT_SURFACE_PIPE_CLASHES", 0)
-    print("\nFluid network validation:")
-    print(f"  Injection conflicts    : {fluid_conflicts}")
-    print(f"  Surface pipe clashes   : {surface_clashes}")
-
-    fluid_clashes = details.get("fluid_clashes", [])
-    if fluid_clashes:
-        print("\nFluid clashes:")
-        for c in fluid_clashes:
-            print(f"  - {c}")
-
-    if results.get("RESULT_UNPLACED_TOTAL", 0) > 0 or fluid_conflicts > 0 or surface_clashes > 0:
+    _print_validation_summary(results)
+    fluid_conflicts = int(results.get("RESULT_FLUID_INJECT_CONFLICTS", 0))
+    surface_clashes = int(results.get("RESULT_SURFACE_PIPE_CLASHES", 0))
+    unplaced_total = int(results.get("RESULT_UNPLACED_TOTAL", 0))
+    if unplaced_total > 0 or fluid_conflicts > 0 or surface_clashes > 0:
         return 1
 
     return 0

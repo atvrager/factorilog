@@ -18,6 +18,8 @@ handler reads the produced items back, so the plan rate can be compared with
 the game's rate.
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -26,8 +28,14 @@ import os
 import pathlib
 import sys
 import zlib
+from collections.abc import Iterable, Sequence
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.extend(
+    [
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "foundry"),
+    ]
+)
 import solve
 
 # Blueprint direction values, doubled in 2.0: north, east, south, west.
@@ -41,7 +49,9 @@ MACHINE_Y = 1.5
 OUTPUT_INSERTER_Y = -1
 OUTPUT_BELT_Y = -2
 MACHINE_SPACING = 3
-EDGE_OFFSETS = [-1.0, 0.0, 1.0]
+EDGE_OFFSETS: list[float] = [-1.0, 0.0, 1.0]
+TILE_CENTRE_OFFSET = 0.5
+MACHINE_CENTRE_OFFSET = 1.5
 
 # Rows between two blocks, so the rig of one block clears the next.
 BLOCK_ROW_HEIGHT = 20
@@ -50,12 +60,15 @@ BLOCK_ROW_HEIGHT = 20
 # with no inserter-capacity research: a bulk inserter moves one item per swing
 # until the research lands, so it matches a fast inserter. A stack inserter
 # always uses its stack.
-INSERTER_ITEMS_PER_SECOND = {
+INSERTER_ITEMS_PER_SECOND: dict[str, float] = {
     "inserter": 0.83,
     "fast-inserter": 2.57,
     "bulk-inserter": 2.57,
     "stack-inserter": 12.83,
 }
+DEFAULT_INSERTER_CAPACITY = 4.62
+SECONDS_PER_MINUTE = 60.0
+BELT_TILES_TO_ITEMS_PER_SECOND = 8.0
 
 # Test rig. Solar panels with a raised multiplier power the block, so the
 # measurement does not need a power plant.
@@ -65,156 +78,263 @@ RIG_PANEL_COLUMNS = 6
 RIG_PANEL_ROWS = 2
 RIG_SOLAR_MULTIPLIER = 50
 POWER_SPACING = 17
+INFINITY_FILTER_COUNT = 1000
+INFINITY_CHEST_X_OFFSET = 4.5
+LOADER_X_OFFSET = 3.0
+SUBSTATION_X_OFFSET = 4.5
+SUBSTATION_RIGHT_MARGIN = 7
+PANEL_SPACING = 3
+BLUEPRINT_VERSION = 562949953421312
+ZLIB_COMPRESSION_LEVEL = 9
+CAPACITY_TOLERANCE = 1e-9
+ASCII_MIN_Y = -4
+ASCII_MAX_Y = 24
+WARMUP_DIVISOR = 4
+DEFAULT_TICKS = 1800
+MAX_REPORTED_CLASHES = 5
+
+GLYPHS: dict[str, str] = {
+    "assembling-machine-3": "A",
+    "electric-furnace": "F",
+    "chemical-plant": "C",
+    "oil-refinery": "R",
+    "rocket-silo": "S",
+    "turbo-transport-belt": "=",
+    "transport-belt": "=",
+    "fast-transport-belt": "=",
+    "express-transport-belt": "=",
+    "bulk-inserter": ">",
+    "fast-inserter": ">",
+    "inserter": ">",
+    "turbo-loader": "L",
+    "infinity-chest": "I",
+    "steel-chest": "X",
+    "substation": "P",
+    "solar-panel": "o",
+}
 
 
 class Block:
     """One branch: a row of machines with its belts, inserters, and ports."""
 
-    def __init__(self, recipe, total_rate, branches, machines, machine_name, speed):
+    def __init__(
+        self,
+        recipe: str,
+        total_rate: float,
+        branches: int,
+        machines: int,
+        machine_name: str,
+        speed: float,
+    ) -> None:
+        """Initialize a recipe block with rate and machine parameters."""
         self.recipe = recipe
         self.total_rate = total_rate  # crafts per minute, all branches
         self.branches = branches
         self.machines = machines  # machines per branch
         self.machine_name = machine_name
         self.speed = speed
-        self.ingredients = []
-        self.results = []
+        self.ingredients: list[tuple[str, float]] = []
+        self.results: list[tuple[str, float]] = []
         self.belt = ""
         self.inserter = ""
         self.input_inserters = 1
         self.output_inserters = 1
 
-    def origins(self):
+    def origins(self) -> list[tuple[int, int]]:
+        """Return the origin coordinates for each branch in the block."""
         return [(0, BLOCK_ROW_HEIGHT * b) for b in range(self.branches)]
 
-    def branch_rate(self):
+    def branch_rate(self) -> float:
+        """Return the craft rate per minute for one branch."""
         return self.total_rate / self.branches
 
-    def width(self):
+    def width(self) -> int:
+        """Return the tile width of one branch."""
         return MACHINE_SPACING * self.machines
 
 
-def belt_capacity(data, belt):
-    """Items per second on one belt, from the prototype speed."""
+def belt_capacity(data: solve.Data, belt: str) -> float:
+    """Return items per second on one belt from the prototype speed."""
     speed = float(data.prototypes["transport-belt"][belt]["speed"])
-    return speed * 60.0 * 8.0
+    return speed * SECONDS_PER_MINUTE * BELT_TILES_TO_ITEMS_PER_SECOND
 
 
-def block_entities(block, belt, inserter):
-    """Every entity of the blocks, as blueprint JSON."""
-    entities = []
+def _append_entity(
+    entities: list[dict[str, object]],
+    name: str,
+    x: float,
+    y: float,
+    direction: int | None = None,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Append a placed entity dictionary to the entity list."""
+    entity: dict[str, object] = {
+        "entity_number": len(entities) + 1,
+        "name": name,
+        "position": {"x": round(x, 2), "y": round(y, 2)},
+    }
+    if direction is not None:
+        entity["direction"] = direction
+    if extra:
+        entity.update(extra)
+    entities.append(entity)
+    return entity
 
-    def add(name, x, y, direction=None, extra=None):
-        entity = {
-            "entity_number": len(entities) + 1,
-            "name": name,
-            "position": {"x": round(x, 2), "y": round(y, 2)},
-        }
-        if direction is not None:
-            entity["direction"] = direction
-        if extra:
-            entity.update(extra)
-        entities.append(entity)
+
+def block_entities(block: Block, belt: str, inserter: str) -> list[dict[str, object]]:
+    """Return every entity of the blocks as blueprint JSON."""
+    entities: list[dict[str, object]] = []
 
     for origin_x, origin_y in block.origins():
         # Belts run one tile past the outer machines, so a loader reaches them.
         for x in range(-2, MACHINE_SPACING * block.machines):
-            add(belt, origin_x + x + 0.5, origin_y + INPUT_BELT_Y + 0.5, EAST)
-            add(belt, origin_x + x + 0.5, origin_y + OUTPUT_BELT_Y + 0.5, EAST)
+            _append_entity(
+                entities,
+                belt,
+                origin_x + x + TILE_CENTRE_OFFSET,
+                origin_y + INPUT_BELT_Y + TILE_CENTRE_OFFSET,
+                EAST,
+            )
+            _append_entity(
+                entities,
+                belt,
+                origin_x + x + TILE_CENTRE_OFFSET,
+                origin_y + OUTPUT_BELT_Y + TILE_CENTRE_OFFSET,
+                EAST,
+            )
 
         for index in range(block.machines):
-            centre = origin_x + 1.5 + MACHINE_SPACING * index
-            add(block.machine_name, centre, origin_y + MACHINE_Y, extra={"recipe": block.recipe})
+            centre = origin_x + MACHINE_CENTRE_OFFSET + MACHINE_SPACING * index
+            _append_entity(
+                entities,
+                block.machine_name,
+                centre,
+                origin_y + MACHINE_Y,
+                extra={"recipe": block.recipe},
+            )
             # An inserter picks from the side it faces. The input inserter is
             # north of the input belt, so it faces south at the belt. The
             # output inserter is north of the machine, so it faces south at
             # the machine.
             for offset in EDGE_OFFSETS[: block.input_inserters]:
-                add(inserter, centre + offset, origin_y + INPUT_INSERTER_Y + 0.5, SOUTH)
+                _append_entity(
+                    entities,
+                    inserter,
+                    centre + offset,
+                    origin_y + INPUT_INSERTER_Y + TILE_CENTRE_OFFSET,
+                    SOUTH,
+                )
             for offset in EDGE_OFFSETS[: block.output_inserters]:
-                add(inserter, centre + offset, origin_y + OUTPUT_INSERTER_Y + 0.5, SOUTH)
+                _append_entity(
+                    entities,
+                    inserter,
+                    centre + offset,
+                    origin_y + OUTPUT_INSERTER_Y + TILE_CENTRE_OFFSET,
+                    SOUTH,
+                )
 
     return entities
 
 
-def rig_entities(block, input_items, output_rate):
-    """The test rig: feed, drain, and power. Not part of a factory.
+def rig_entities(
+    block: Block,
+    input_items: Sequence[str],
+    output_rate: float,
+) -> list[dict[str, object]]:
+    """Build the test rig with feed, drain, and power entities.
 
     The drain needs one inserter per 4.62 items/s, because a single inserter
     caps the whole block. The measurement rig therefore drains along the belt,
     not at its end.
     """
-    entities = []
-    counter = {"n": 0}
+    entities: list[dict[str, object]] = []
     drain = max(
         1, math.ceil(output_rate / block.branches / INSERTER_ITEMS_PER_SECOND["bulk-inserter"])
     )
 
-    def add(name, x, y, direction=None, extra=None):
-        counter["n"] += 1
-        entity = {
-            "entity_number": counter["n"],
-            "name": name,
-            "position": {"x": round(x, 2), "y": round(y, 2)},
-        }
-        if direction is not None:
-            entity["direction"] = direction
-        if extra:
-            entity.update(extra)
-        entities.append(entity)
-
     filters = [
-        {"name": item, "count": 1000, "mode": "at-least", "index": i + 1}
+        {"name": item, "count": INFINITY_FILTER_COUNT, "mode": "at-least", "index": i + 1}
         for i, item in enumerate(input_items)
     ]
     for origin_x, origin_y in block.origins():
         right = origin_x + MACHINE_SPACING * block.machines
         # Feed: a chest, a loader, then the input belt.
-        add(
+        _append_entity(
+            entities,
             "infinity-chest",
-            origin_x - 4.5,
-            origin_y + INPUT_BELT_Y + 0.5,
+            origin_x - INFINITY_CHEST_X_OFFSET,
+            origin_y + INPUT_BELT_Y + TILE_CENTRE_OFFSET,
             extra={"infinity_settings": {"remove_unfiltered_items": True, "filters": filters}},
         )
-        add("turbo-loader", origin_x - 3.0, origin_y + INPUT_BELT_Y + 0.5, EAST)
+        _append_entity(
+            entities,
+            "turbo-loader",
+            origin_x - LOADER_X_OFFSET,
+            origin_y + INPUT_BELT_Y + TILE_CENTRE_OFFSET,
+            EAST,
+        )
         # Drain: inserters along the output belt, each facing it, each with a
         # chest behind it.
         for index in range(drain):
             x = right - 1 - index
-            add("bulk-inserter", x + 0.5, origin_y + OUTPUT_BELT_Y - 0.5, SOUTH)
-            add("steel-chest", x + 0.5, origin_y + OUTPUT_BELT_Y - 1.5)
+            _append_entity(
+                entities,
+                "bulk-inserter",
+                x + TILE_CENTRE_OFFSET,
+                origin_y + OUTPUT_BELT_Y - TILE_CENTRE_OFFSET,
+                SOUTH,
+            )
+            _append_entity(
+                entities,
+                "steel-chest",
+                x + TILE_CENTRE_OFFSET,
+                origin_y + OUTPUT_BELT_Y - MACHINE_CENTRE_OFFSET,
+            )
         # Power: substations above the block, panels above them. A substation
         # covers 18 tiles around itself, so one row reaches the whole block.
-        for column in range(int(math.ceil((right + 7) / POWER_SPACING))):
-            add("substation", origin_x + 4.5 + POWER_SPACING * column, origin_y + SUBSTATION_Y)
+        substation_cols = int(math.ceil((right + SUBSTATION_RIGHT_MARGIN) / POWER_SPACING))
+        for column in range(substation_cols):
+            _append_entity(
+                entities,
+                "substation",
+                origin_x + SUBSTATION_X_OFFSET + POWER_SPACING * column,
+                origin_y + SUBSTATION_Y,
+            )
         for row in range(RIG_PANEL_ROWS):
             for column in range(RIG_PANEL_COLUMNS):
-                add("solar-panel", origin_x + 1.5 + 3 * column, origin_y + PANEL_Y + 3 * row)
+                _append_entity(
+                    entities,
+                    "solar-panel",
+                    origin_x + MACHINE_CENTRE_OFFSET + PANEL_SPACING * column,
+                    origin_y + PANEL_Y + PANEL_SPACING * row,
+                )
 
     return entities
 
 
-def blueprint_string(entities):
+def blueprint_string(entities: Sequence[dict[str, object]]) -> str:
+    """Encode the entity list as a Factorio blueprint exchange string."""
     document = {
         "blueprint": {
             "item": "blueprint",
             "label": "pnr block",
-            "version": 562949953421312,
-            "entities": entities,
+            "version": BLUEPRINT_VERSION,
+            "entities": list(entities),
         }
     }
     raw = json.dumps(document, separators=(",", ":")).encode()
-    return "0" + base64.b64encode(zlib.compress(raw, 9)).decode()
+    return "0" + base64.b64encode(zlib.compress(raw, ZLIB_COMPRESSION_LEVEL)).decode()
 
 
-def footprints_of(data, names):
-    """Tile footprint of each entity, from its collision box.
+def footprints_of(data: solve.Data, names: Iterable[str]) -> dict[str, tuple[int, int]]:
+    """Return the tile footprint of each entity from its collision box.
 
-    A collision box is the physical size; the tile footprint is that size
+    A collision box is the physical size. The tile footprint is that size
     rounded up. An entity whose long axis is horizontal when it faces east
     needs the axes swapped, which is how the loader works.
     """
-    result = {}
+    name_set = set(names)
+    result: dict[str, tuple[int, int]] = {}
     for kind in (
         "transport-belt",
         "loader",
@@ -230,14 +350,17 @@ def footprints_of(data, names):
     ):
         for name, prototype in data.prototypes.get(kind, {}).items():
             box = prototype.get("collision_box")
-            if name in names and box is not None:
+            if name in name_set and box is not None:
                 result[name] = (math.ceil(box[1][0] - box[0][0]), math.ceil(box[1][1] - box[0][1]))
     return result
 
 
-def footprint_of(footprints, entity):
-    """Footprint of one placed entity, with the axes turned with the entity."""
-    box = footprints.get(entity["name"])
+def footprint_of(
+    footprints: dict[str, tuple[int, int]],
+    entity: dict[str, object],
+) -> tuple[int, int] | None:
+    """Return the footprint of one placed entity turned with its direction."""
+    box = footprints.get(str(entity["name"]))
     if box is None:
         return None
     width, height = box
@@ -246,31 +369,49 @@ def footprint_of(footprints, entity):
     return width, height
 
 
-def tiles_of(entities, footprints):
-    """Every tile an entity covers, plus the tiles that two entities share."""
-    tiles = set()
-    clashes = []
+def _entity_tiles(
+    entity: dict[str, object],
+    footprints: dict[str, tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Return the list of tile coordinates covered by one placed entity."""
+    box = footprint_of(footprints, entity)
+    pos = entity.get("position")
+    if box is None or not isinstance(pos, dict):
+        return []
+    width, height = box
+    cx = int(round(float(pos["x"]) - width / 2))
+    cy = int(round(float(pos["y"]) - height / 2))
+    return [(cx + dx, cy + dy) for dx in range(width) for dy in range(height)]
+
+
+def tiles_of(
+    entities: Sequence[dict[str, object]],
+    footprints: dict[str, tuple[int, int]],
+) -> tuple[set[tuple[int, int]], list[tuple[str, tuple[int, int]]]]:
+    """Return every tile an entity covers and the tiles that two entities share."""
+    tiles: set[tuple[int, int]] = set()
+    clashes: list[tuple[str, tuple[int, int]]] = []
     for entity in entities:
-        box = footprint_of(footprints, entity)
-        if box is None:
-            continue
-        width, height = box
-        corner = (entity["position"]["x"] - width / 2, entity["position"]["y"] - height / 2)
-        for dx in range(width):
-            for dy in range(height):
-                tile = (int(round(corner[0])) + dx, int(round(corner[1])) + dy)
-                if tile in tiles:
-                    clashes.append((entity["name"], tile))
-                tiles.add(tile)
+        name = str(entity["name"])
+        for tile in _entity_tiles(entity, footprints):
+            if tile in tiles:
+                clashes.append((name, tile))
+            tiles.add(tile)
     return tiles, clashes
 
 
-def item_rate(block, amounts_per_craft):
-    """Items per second of one side of the block, over every branch."""
-    return block.total_rate / 60.0 * sum(amount for _, amount in amounts_per_craft)
+def item_rate(block: Block, amounts_per_craft: Sequence[tuple[str, float]]) -> float:
+    """Return items per second of one side of the block over every branch."""
+    return block.total_rate / SECONDS_PER_MINUTE * sum(amount for _, amount in amounts_per_craft)
 
 
-def build_block(data, recipe, crafts_per_min, belt, inserter):
+def build_block(
+    data: solve.Data,
+    recipe: str,
+    crafts_per_min: float,
+    belt: str,
+    inserter: str,
+) -> Block:
     """Plan the branches of one recipe at one rate."""
     recipe_data = data.recipes[recipe]
     machine = data.machine_for(recipe_data)
@@ -278,7 +419,7 @@ def build_block(data, recipe, crafts_per_min, belt, inserter):
         raise SystemExit(f"no machine holds the categories of {recipe}")
     machine_name, speed = machine
 
-    crafts_per_machine = 60.0 * speed / data.craft_seconds(recipe_data)
+    crafts_per_machine = SECONDS_PER_MINUTE * speed / data.craft_seconds(recipe_data)
     machines = max(1, math.ceil(crafts_per_min / crafts_per_machine))
 
     ingredients = [(solve.name_of(e), solve.amount_of(e)) for e in data.ingredients_of(recipe_data)]
@@ -300,8 +441,8 @@ def build_block(data, recipe, crafts_per_min, belt, inserter):
     block.belt = belt
     block.inserter = inserter
 
-    held = INSERTER_ITEMS_PER_SECOND.get(inserter, 4.62)
-    per_machine = block.branch_rate() / 60.0 / block.machines
+    held = INSERTER_ITEMS_PER_SECOND.get(inserter, DEFAULT_INSERTER_CAPACITY)
+    per_machine = block.branch_rate() / SECONDS_PER_MINUTE / block.machines
     block.input_inserters = min(
         len(EDGE_OFFSETS), max(1, math.ceil(per_machine * sum(a for _, a in ingredients) / held))
     )
@@ -311,8 +452,13 @@ def build_block(data, recipe, crafts_per_min, belt, inserter):
     return block
 
 
-def report_block(data, block, entities, footprints):
-    """The static checks of the sketch, stage F."""
+def report_block(
+    data: solve.Data,
+    block: Block,
+    entities: Sequence[dict[str, object]],
+    footprints: dict[str, tuple[int, int]],
+) -> list[str]:
+    """Return the static check summary lines for the block."""
     capacity = belt_capacity(data, block.belt)
     in_rate = item_rate(block, block.ingredients)
     out_rate = item_rate(block, block.results)
@@ -324,14 +470,14 @@ def report_block(data, block, entities, footprints):
         f"input load  {in_rate:8.2f} items/s against {capacity:.2f} per belt",
         f"output load {out_rate:8.2f} items/s against {capacity:.2f} per belt",
     ]
-    per_machine = block.branch_rate() / 60.0 / block.machines
+    per_machine = block.branch_rate() / SECONDS_PER_MINUTE / block.machines
     for side, amounts, count in (
         ("input", block.ingredients, block.input_inserters),
         ("output", block.results, block.output_inserters),
     ):
         demand = per_machine * sum(amount for _, amount in amounts)
-        held = INSERTER_ITEMS_PER_SECOND.get(block.inserter, 0) * count
-        verdict = "ok" if demand <= held + 1e-9 else "short"
+        held = INSERTER_ITEMS_PER_SECOND.get(block.inserter, 0.0) * count
+        verdict = "ok" if demand <= held + CAPACITY_TOLERANCE else "short"
         lines.append(
             f"{side:6}      {demand:6.2f} items/s per machine with "
             f"{count} x {block.inserter} at {held:5.2f} -> {verdict}"
@@ -342,81 +488,76 @@ def report_block(data, block, entities, footprints):
     return lines
 
 
-def check_power(data, entities):
+def check_power(data: solve.Data, entities: Sequence[dict[str, object]]) -> int:
     """Count the power users that no substation reaches.
 
     A machine or a loader with no supply area is a dead entity, which the
     in-game measurement would report as a zero rate.
     """
     powered_kinds = ("assembling-machine", "furnace", "inserter", "loader")
-    names = set()
+    names: set[str] = set()
     for kind in powered_kinds:
         names |= set(data.prototypes.get(kind, {}))
     supply = float(data.prototypes["electric-pole"]["substation"]["supply_area_distance"])
     # The game keeps the boundary tile out of the supply area, so the check
     # asks for half a tile of margin. A boundary entity stays unpowered.
-    reach = supply - 0.5
+    reach = supply - TILE_CENTRE_OFFSET
 
-    supplies = [e["position"] for e in entities if e["name"] == "substation"]
+    supplies = [
+        e["position"]
+        for e in entities
+        if e["name"] == "substation" and isinstance(e.get("position"), dict)
+    ]
     outside = 0
     for entity in entities:
-        if entity["name"] not in names:
+        if str(entity["name"]) not in names:
             continue
-        position = entity["position"]
+        position = entity.get("position")
+        if not isinstance(position, dict):
+            continue
+        px, py = float(position["x"]), float(position["y"])
         if not any(
-            abs(position["x"] - s["x"]) <= reach and abs(position["y"] - s["y"]) <= reach
+            isinstance(s, dict)
+            and abs(px - float(s["x"])) <= reach
+            and abs(py - float(s["y"])) <= reach
             for s in supplies
         ):
             outside += 1
     return outside
 
 
-def ascii_map(entities, block, footprints):
-    """A picture of every branch, drawn from the footprints."""
-    lines = []
-    glyphs = {
-        "assembling-machine-3": "A",
-        "electric-furnace": "F",
-        "chemical-plant": "C",
-        "oil-refinery": "R",
-        "rocket-silo": "S",
-        "turbo-transport-belt": "=",
-        "transport-belt": "=",
-        "fast-transport-belt": "=",
-        "express-transport-belt": "=",
-        "bulk-inserter": ">",
-        "fast-inserter": ">",
-        "inserter": ">",
-        "turbo-loader": "L",
-        "infinity-chest": "I",
-        "steel-chest": "X",
-        "substation": "P",
-        "solar-panel": "o",
-    }
-    for _, origin_y in block.origins():
-        grid = {}
-        for entity in entities:
-            box = footprint_of(footprints, entity)
-            if box is None:
-                continue
-            width, height = box
-            y = entity["position"]["y"] - origin_y
-            if not (-4 <= y <= 24):
-                continue
-            corner = (entity["position"]["x"] - width / 2, y - height / 2)
-            for dx in range(width):
-                for dy in range(height):
-                    grid[(int(round(corner[0])) + dx, int(round(corner[1])) + dy)] = glyphs.get(
-                        entity["name"], "?"
-                    )
-        if not grid:
-            continue
-        xs = [x for x, _ in grid]
-        ys = [y for _, y in grid]
-        for y in range(min(ys), max(ys) + 1):
-            row = "".join(grid.get((x, y), " ") for x in range(min(xs), max(xs) + 1))
-            lines.append(f"{y:4} {row}")
-        lines.append("")
+def _format_grid_lines(grid: dict[tuple[int, int], str]) -> list[str]:
+    """Format a coordinate-to-glyph map as ASCII rows."""
+    if not grid:
+        return []
+    xs = [x for x, _ in grid]
+    ys = [y for _, y in grid]
+    rows = [
+        f"{y:4} {''.join(grid.get((x, y), ' ') for x in range(min(xs), max(xs) + 1))}"
+        for y in range(min(ys), max(ys) + 1)
+    ]
+    rows.append("")
+    return rows
+
+
+def ascii_map(
+    entities: Sequence[dict[str, object]],
+    block: Block,
+    footprints: dict[str, tuple[int, int]],
+) -> list[str]:
+    """Return an ASCII picture of every branch drawn from the footprints."""
+    origins = [origin_y for _, origin_y in block.origins()]
+    grids: dict[int, dict[tuple[int, int], str]] = {oy: {} for oy in origins}
+    for entity in entities:
+        glyph = GLYPHS.get(str(entity["name"]), "?")
+        for tx, ty in _entity_tiles(entity, footprints):
+            for oy in origins:
+                rel_y = ty - oy
+                if ASCII_MIN_Y <= rel_y <= ASCII_MAX_Y:
+                    grids[oy][(tx, rel_y)] = glyph
+    lines: list[str] = []
+    for oy in origins:
+        lines.extend(_format_grid_lines(grids[oy]))
     return lines
 
 
@@ -535,7 +676,7 @@ end)
 """
 
 
-def lua_value(value):
+def lua_value(value: object) -> str:
     """Render a Python value as a Lua literal."""
     if isinstance(value, dict):
         pairs = ", ".join(f"[{lua_value(k)}] = {lua_value(v)}" for k, v in value.items())
@@ -547,7 +688,12 @@ def lua_value(value):
     return repr(value)
 
 
-def write_mod(block, entities, mod_dir, ticks):
+def write_mod(
+    block: Block,
+    entities: Sequence[dict[str, object]],
+    mod_dir: str | os.PathLike[str],
+    ticks: int,
+) -> dict[str, float]:
     """Write the probe mod that builds the blueprint and measures it."""
     mod = pathlib.Path(mod_dir)
     mod.mkdir(parents=True, exist_ok=True)
@@ -576,7 +722,7 @@ def write_mod(block, entities, mod_dir, ticks):
 
     expected = {name: block.total_rate * amount for name, amount in block.results}
     text = (
-        MEASURE_TEMPLATE.replace("WARMUPTICKS", str(ticks // 4))
+        MEASURE_TEMPLATE.replace("WARMUPTICKS", str(ticks // WARMUP_DIVISOR))
         .replace("TICKS", str(ticks))
         .replace("SOLAR", str(RIG_SOLAR_MULTIPLIER))
         .replace("EXPECTED_TABLE", lua_value(expected))
@@ -589,7 +735,8 @@ def write_mod(block, entities, mod_dir, ticks):
     return expected
 
 
-def main():
+def main() -> None:
+    """Parse CLI arguments and run block generation or measurement mod export."""
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["block", "measure"])
     parser.add_argument("recipe")
@@ -599,7 +746,7 @@ def main():
     parser.add_argument("--dump", default=solve.DEFAULT_DUMP)
     parser.add_argument("--out", default=None)
     parser.add_argument("--mod", default=None)
-    parser.add_argument("--ticks", type=int, default=1800)
+    parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS)
     parser.add_argument("--ascii", action="store_true")
     args = parser.parse_args()
 
@@ -609,13 +756,13 @@ def main():
     rig = rig_entities(
         block, [name for name, _ in block.ingredients], item_rate(block, block.results)
     )
-    footprints = footprints_of(data, {e["name"] for e in entities + rig})
+    footprints = footprints_of(data, {str(e["name"]) for e in entities + rig})
 
     _, clashes = tiles_of(entities + rig, footprints)
     print(f"recipe      {args.recipe} at {args.crafts_per_min:.0f} crafts/min")
     for line in report_block(data, block, entities + rig, footprints):
         print(line)
-    for name, tile in clashes[:5]:
+    for name, tile in clashes[:MAX_REPORTED_CLASHES]:
         print(f"clash       {name} at tile {tile}")
     if args.ascii:
         for line in ascii_map(entities + rig, block, footprints):

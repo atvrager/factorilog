@@ -38,6 +38,26 @@ HARDCODED_REGION_PATTERN = re.compile(
 )
 
 
+def _check_tcl_line(path: Path, line_num: int, clean_line: str) -> list[str]:
+    """Check one non-comment TCL line for forbidden patterns."""
+    violations = [
+        f"{path}:{line_num}: Forbidden command '{cmd}': {reason}"
+        for cmd, reason in FORBIDDEN_COMMANDS.items()
+        if cmd in clean_line
+    ]
+    if INSTANCE_NAME_PATTERN.search(clean_line):
+        violations.append(
+            f"{path}:{line_num}: Forbidden instance inspection: "
+            "Flow scripts must not branch or filter on instance names."
+        )
+    if "initialize_floorplan" not in clean_line and HARDCODED_REGION_PATTERN.search(clean_line):
+        violations.append(
+            f"{path}:{line_num}: Forbidden hardcoded region: "
+            "Manual coordinate bounding boxes are forbidden in flow scripts."
+        )
+    return violations
+
+
 def check_tcl_file(path: Path) -> list[str]:
     """Analyze a TCL file for forbidden structural patterns."""
     violations: list[str] = []
@@ -47,27 +67,13 @@ def check_tcl_file(path: Path) -> list[str]:
         clean_line = line.strip()
         if not clean_line or clean_line.startswith("#"):
             continue
-
-        for cmd, reason in FORBIDDEN_COMMANDS.items():
-            if cmd in clean_line:
-                violations.append(f"{path}:{line_num}: Forbidden command '{cmd}': {reason}")
-
-        if INSTANCE_NAME_PATTERN.search(clean_line):
-            violations.append(
-                f"{path}:{line_num}: Forbidden instance inspection: "
-                "Flow scripts must not branch or filter on instance names."
-            )
-
-        if "initialize_floorplan" not in clean_line and HARDCODED_REGION_PATTERN.search(clean_line):
-            violations.append(
-                f"{path}:{line_num}: Forbidden hardcoded region: "
-                "Manual coordinate bounding boxes are forbidden in flow scripts."
-            )
+        violations.extend(_check_tcl_line(path, line_num, clean_line))
 
     return violations
 
 
 def main() -> int:
+    """Run the TCL structural linter on flow scripts."""
     files_to_check = sys.argv[1:]
     if not files_to_check:
         flow_dir = Path("flow")

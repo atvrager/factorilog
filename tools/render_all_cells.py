@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 OPENROAD_IMAGE = "docker.io/openroad/orfs:latest"
 REAL_USER_HOME = pwd.getpwuid(os.getuid()).pw_dir
+TEMP_ROOT_DIR = "/tmp"
+FLOW_TCL_SCRIPT = "/repo/flow/factorilog.tcl"
 
 CELL_CONFIGS: list[dict[str, str | float]] = [
     {
@@ -96,7 +98,7 @@ def render_cell(
     expected_output = str(cfg["output"])
     demand_rate = float(cfg["rate"])
 
-    with tempfile.TemporaryDirectory(dir="/tmp", prefix=f"render-{machine_name}-") as tmp:
+    with tempfile.TemporaryDirectory(dir=TEMP_ROOT_DIR, prefix=f"render-{machine_name}-") as tmp:
         work_dir = Path(tmp)
 
         allowed = {recipe_name}
@@ -129,7 +131,6 @@ def render_cell(
         }
         (work_dir / "netlist.json").write_text(json.dumps(sidecar, indent=2))
 
-        tcl_script = "/repo/flow/factorilog.tcl"
         cmd_orfs = [
             "podman",
             "run",
@@ -143,9 +144,9 @@ def render_cell(
             OPENROAD_IMAGE,
             "bash",
             "-lc",
-            f"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit {tcl_script}",
+            f"source /OpenROAD-flow-scripts/env.sh >/dev/null && openroad -no_init -exit {FLOW_TCL_SCRIPT}",
         ]
-        podman_env = {**os.environ, "TMPDIR": "/tmp", "HOME": REAL_USER_HOME}
+        podman_env = {**os.environ, "TMPDIR": TEMP_ROOT_DIR, "HOME": REAL_USER_HOME}
         res = subprocess.run(cmd_orfs, env=podman_env, capture_output=True, text=True, check=False)
         if res.returncode != 0:
             raise RuntimeError(f"OpenROAD routing failed for {machine_name}:\n{res.stderr}")

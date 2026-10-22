@@ -8,11 +8,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from foundry import pdk, solve
+
+DIR_NORTH = 0
+DIR_EAST = 4
+DIR_SOUTH = 8
+DIR_WEST = 12
+WATTS_PER_KILOWATT = 1000.0
+DIRECTION_NAMES = {
+    DIR_NORTH: "North (0)",
+    DIR_EAST: "East (4)",
+    DIR_SOUTH: "South (8)",
+    DIR_WEST: "West (12)",
+}
 
 
 def inspect_cell_spec(
@@ -31,33 +45,25 @@ def inspect_cell_spec(
     port_faces = cell.get("port_faces", {})
     fluids = set(data.prototypes.get("fluid", {}).keys())
 
-    inputs_detail = []
-    for port in cell.get("inputs", []):
-        slot = in_slots.get(port)
-        face = port_faces.get(port, "W")
-        is_fluid = port in fluids
-        inputs_detail.append(
-            {
-                "port": port,
-                "slot": slot,
-                "face": face,
-                "type": "fluid" if is_fluid else "item",
-            }
-        )
+    inputs_detail = [
+        {
+            "port": port,
+            "slot": in_slots.get(port),
+            "face": port_faces.get(port, "W"),
+            "type": "fluid" if port in fluids else "item",
+        }
+        for port in cell.get("inputs", [])
+    ]
 
-    outputs_detail = []
-    for port in cell.get("outputs", []):
-        slot = out_slots.get(port)
-        face = port_faces.get(port, "E")
-        is_fluid = port in fluids
-        outputs_detail.append(
-            {
-                "port": port,
-                "slot": slot,
-                "face": face,
-                "type": "fluid" if is_fluid else "item",
-            }
-        )
+    outputs_detail = [
+        {
+            "port": port,
+            "slot": out_slots.get(port),
+            "face": port_faces.get(port, "E"),
+            "type": "fluid" if port in fluids else "item",
+        }
+        for port in cell.get("outputs", [])
+    ]
 
     return {
         "cell": cell.get("cell"),
@@ -67,7 +73,7 @@ def inspect_cell_spec(
         "height": cell.get("height"),
         "machine_width": cell.get("machine_width"),
         "machine_height": cell.get("machine_height"),
-        "direction": cell.get("direction", 0),
+        "direction": cell.get("direction", DIR_NORTH),
         "has_fluids": cell.get("has_fluids", False),
         "watts": cell.get("watts", 0.0),
         "crafts_per_minute": cell.get("crafts_per_minute", 0.0),
@@ -78,39 +84,67 @@ def inspect_cell_spec(
     }
 
 
-def format_cell_spec(spec: dict[str, Any]) -> str:
+def format_cell_spec(spec: Mapping[str, object]) -> str:
     """Format cell specification into readable technical text."""
-    dir_names = {0: "North (0)", 4: "East (4)", 8: "South (8)", 12: "West (12)"}
+    direction = spec["direction"]
+    dir_code = direction if isinstance(direction, int) else 0
+    watts_raw = spec["watts"]
+    watts = float(watts_raw) if isinstance(watts_raw, (int, float)) else 0.0
+    cpm_raw = spec["crafts_per_minute"]
+    crafts_per_min = float(cpm_raw) if isinstance(cpm_raw, (int, float)) else 0.0
+    inputs = spec["inputs"] if isinstance(spec["inputs"], list) else []
+    outputs = spec["outputs"] if isinstance(spec["outputs"], list) else []
     lines = [
         f"Cell: {spec['cell']}",
         f"  Machine: {spec['machine']}",
         f"  Recipe:  {spec['recipe']}",
         f"  Macro Dimensions: {spec['width']}x{spec['height']} tiles",
         f"  Machine Footprint: {spec['machine_width']}x{spec['machine_height']} tiles",
-        f"  Direction: {dir_names.get(spec['direction'], str(spec['direction']))}",
+        f"  Direction: {DIRECTION_NAMES.get(dir_code, str(dir_code))}",
         f"  Has Fluids: {spec['has_fluids']}",
-        f"  Power: {spec['watts'] / 1000.0:.1f} kW",
-        f"  Crafts/min: {spec['crafts_per_minute']:.2f}",
+        f"  Power: {watts / WATTS_PER_KILOWATT:.1f} kW",
+        f"  Crafts/min: {crafts_per_min:.2f}",
         "  Inputs:",
     ]
     lines.extend(
-        f"    - {inp['port']:<20} slot={inp['slot']} face={inp['face']} type={inp['type']}"
-        for inp in spec["inputs"]
+        f"    - {inp['port']!s:<20} slot={inp['slot']} face={inp['face']} type={inp['type']}"
+        for inp in inputs
+        if isinstance(inp, Mapping)
     )
     lines.append("  Outputs:")
     lines.extend(
-        f"    - {out['port']:<20} slot={out['slot']} face={out['face']} type={out['type']}"
-        for out in spec["outputs"]
+        f"    - {out['port']!s:<20} slot={out['slot']} face={out['face']} type={out['type']}"
+        for out in outputs
+        if isinstance(out, Mapping)
     )
-    if "raw_fluid_boxes" in spec:
+    raw_boxes = spec.get("raw_fluid_boxes")
+    if isinstance(raw_boxes, list):
         lines.append("  Fluid Boxes:")
-        for fb in spec["raw_fluid_boxes"]:
-            ptype = fb.get("production_type")
-            conns = fb.get("pipe_connections", [])
-            lines.append(f"    - {ptype}: {conns}")
+        for fb in raw_boxes:
+            if isinstance(fb, Mapping):
+                ptype = fb.get("production_type")
+                conns = fb.get("pipe_connections", [])
+                lines.append(f"    - {ptype}: {conns}")
     if "recipe_raw" in spec:
         lines.append(f"  Recipe Ingredients: {spec['recipe_raw']}")
     return "\n".join(lines)
+
+
+def _resolve_dump_path(dump_path: Path, env: Mapping[str, str] = os.environ) -> Path:
+    """Resolve dump file path against workspace or runfiles directories."""
+    if dump_path.is_file():
+        return dump_path
+    workspace = env.get("BUILD_WORKSPACE_DIRECTORY", "")
+    if workspace:
+        candidate = Path(workspace) / dump_path
+        if candidate.is_file():
+            return candidate
+    runfiles = env.get("PYTHON_RUNFILES") or env.get("TEST_SRCDIR", "")
+    if runfiles:
+        candidate = Path(runfiles) / "_main" / dump_path
+        if candidate.is_file():
+            return candidate
+    return dump_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,27 +159,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to prototype dump JSON fixture",
     )
     parser.add_argument(
-        "--machine", type=str, required=True, help="Machine name (e.g. chemical-plant)"
+        "--machine", type=str, required=True, help="Machine name (for example chemical-plant)"
     )
-    parser.add_argument("--recipe", type=str, required=True, help="Recipe name (e.g. plastic-bar)")
+    parser.add_argument(
+        "--recipe", type=str, required=True, help="Recipe name (for example plastic-bar)"
+    )
     parser.add_argument("--json", action="store_true", help="Output specification in JSON format")
 
     args = parser.parse_args(argv)
-    dump_path = args.dump
-    if not dump_path.is_file():
-        import os
-
-        workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
-        if workspace:
-            candidate = Path(workspace) / dump_path
-            if candidate.is_file():
-                dump_path = candidate
-        runfiles = os.environ.get("PYTHON_RUNFILES") or os.environ.get("TEST_SRCDIR")
-        if runfiles and not dump_path.is_file():
-            candidate = Path(runfiles) / "_main" / dump_path
-            if candidate.is_file():
-                dump_path = candidate
-
+    dump_path = _resolve_dump_path(args.dump)
     if not dump_path.is_file():
         sys.stderr.write(f"Error: dump file not found: {args.dump}\n")
         return 1

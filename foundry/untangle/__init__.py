@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+JsonDict = dict[str, Any]
+DEFAULT_MAX_ITERATIONS = 3
+
 try:
     from foundry.untangle.channels import (
         route_unrouted_signal_nets,
@@ -71,9 +74,9 @@ except ImportError:
 
 
 def untangle_def(
-    def_data: dict[str, Any],
-    netlist_data: dict[str, Any] | None = None,
-    max_iterations: int = 3,
+    def_data: JsonDict,
+    netlist_data: JsonDict | None = None,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
     pins_only: bool = False,
 ) -> None:
     """Execute the three-phase DEF routing untangle pipeline.

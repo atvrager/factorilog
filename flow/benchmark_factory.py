@@ -7,12 +7,15 @@ transfers items across machine boundaries, and measures production rates.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -21,67 +24,87 @@ try:
 except ImportError:
     foundry_path = Path(__file__).resolve().parent.parent / "foundry"
     if str(foundry_path) not in sys.path:
-        sys.path.insert(0, str(foundry_path))
+        sys.path.append(str(foundry_path))
     import def2bp
 
 DEFAULT_GAME_PATH = Path("~/.steam/steam/steamapps/common/Factorio/bin/x64/factorio").expanduser()
+FALLBACK_GAME_PATHS: tuple[Path, ...] = (
+    Path("/scratch/opt/factorio/bin/x64/factorio"),
+    Path("/opt/factorio/bin/x64/factorio"),
+)
+HOME_DIR = Path("/home")
+STEAM_REL_GLOB = "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
+DEFAULT_BENCHMARK_TICKS = 7200
+DEFAULT_CLI_TICKS = 3600
+TICKS_PER_SECOND = 60.0
+MAX_STATUS_REPORTS = 10
+
+
+def _load_pins_json(pins_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read input and output pin lists from a pins JSON file."""
+    data = json.loads(pins_path.read_text())
+    return list(data.get("inputs", [])), list(data.get("outputs", []))
+
+
+def _load_pins_from_def(
+    def_path: Path,
+    netlist_data: Mapping[str, object],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract input and output pin lists from a DEF file and netlist."""
+    def_data = def2bp.parse_def(def_path.read_text())
+    pins_data = def2bp.extract_pins(def_data, dict(netlist_data))
+    return list(pins_data.get("inputs", [])), list(pins_data.get("outputs", []))
 
 
 def resolve_factory_pins(
     blueprint_file: Path | None,
-    netlist_data: dict[str, Any],
+    netlist_data: Mapping[str, object],
     pins_file: Path | None = None,
     def_file: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Resolve input and output pin locations dynamically from DEF or pins JSON."""
-    # 1. Direct pins JSON file
-    if pins_file and pins_file.is_file():
-        data = json.loads(pins_file.read_text())
-        return data.get("inputs", []), data.get("outputs", [])
-
-    # 2. Direct DEF file
-    if def_file and def_file.is_file():
-        def_data = def2bp.parse_def(def_file.read_text())
-        pins_data = def2bp.extract_pins(def_data, netlist_data)
-        return pins_data.get("inputs", []), pins_data.get("outputs", [])
-
-    # 3. Auto-discover alongside blueprint file
+    pin_candidates: list[Path] = []
+    if pins_file:
+        pin_candidates.append(pins_file)
     if blueprint_file:
-        candidate_pins = [
-            blueprint_file.with_suffix(".pins.json"),
-            blueprint_file.parent / "pins.json",
-        ]
-        for cp in candidate_pins:
-            if cp.is_file():
-                data = json.loads(cp.read_text())
-                return data.get("inputs", []), data.get("outputs", [])
+        pin_candidates.extend(
+            [
+                blueprint_file.with_suffix(".pins.json"),
+                blueprint_file.parent / "pins.json",
+            ]
+        )
+    for cp in pin_candidates:
+        if cp.is_file():
+            return _load_pins_json(cp)
 
-        candidate_defs = [
-            blueprint_file.with_suffix(".def"),
-            blueprint_file.parent / "factory.def",
-            blueprint_file.parent / f"{blueprint_file.stem}.def",
-        ]
-        for cd in candidate_defs:
-            if cd.is_file():
-                def_data = def2bp.parse_def(cd.read_text())
-                pins_data = def2bp.extract_pins(def_data, netlist_data)
-                return pins_data.get("inputs", []), pins_data.get("outputs", [])
-
-    # 4. Fallback: check foundry/factory.def in repository
-    repo_def = Path(__file__).resolve().parent.parent / "foundry" / "factory.def"
-    if repo_def.is_file():
-        def_data = def2bp.parse_def(repo_def.read_text())
-        pins_data = def2bp.extract_pins(def_data, netlist_data)
-        return pins_data.get("inputs", []), pins_data.get("outputs", [])
+    def_candidates: list[Path] = []
+    if def_file:
+        def_candidates.append(def_file)
+    if blueprint_file:
+        def_candidates.extend(
+            [
+                blueprint_file.with_suffix(".def"),
+                blueprint_file.parent / "factory.def",
+                blueprint_file.parent / f"{blueprint_file.stem}.def",
+            ]
+        )
+    def_candidates.append(Path(__file__).resolve().parent.parent / "foundry" / "factory.def")
+    for cd in def_candidates:
+        if cd.is_file():
+            return _load_pins_from_def(cd, netlist_data)
 
     raise FileNotFoundError("Could not discover pin definitions. Provide --def or --pins flag.")
 
 
-def find_factorio_binary(override: Path | None = None) -> Path:
+def find_factorio_binary(
+    override: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Find the Factorio executable binary."""
     if override and override.is_file():
         return override
-    env_game = os.environ.get("FACTORIO_BIN")
+    env_map = os.environ if env is None else env
+    env_game = env_map["FACTORIO_BIN"] if "FACTORIO_BIN" in env_map else ""
     if env_game and Path(env_game).is_file():
         return Path(env_game)
     which_bin = shutil.which("factorio")
@@ -89,52 +112,60 @@ def find_factorio_binary(override: Path | None = None) -> Path:
         return Path(which_bin)
     if DEFAULT_GAME_PATH.is_file():
         return DEFAULT_GAME_PATH
-    for candidate in [
-        Path("/scratch/opt/factorio/bin/x64/factorio"),
-        Path("/opt/factorio/bin/x64/factorio"),
-    ]:
-        if candidate.is_file():
-            return candidate
-    for candidate in Path("/home").glob(
-        "*/.steam/steam/steamapps/common/Factorio/bin/x64/factorio"
-    ):
+    for candidate in (*FALLBACK_GAME_PATHS, *HOME_DIR.glob(STEAM_REL_GLOB)):
         if candidate.is_file():
             return candidate
     raise FileNotFoundError("Factorio binary not found.")
 
 
+def _first_red_target_id(entity: Mapping[str, object]) -> int | None:
+    """Return the first red wire target entity_id on port 1, or None."""
+    conns = entity.get("connections")
+    port_one = conns.get("1") if isinstance(conns, Mapping) else None
+    red_list = port_one.get("red") if isinstance(port_one, Mapping) else None
+    if not isinstance(red_list, Sequence) or not red_list:
+        return None
+    first_conn = red_list[0]
+    target_id = first_conn.get("entity_id") if isinstance(first_conn, Mapping) else None
+    return int(target_id) if isinstance(target_id, (int, float, str)) else None
+
+
+def _find_connected_accumulator_pos(
+    entity: Mapping[str, object],
+    ent_by_num: Mapping[int, Mapping[str, object]],
+) -> list[float] | None:
+    """Return [x, y] of an arithmetic combinator wired to port 1 of entity, or None."""
+    target_id = _first_red_target_id(entity)
+    target = ent_by_num.get(target_id) if target_id is not None else None
+    if not target or target.get("name") != "arithmetic-combinator":
+        return None
+    pos = target.get("position")
+    if isinstance(pos, Mapping):
+        return [float(str(pos.get("x", 0.0))), float(str(pos.get("y", 0.0)))]
+    return None
+
+
 def extract_blueprint_taps(blueprint_string: str) -> list[dict[str, Any]]:
     """Extract telemetry tap coordinates from blueprint string."""
-    import base64
-    import zlib
-
     raw = zlib.decompress(base64.b64decode(blueprint_string.strip()[1:]))
     bp = json.loads(raw).get("blueprint", {})
     entities = bp.get("entities", [])
-    ent_by_num = {e["entity_number"]: e for e in entities if "entity_number" in e}
-    taps = []
+    ent_by_num = {int(e["entity_number"]): e for e in entities if "entity_number" in e}
+    taps: list[dict[str, Any]] = []
     for e in entities:
         if e.get("name") == "display-panel":
-            mat = e.get("text", "")
             disp_pos = e["position"]
-            conns = e.get("connections", {}).get("1", {}).get("red", [])
-            acc_pos = None
-            if conns:
-                target_id = conns[0].get("entity_id")
-                target = ent_by_num.get(target_id)
-                if target and target.get("name") == "arithmetic-combinator":
-                    acc_pos = target["position"]
             taps.append(
                 {
-                    "material": mat,
+                    "material": e.get("text", ""),
                     "disp_pos": [disp_pos["x"], disp_pos["y"]],
-                    "acc_pos": [acc_pos["x"], acc_pos["y"]] if acc_pos else None,
+                    "acc_pos": _find_connected_accumulator_pos(e, ent_by_num),
                 }
             )
     return taps
 
 
-def serialize_lua(obj: Any) -> str:
+def serialize_lua(obj: object) -> str:
     """Serialize a Python data structure into valid Lua literal code."""
     if obj is None:
         return "nil"
@@ -155,12 +186,12 @@ def serialize_lua(obj: Any) -> str:
 
 def run_benchmark(
     blueprint_string: str,
-    netlist_data: dict[str, Any],
+    netlist_data: Mapping[str, object],
     game_bin: Path,
     work_dir: Path,
-    input_pins: list[dict[str, Any]] | None = None,
-    output_pins: list[dict[str, Any]] | None = None,
-    ticks: int = 7200,
+    input_pins: Sequence[Mapping[str, object]] | None = None,
+    output_pins: Sequence[Mapping[str, object]] | None = None,
+    ticks: int = DEFAULT_BENCHMARK_TICKS,
 ) -> dict[str, Any]:
     """Run dynamic simulation benchmark in headless Factorio."""
     if input_pins is None or output_pins is None:
@@ -182,17 +213,19 @@ def run_benchmark(
 
     # Save netlist inputs and outputs metadata for Lua script
     inputs_json = mod_dir / "netlist.json"
-    inputs_json.write_text(json.dumps(netlist_data))
+    inputs_json.write_text(json.dumps(dict(netlist_data)))
 
     taps_list = extract_blueprint_taps(blueprint_string)
     taps_lua = mod_dir / "taps.lua"
     taps_lua.write_text(f"return {serialize_lua(taps_list)}\n")
 
+    in_pins_list = [dict(p) for p in input_pins]
+    out_pins_list = [dict(p) for p in output_pins]
     pins_lua = mod_dir / "pins.lua"
     pins_lua.write_text(
         f"return {{\n"
-        f"  inputs = {serialize_lua(input_pins)},\n"
-        f"  outputs = {serialize_lua(output_pins)},\n"
+        f"  inputs = {serialize_lua(in_pins_list)},\n"
+        f"  outputs = {serialize_lua(out_pins_list)},\n"
         f"}}\n"
     )
 
@@ -650,72 +683,103 @@ end)
     )
 
     save_path = work_dir / "bench.zip"
-    cmd_create = [
-        str(game_bin),
-        "-c",
-        str(config_file),
-        "--mod-directory",
-        str(mods_dir),
-        "--create",
-        str(save_path),
-    ]
-    res_create = subprocess.run(cmd_create, capture_output=True, text=True)
-    if res_create.returncode != 0:
+    _execute_factorio_step(
+        [
+            str(game_bin),
+            "-c",
+            str(config_file),
+            "--mod-directory",
+            str(mods_dir),
+            "--create",
+            str(save_path),
+        ],
+        data_dir,
+        "Factorio create failed",
+    )
+    bench_stdout = _execute_factorio_step(
+        [
+            str(game_bin),
+            "-c",
+            str(config_file),
+            "--mod-directory",
+            str(mods_dir),
+            "--benchmark",
+            str(save_path),
+            "--benchmark-ticks",
+            str(ticks),
+            "--benchmark-sanitize",
+        ],
+        data_dir,
+        "Factorio benchmark failed",
+    )
+    return _collect_benchmark_results(data_dir, bench_stdout, ticks)
+
+
+def _execute_factorio_step(cmd: list[str], data_dir: Path, err_prefix: str) -> str:
+    """Run a Factorio subprocess command and raise RuntimeError with log on failure."""
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
         log_file = data_dir / "factorio-current.log"
         log_text = log_file.read_text() if log_file.is_file() else "No log"
         raise RuntimeError(
-            f"Factorio create failed:\nSTDOUT:\n{res_create.stdout}\nSTDERR:\n{res_create.stderr}\nLOG:\n{log_text}"
+            f"{err_prefix}:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}\nLOG:\n{log_text}"
         )
+    return res.stdout or ""
 
-    cmd_bench = [
-        str(game_bin),
-        "-c",
-        str(config_file),
-        "--mod-directory",
-        str(mods_dir),
-        "--benchmark",
-        str(save_path),
-        "--benchmark-ticks",
-        str(ticks),
-        "--benchmark-sanitize",
-    ]
-    bench_res = subprocess.run(cmd_bench, capture_output=True, text=True)
-    if bench_res.returncode != 0:
-        log_file = data_dir / "factorio-current.log"
-        log_text = log_file.read_text() if log_file.is_file() else "No log"
-        raise RuntimeError(
-            f"Factorio benchmark failed:\nSTDOUT:\n{bench_res.stdout}\nSTDERR:\n{bench_res.stderr}\nLOG:\n{log_text}"
-        )
 
-    log_path = data_dir / "factorio-current.log"
+def _parse_final_rates(lines: Sequence[str]) -> dict[str, str]:
+    """Extract final science pack production rates from Factorio log lines."""
+    final_rates: dict[str, str] = {}
+    for line in lines:
+        if "FINAL_RATE_" in line:
+            parts = line.split("FINAL_RATE_")[-1].split(":")
+            final_rates[parts[0].strip()] = parts[1].strip()
+    return final_rates
+
+
+def _scan_bench_log_file(
+    log_path: Path,
+) -> tuple[int, list[str], list[str], dict[str, str]]:
+    """Scan Factorio log file for benchmark markers, status reports, and final rates."""
+    if not log_path.is_file():
+        return 0, [], [], {}
+    lines = log_path.read_text().splitlines()
+    revived = 0
+    bench_logs: list[str] = []
+    status_reports: list[str] = []
+    for line in lines:
+        if "BENCH_" in line:
+            bench_logs.append(line)
+        if "BENCH_REVIVED:" in line:
+            revived = int(line.split(":")[-1].strip())
+        elif "BENCH_STATUS:" in line:
+            status_reports.append(line.split("BENCH_STATUS:")[-1].strip())
+    return revived, bench_logs, status_reports, _parse_final_rates(lines)
+
+
+def _collect_benchmark_results(
+    data_dir: Path,
+    bench_stdout: str,
+    ticks: int,
+) -> dict[str, Any]:
+    """Parse Factorio log, stdout, and telemetry trace JSON after a benchmark run."""
+    revived, bench_logs, status_reports, final_rates = _scan_bench_log_file(
+        data_dir / "factorio-current.log"
+    )
     results: dict[str, Any] = {
         "ticks": ticks,
-        "revived": 0,
-        "status_reports": [],
-        "final_rates": {},
+        "revived": revived,
+        "status_reports": status_reports,
+        "final_rates": final_rates,
         "ups": 0.0,
     }
-    if log_path.is_file():
-        for line in log_path.read_text().splitlines():
-            if "BENCH_" in line:
-                results.setdefault("bench_logs", []).append(line)
-            if "BENCH_REVIVED:" in line:
-                results["revived"] = int(line.split(":")[-1].strip())
-            elif "BENCH_STATUS:" in line:
-                results["status_reports"].append(line.split("BENCH_STATUS:")[-1].strip())
-            elif "FINAL_RATE_" in line:
-                parts = line.split("FINAL_RATE_")[-1].split(":")
-                pack = parts[0].strip()
-                val = parts[1].strip()
-                results["final_rates"][pack] = val
+    if bench_logs:
+        results["bench_logs"] = bench_logs
 
-    # Extract benchmark execution time and UPS
-    if bench_res.stdout:
-        for line in bench_res.stdout.splitlines():
-            if "Performed" in line and "in" in line:
-                results["summary"] = line.strip()
+    for line in bench_stdout.splitlines():
+        if "Performed" in line and "in" in line:
+            results["summary"] = line.strip()
 
-    # Load telemetry trace JSON if generated
     trace_file = data_dir / "script-output" / "telemetry_trace.json"
     if trace_file.is_file():
         try:
@@ -726,12 +790,77 @@ end)
     return results
 
 
+def _print_final_rates(final_rates: object) -> None:
+    """Print the final science pack production rates table."""
+    print("\nFinal Science Pack Production Rates:")
+    if isinstance(final_rates, Mapping) and final_rates:
+        for pack, rate in sorted(final_rates.items()):
+            print(f"  {pack:25s}: {rate}")
+    else:
+        print("  No science pack output recorded during this interval.")
+
+
+def _print_benchmark_results(results: Mapping[str, object]) -> None:
+    """Print human-readable benchmark metrics and logs to stdout."""
+    ticks = int(str(results.get("ticks", 0)))
+    print("\nBenchmark Execution Results:")
+    print(f"  Simulation ticks: {ticks} ({ticks / TICKS_PER_SECOND:.1f} game seconds)")
+    print(f"  Revived entities: {results.get('revived', 0)}")
+    if "summary" in results:
+        print(f"  Speed: {results['summary']}")
+
+    trace = results.get("telemetry_trace")
+    if isinstance(trace, Mapping):
+        samples = trace.get("samples", [])
+        num_samples = len(samples) if isinstance(samples, Sequence) else 0
+        print(f"  Telemetry trace: {num_samples} samples collected across taps")
+
+    bench_logs = results.get("bench_logs")
+    if isinstance(bench_logs, Sequence):
+        print("\nDiagnostic Logs:")
+        for log_line in bench_logs:
+            print(f"  {log_line}")
+
+    print("\nStatus Progression:")
+    status_reports = results.get("status_reports")
+    if isinstance(status_reports, Sequence):
+        for status in status_reports[:MAX_STATUS_REPORTS]:
+            print(f"  {status}")
+
+    _print_final_rates(results.get("final_rates"))
+
+
+def _run_telemetry_analysis(
+    trace_data: Mapping[str, object],
+    netlist_data: Mapping[str, object],
+    json_out: Path | None,
+) -> None:
+    """Import analyze_telemetry and print the shape analysis report."""
+    try:
+        import analyze_telemetry
+    except ImportError:
+        flow_dir = str(Path(__file__).resolve().parent)
+        if flow_dir not in sys.path:
+            sys.path.append(flow_dir)
+        import analyze_telemetry
+
+    analysis = analyze_telemetry.analyze_shapes(trace_data, netlist_data)
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(analysis, indent=2))
+        print(f"\nExported shape analysis JSON to: {json_out}")
+
+    print("\n" + analyze_telemetry.format_markdown_report(analysis))
+
+
 def main() -> int:
     """CLI entrypoint for running factory benchmark."""
     parser = argparse.ArgumentParser(description="Benchmark Factorio factory throughput.")
     parser.add_argument("blueprint_file", type=Path, help="Path to blueprint file")
     parser.add_argument("netlist_file", type=Path, help="Path to netlist JSON file")
-    parser.add_argument("--ticks", type=int, default=3600, help="Simulation ticks to run")
+    parser.add_argument(
+        "--ticks", type=int, default=DEFAULT_CLI_TICKS, help="Simulation ticks to run"
+    )
     parser.add_argument("--game", type=Path, default=None, help="Path to Factorio binary")
     parser.add_argument(
         "--def", dest="def_file", type=Path, default=None, help="Path to factory.def file"
@@ -776,47 +905,10 @@ def main() -> int:
         args.trace_out.write_text(json.dumps(results["telemetry_trace"], indent=2))
         print(f"\nExported telemetry trace to: {args.trace_out}")
 
-    print("\nBenchmark Execution Results:")
-    print(f"  Simulation ticks: {results['ticks']} ({results['ticks'] / 60.0:.1f} game seconds)")
-    print(f"  Revived entities: {results['revived']}")
-    if "summary" in results:
-        print(f"  Speed: {results['summary']}")
+    _print_benchmark_results(results)
 
-    if "telemetry_trace" in results:
-        t_data = results["telemetry_trace"]
-        num_samples = len(t_data.get("samples", []))
-        print(f"  Telemetry trace: {num_samples} samples collected across taps")
-
-    if "bench_logs" in results:
-        print("\nDiagnostic Logs:")
-        for log_line in results["bench_logs"]:
-            print(f"  {log_line}")
-
-    print("\nStatus Progression:")
-    for status in results["status_reports"][:10]:
-        print(f"  {status}")
-
-    print("\nFinal Science Pack Production Rates:")
-    if results["final_rates"]:
-        for pack, rate in sorted(results["final_rates"].items()):
-            print(f"  {pack:25s}: {rate}")
-    else:
-        print("  No science pack output recorded during this interval.")
-
-    if args.analyze and "telemetry_trace" in results:
-        try:
-            import analyze_telemetry
-        except ImportError:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            import analyze_telemetry
-
-        analysis = analyze_telemetry.analyze_shapes(results["telemetry_trace"], netlist_data)
-        if args.json_out:
-            args.json_out.parent.mkdir(parents=True, exist_ok=True)
-            args.json_out.write_text(json.dumps(analysis, indent=2))
-            print(f"\nExported shape analysis JSON to: {args.json_out}")
-
-        print("\n" + analyze_telemetry.format_markdown_report(analysis))
+    if args.analyze and isinstance(results.get("telemetry_trace"), Mapping):
+        _run_telemetry_analysis(results["telemetry_trace"], netlist_data, args.json_out)
 
     return 0
 

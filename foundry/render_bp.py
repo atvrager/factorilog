@@ -327,7 +327,7 @@ ICON_SEARCH_CATEGORIES: tuple[str, ...] = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SpriteSpec:
     """Resolved sprite crop and placement parameters in tile coordinates."""
 

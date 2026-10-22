@@ -19,7 +19,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import circuit_synth
@@ -28,6 +28,10 @@ import liberty
 import netlist
 import pdk
 import solve
+
+MergePlansMap: TypeAlias = dict[str, list[tuple[str, str, str, str]]]
+SplitPlansMap: TypeAlias = dict[str, list[tuple[str, str, str, str]]]
+BalancerPlansMap: TypeAlias = dict[str, list[tuple[str, str, str, str, str]]]
 
 # The science packs of the 60 SPM reference demand.
 SPM_PACKS = (
@@ -39,6 +43,8 @@ SPM_PACKS = (
     "utility-science-pack",
 )
 
+MAX_STANDARD_CHASSIS_DIM = 3
+
 
 def parse_demand(argv: list[str]) -> dict[str, float]:
     """argv after the dump path -> demand as item per_min pairs."""
@@ -48,6 +54,103 @@ def parse_demand(argv: list[str]) -> dict[str, float]:
     for index in range(0, len(argv), 2):
         pairs[argv[index]] = float(argv[index + 1])
     return pairs
+
+
+def _compute_chassis_extra_power(
+    data: solve.Data,
+    demand: dict[str, float],
+    allowed: set[str],
+    enable_compound_cells: bool,
+    synthesize_splitters: bool,
+    chassis_grid_w: int,
+    chassis_grid_h: int,
+) -> float:
+    """Calculate the extra electrical power required by the chassis grid."""
+    gw, gh = chassis_grid_w, chassis_grid_h
+    if gw <= 0 or gh <= 0:
+        try:
+            from analytical_placer import AnalyticalPlacer
+
+            nl_pre = netlist.build(
+                data, demand, allowed, enable_compound_cells=enable_compound_cells
+            )
+            plans_pre = netlist.merge_plans_of(nl_pre)
+            splits_pre = netlist.split_plans_of(nl_pre, synthesize_trees=synthesize_splitters)
+            bals_pre = netlist.balancer_plans_of(nl_pre)
+            gw, gh = AnalyticalPlacer().compute_auto_chassis_grid(
+                nl_pre,
+                merge_plans=plans_pre,
+                split_plans=splits_pre,
+                balancer_plans=bals_pre,
+            )
+        except Exception:
+            gw, gh = max(1, gw), max(1, gh)
+    return solve.chassis_power_watts(data, gw, gh)
+
+
+def _fuse_controller_verilog(
+    nl: netlist.Netlist, controller_verilog: Path | str | None
+) -> list[dict[str, Any]]:
+    """Synthesize and fuse an optional Verilog controller into the netlist."""
+    if not controller_verilog:
+        return []
+    c_path = Path(controller_verilog)
+    if not c_path.is_file():
+        return []
+    synth_result = circuit_synth.synthesize_verilog(c_path)
+    max_rank = max((inst.rank for inst in nl.instances), default=0)
+    circuit_synth.fuse_controller_into_netlist(nl, synth_result, base_rank=max_rank + 1)
+    return [
+        {
+            "source": c.source,
+            "target": c.target,
+            "color": c.color,
+            "source_port": c.source_port,
+            "target_port": c.target_port,
+        }
+        for c in synth_result.connections
+    ]
+
+
+def _append_analytical_tcl(
+    ranks_text: str,
+    nl: netlist.Netlist,
+    plans: MergePlansMap,
+    split_plans: SplitPlansMap,
+    balancer_plans: BalancerPlansMap,
+) -> str:
+    """Append auto-chassis grid variables and analytical placement Tcl commands."""
+    try:
+        from analytical_placer import AnalyticalPlacer
+
+        placer = AnalyticalPlacer()
+        auto_w, auto_h = placer.compute_auto_chassis_grid(
+            nl,
+            merge_plans=plans,
+            split_plans=split_plans,
+            balancer_plans=balancer_plans,
+        )
+        ranks_text += (
+            f"\n# Auto-calculated square-est chassis grid dimensions\n"
+            f"set AUTO_CHASSIS_GRID_W {auto_w}\n"
+            f"set AUTO_CHASSIS_GRID_H {auto_h}\n"
+            f"set AUTO_NUM_CLUSTERS {auto_w * auto_h}\n"
+        )
+        extra_grids = (
+            [(auto_w, auto_h)]
+            if auto_w > MAX_STANDARD_CHASSIS_DIM or auto_h > MAX_STANDARD_CHASSIS_DIM
+            else None
+        )
+        ranks_text += placer.emit_analytical_tcl(
+            nl,
+            merge_plans=plans,
+            split_plans=split_plans,
+            balancer_plans=balancer_plans,
+            extra_chassis_grids=extra_grids,
+        )
+    except Exception as exc:
+        print(f"netbuild: analytical placer warning: {exc}", file=sys.stderr)
+    return ranks_text
 
 
 def build_all(
@@ -70,28 +173,19 @@ def build_all(
     data = solve.Data(str(dump_path))
     tech = pdk.Pdk(data)
     allowed = set(only_recipes) if only_recipes else data.allowed_recipes(["nauvis"])
-    extra_power_watts = 0.0
-    if use_chassis:
-        gw, gh = chassis_grid_w, chassis_grid_h
-        if gw <= 0 or gh <= 0:
-            try:
-                from analytical_placer import AnalyticalPlacer
-
-                nl_pre = netlist.build(
-                    data, demand, allowed, enable_compound_cells=enable_compound_cells
-                )
-                plans_pre = netlist.merge_plans_of(nl_pre)
-                splits_pre = netlist.split_plans_of(nl_pre, synthesize_trees=synthesize_splitters)
-                bals_pre = netlist.balancer_plans_of(nl_pre)
-                gw, gh = AnalyticalPlacer().compute_auto_chassis_grid(
-                    nl_pre,
-                    merge_plans=plans_pre,
-                    split_plans=splits_pre,
-                    balancer_plans=bals_pre,
-                )
-            except Exception:
-                gw, gh = max(1, gw), max(1, gh)
-        extra_power_watts = solve.chassis_power_watts(data, gw, gh)
+    extra_power_watts = (
+        _compute_chassis_extra_power(
+            data,
+            demand,
+            allowed,
+            enable_compound_cells,
+            synthesize_splitters,
+            chassis_grid_w,
+            chassis_grid_h,
+        )
+        if use_chassis
+        else 0.0
+    )
 
     nl = netlist.build(
         data,
@@ -105,24 +199,7 @@ def build_all(
     telemetry_records = netlist.insert_telemetry(
         nl, tap_scope, enable_display, enable_circuit, plans
     )
-
-    circuit_conns: list[dict[str, Any]] = []
-    if controller_verilog:
-        c_path = Path(controller_verilog)
-        if c_path.is_file():
-            synth_result = circuit_synth.synthesize_verilog(c_path)
-            max_rank = max((inst.rank for inst in nl.instances), default=0)
-            circuit_synth.fuse_controller_into_netlist(nl, synth_result, base_rank=max_rank + 1)
-            circuit_conns = [
-                {
-                    "source": c.source,
-                    "target": c.target,
-                    "color": c.color,
-                    "source_port": c.source_port,
-                    "target_port": c.target_port,
-                }
-                for c in synth_result.connections
-            ]
+    circuit_conns = _fuse_controller_verilog(nl, controller_verilog)
 
     balancer_plans = netlist.balancer_plans_of(nl)
     text = netlist.emit_verilog(nl, plans, split_plans, balancer_plans)
@@ -137,8 +214,7 @@ def build_all(
     ]
     lef_text = lef.write_lef(tech, cells, str(out / "tech.lef"))
     lib_text = liberty.write_liberty(cells, str(out / "tech.lib"))
-    problems = lef.check_lef(cells, lef_text)
-    problems += liberty.check_liberty(cells, lib_text)
+    problems = lef.check_lef(cells, lef_text) + liberty.check_liberty(cells, lib_text)
     if problems:
         for problem in problems:
             print(f"pdk: {problem}", file=sys.stderr)
@@ -177,33 +253,13 @@ def build_all(
         ],
     }
     (out / "netlist.json").write_text(json.dumps(sidecar, indent=2))
-    ranks_text = netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans)
-    try:
-        from analytical_placer import AnalyticalPlacer
-
-        placer = AnalyticalPlacer()
-        auto_w, auto_h = placer.compute_auto_chassis_grid(
-            nl,
-            merge_plans=plans,
-            split_plans=split_plans,
-            balancer_plans=balancer_plans,
-        )
-        ranks_text += (
-            f"\n# Auto-calculated square-est chassis grid dimensions\n"
-            f"set AUTO_CHASSIS_GRID_W {auto_w}\n"
-            f"set AUTO_CHASSIS_GRID_H {auto_h}\n"
-            f"set AUTO_NUM_CLUSTERS {auto_w * auto_h}\n"
-        )
-        extra_grids = [(auto_w, auto_h)] if auto_w > 3 or auto_h > 3 else None
-        ranks_text += placer.emit_analytical_tcl(
-            nl,
-            merge_plans=plans,
-            split_plans=split_plans,
-            balancer_plans=balancer_plans,
-            extra_chassis_grids=extra_grids,
-        )
-    except Exception as exc:
-        print(f"netbuild: analytical placer warning: {exc}", file=sys.stderr)
+    ranks_text = _append_analytical_tcl(
+        netlist.emit_ranks_tcl(nl, plans, split_plans, balancer_plans),
+        nl,
+        plans,
+        split_plans,
+        balancer_plans,
+    )
     (out / "ranks.tcl").write_text(ranks_text)
     counts: dict[str, int] = {}
     for inst in nl.instances:
@@ -219,6 +275,7 @@ def build_all(
 
 
 def main() -> int:
+    """Parse CLI arguments and run the netbuild synthesis pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument("dump")
     parser.add_argument("demand", nargs="*", help="item per_min pairs")

@@ -29,14 +29,22 @@ Neither needs a splitter: the consumer's belt backs up, the bridge stops, and
 the lane keeps its items for the consumers further south.
 """
 
+from __future__ import annotations
+
 import argparse
 import collections
 import math
 import os
 import pathlib
 import sys
+from collections.abc import Callable, Sequence
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.extend(
+    [
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "foundry"),
+    ]
+)
 import pnr
 import solve
 
@@ -44,6 +52,23 @@ import solve
 # A tunnel of span LANE_PITCH crosses one lane.
 LANE_PITCH = 5
 BRIDGE_OFFSET = 1
+DEFAULT_ROUTER_SPAN = 11
+TILE_CENTRE_OFFSET = 0.5
+MACHINE_CENTRE_OFFSET = 1.5
+SECONDS_PER_MINUTE = 60.0
+TICKS_PER_MINUTE = 3600.0
+INFINITY_FILTER_COUNT = 1000
+CLOCK_COMBINATOR_X_OFFSET = 8.5
+GATE_COMBINATOR_X_OFFSET = 1.5
+COMBINATOR_Y_OFFSET = 3.5
+POWER_ROW_PADDING = 4
+SUBSTATION_WIDTH = 2
+SOLAR_PANEL_WIDTH = 3
+SUBSTATION_X_POSITIONS: tuple[float, ...] = (2.5, 17.5, 32.5, 47.5, 53.5, 71.5)
+SOLAR_PANEL_X_POSITIONS: tuple[float, ...] = (7.5, 22.5, 37.5, 56.5, 67.5)
+MAX_REPORTED_CLASHES = 8
+WARMUP_DIVISOR = 4
+DEFAULT_TICKS = 18000
 
 # Rows of one block, relative to the row origin. The near input belt sits south
 # of the machines, the second one tile further south, and a third ingredient
@@ -80,33 +105,47 @@ INSERTER_SWING_TICKS = 120
 class Node:
     """One recipe of the plan: its machines, its row, its belts."""
 
-    def __init__(self, recipe, crafts_per_min, machines, machine_name, speed):
+    def __init__(
+        self,
+        recipe: str,
+        crafts_per_min: float,
+        machines: int,
+        machine_name: str,
+        speed: float,
+    ) -> None:
+        """Initialize a plan node with recipe and machine parameters."""
         self.recipe = recipe
         self.crafts_per_min = crafts_per_min
         self.machines = machines
         self.machine_name = machine_name
         self.speed = speed
-        self.ingredients = []
-        self.results = []
+        self.ingredients: list[tuple[str, float]] = []
+        self.results: list[tuple[str, float]] = []
         self.row = 0
 
-    def width(self):
+    def width(self) -> int:
+        """Return the tile width of this recipe node."""
         return pnr.MACHINE_SPACING * self.machines
 
 
-def plan(data, demand, belt, inserter):
-    """Rates and machine counts for the demanded items."""
+def plan(
+    data: solve.Data,
+    demand: dict[str, float],
+    belt: str,
+    inserter: str,
+) -> tuple[list[Node], dict[str, float], dict[str, float], dict[str, float]]:
+    """Compute rates and machine counts for the demanded items."""
     allowed = data.allowed_recipes(["nauvis"])
     rates, raw, surplus = solve.solve_rates(data, demand, allowed)
 
-    nodes = []
+    nodes: list[Node] = []
     for recipe, crafts in sorted(rates.items()):
         recipe_data = data.recipes[recipe]
         machine = data.machine_for(recipe_data)
         if machine is None:
             raise SystemExit(f"no machine holds the categories of {recipe}")
         machine_name, speed = machine
-        per_machine = 60.0 * speed / data.craft_seconds(recipe_data)
+        per_machine = SECONDS_PER_MINUTE * speed / data.craft_seconds(recipe_data)
         node = Node(recipe, crafts, max(1, math.ceil(crafts / per_machine)), machine_name, speed)
         node.ingredients = [
             (solve.name_of(e), solve.amount_of(e)) for e in data.ingredients_of(recipe_data)
@@ -120,42 +159,47 @@ def plan(data, demand, belt, inserter):
     return nodes, rates, raw, surplus
 
 
-def order_rows(nodes):
-    """Topological depth: a producer sits above every consumer of its item."""
-    producer = {}
+def _compute_node_depth(
+    node: Node,
+    producer: dict[str, Node],
+    depth: dict[str, int],
+) -> int:
+    """Recursively compute the topological depth of one recipe node."""
+    if node.recipe in depth:
+        return depth[node.recipe]
+    depth[node.recipe] = 0
+    best = 0
+    for item, _ in node.ingredients:
+        source = producer.get(item)
+        if source is not None and source is not node:
+            best = max(best, _compute_node_depth(source, producer, depth) + 1)
+    depth[node.recipe] = best
+    return best
+
+
+def order_rows(nodes: list[Node]) -> None:
+    """Sort nodes by topological depth so a producer sits above its consumers."""
+    producer: dict[str, Node] = {}
     for node in nodes:
         for item, _ in node.results:
             producer[item] = node
 
-    depth = {}
-
-    def visit(node):
-        if node.recipe in depth:
-            return depth[node.recipe]
-        depth[node.recipe] = 0  # guards a cycle; the plan has none
-        best = 0
-        for item, _ in node.ingredients:
-            source = producer.get(item)
-            if source is not None and source is not node:
-                best = max(best, visit(source) + 1)
-        depth[node.recipe] = best
-        return best
-
+    depth: dict[str, int] = {}
     for node in nodes:
-        visit(node)
+        _compute_node_depth(node, producer, depth)
     nodes.sort(key=lambda n: (depth[n.recipe], n.recipe))
     for index, node in enumerate(nodes):
         node.row = index
 
 
-def assign_lanes(nodes):
-    """One lane per item, the busiest lane nearest the blocks.
+def assign_lanes(nodes: Sequence[Node]) -> tuple[dict[str, int], list[str]]:
+    """Assign one lane per item with the busiest lane nearest the blocks.
 
     A tap tunnels under every lane between its own and the block, so a widely
     used item belongs on the east side of the bus where nothing is in the way.
     """
-    consumers = collections.Counter()
-    items = set()
+    consumers: collections.Counter[str] = collections.Counter()
+    items: set[str] = set()
     for node in nodes:
         for item, _ in node.ingredients:
             consumers[item] += 1
@@ -166,14 +210,23 @@ def assign_lanes(nodes):
     return {item: index for index, item in enumerate(lanes)}, lanes
 
 
-def lane_x(index):
+def lane_x(index: int) -> int:
+    """Return the X tile coordinate for a bus lane index."""
     return index * LANE_PITCH
 
 
 class Router:
     """Places belt runs, with an underground pair under every lane in the way."""
 
-    def __init__(self, entities, add, belt, blocked, span=11):
+    def __init__(
+        self,
+        entities: list[dict[str, object]],
+        add: Callable[..., dict[str, object]],
+        belt: str,
+        blocked: set[int],
+        span: int = DEFAULT_ROUTER_SPAN,
+    ) -> None:
+        """Initialize the router with belt parameters and blocked columns."""
         self.entities = entities
         self.add = add
         self.belt = belt
@@ -183,8 +236,32 @@ class Router:
         self.per_tunnel = max(1, span // LANE_PITCH)
         self.vias = 0
 
-    def run(self, start_x, end_x, y, direction, port_start=False, port_end=False):
-        """Belt from start_x to end_x, inclusive, in the given direction.
+    def _choose_tunnel(
+        self,
+        x: int,
+        crossing: Sequence[int],
+        end_x: int,
+        step: int,
+    ) -> tuple[int, int]:
+        """Select the furthest reachable underground exit across blocked columns."""
+        for count in range(min(self.per_tunnel, len(crossing)), 0, -1):
+            try:
+                last = crossing[count - 1]
+                return last, self.find_exit(x, last, end_x, step)
+            except SystemExit:
+                continue
+        raise SystemExit(f"no tunnel from {x} over {crossing} to {end_x}")
+
+    def run(
+        self,
+        start_x: int,
+        end_x: int,
+        y: int,
+        direction: int,
+        port_start: bool = False,
+        port_end: bool = False,
+    ) -> None:
+        """Place a belt run from start_x to end_x in the given direction.
 
         An underground pair crosses up to `per_tunnel` blocked columns at once.
         Its ports sit on free tiles, so the tunnel itself passes under the
@@ -203,30 +280,30 @@ class Router:
                 key=lambda c: (c - x) * step,
             )
             if not crossing:
-                self.add(self.belt, x + 0.5, y + 0.5, direction)
+                self.add(self.belt, x + TILE_CENTRE_OFFSET, y + TILE_CENTRE_OFFSET, direction)
                 x += step
                 continue
 
-            chosen = None
-            for count in range(min(self.per_tunnel, len(crossing)), 0, -1):
-                try:
-                    chosen = (
-                        crossing[count - 1],
-                        self.find_exit(x, crossing[count - 1], end_x, step),
-                    )
-                    break
-                except SystemExit:
-                    continue
-            if chosen is None:
-                raise SystemExit(f"no tunnel from {x} over {crossing} to {end_x}")
-            last, exit_x = chosen
-            self.add("turbo-underground-belt", x + 0.5, y + 0.5, direction, {"type": "input"})
-            self.add("turbo-underground-belt", exit_x + 0.5, y + 0.5, direction, {"type": "output"})
+            _last, exit_x = self._choose_tunnel(x, crossing, end_x, step)
+            self.add(
+                "turbo-underground-belt",
+                x + TILE_CENTRE_OFFSET,
+                y + TILE_CENTRE_OFFSET,
+                direction,
+                {"type": "input"},
+            )
+            self.add(
+                "turbo-underground-belt",
+                exit_x + TILE_CENTRE_OFFSET,
+                y + TILE_CENTRE_OFFSET,
+                direction,
+                {"type": "output"},
+            )
             self.vias += 1
             x = exit_x + step
 
-    def find_exit(self, x, last, end_x, step):
-        """A free tile past the columns to cross, within the underground span.
+    def find_exit(self, x: int, last: int, end_x: int, step: int) -> int:
+        """Find a free tile past the columns to cross within the underground span.
 
         The tile after the exit must be free as well, because the next tunnel
         starts there.
@@ -244,15 +321,42 @@ class Router:
         raise SystemExit(f"no tunnel from {x} past {last} to {end_x}")
 
 
-def build(data, nodes, lane_index, demand, belt, inserter):
-    """Every entity of the base, and the rig that feeds and drains it."""
-    entities = []
-    vias = {"count": 0}
+class _BaseBuilder:
+    """Stateful helper that constructs the entities of a multi-block base."""
 
-    def add(name, x, y, direction=None, extra=None):
-        """Position is the entity centre, so the caller rounds to the tile."""
-        entity = {
-            "entity_number": len(entities) + 1,
+    def __init__(
+        self,
+        nodes: Sequence[Node],
+        lane_index: dict[str, int],
+        demand: dict[str, float],
+        belt: str,
+    ) -> None:
+        """Initialize builder geometry and routing structures."""
+        self.nodes = nodes
+        self.lane_index = lane_index
+        self.demand = demand
+        self.belt = belt
+        self.entities: list[dict[str, object]] = []
+        self.row_y: dict[str, int] = {}
+        self.output_inserters: dict[str, list[dict[str, object]]] = collections.defaultdict(list)
+        lane_columns = {lane_x(index) for index in lane_index.values()}
+        self.block_x = (len(lane_index) + 1) * LANE_PITCH
+        width = max(node.width() for node in nodes)
+        self.block_east = self.block_x + width + 2
+        self.height = ROW_PITCH * (len(nodes) + 1)
+        self.router = Router(self.entities, self.add, belt, lane_columns)
+
+    def add(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        direction: int | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Add an entity centered at (x, y) to the base entity list."""
+        entity: dict[str, object] = {
+            "entity_number": len(self.entities) + 1,
             "name": name,
             "position": {"x": round(x, 2), "y": round(y, 2)},
         }
@@ -260,215 +364,333 @@ def build(data, nodes, lane_index, demand, belt, inserter):
             entity["direction"] = direction
         if extra:
             entity.update(extra)
-        entities.append(entity)
+        self.entities.append(entity)
         return entity
 
-    def wire(number, port, other, other_port):
-        """Join one circuit port of two entities, both ways."""
+    def wire(self, number: int, port: int, other: int, other_port: int) -> None:
+        """Join one circuit port of two entities in both directions."""
         for source, side, target in ((number, port, other), (other, other_port, number)):
-            ports = entities[source - 1].setdefault("connections", {})
-            ports.setdefault(str(side), {}).setdefault("red", []).append(
-                {"entity_id": target, "circuit_id": 1}
+            ent = self.entities[source - 1]
+            ports = ent.setdefault("connections", {})
+            if isinstance(ports, dict):
+                side_dict = ports.setdefault(str(side), {})
+                if isinstance(side_dict, dict):
+                    red_list = side_dict.setdefault("red", [])
+                    if isinstance(red_list, list):
+                        red_list.append({"entity_id": target, "circuit_id": 1})
+
+    def place_lanes(self) -> None:
+        """Place the south-flowing bus lanes."""
+        for index in self.lane_index.values():
+            for y in range(0, self.height + 1):
+                self.add(
+                    self.belt,
+                    lane_x(index) + TILE_CENTRE_OFFSET,
+                    y + TILE_CENTRE_OFFSET,
+                    pnr.SOUTH,
+                )
+
+    def _place_single_machine(
+        self,
+        node: Node,
+        centre: float,
+        y: int,
+        south_count: int,
+        has_north: bool,
+    ) -> None:
+        """Place one machine and its input and output inserters."""
+        self.add(
+            node.machine_name,
+            centre,
+            y + MACHINE_ROW + MACHINE_CENTRE_OFFSET,
+            None,
+            {"recipe": node.recipe},
+        )
+        if south_count > 0:
+            self.add(
+                "bulk-inserter",
+                centre,
+                y + INPUT_INSERTER_ROW + TILE_CENTRE_OFFSET,
+                pnr.SOUTH,
+            )
+        if south_count > 1:
+            self.add(
+                "long-handed-inserter",
+                centre - 1,
+                y + INPUT_INSERTER_ROW + TILE_CENTRE_OFFSET,
+                pnr.SOUTH,
+            )
+        self.output_inserters[node.recipe].append(
+            self.add(
+                "bulk-inserter",
+                centre,
+                y + OUTPUT_INSERTER_ROW + TILE_CENTRE_OFFSET,
+                pnr.SOUTH,
+            )
+        )
+        if has_north:
+            self.add(
+                "long-handed-inserter",
+                centre - 1,
+                y + OUTPUT_INSERTER_ROW + TILE_CENTRE_OFFSET,
+                pnr.NORTH,
             )
 
-    lane_columns = {lane_x(index) for index in lane_index.values()}
-    lanes = len(lane_index)
-    block_x = (lanes + 1) * LANE_PITCH
-    # The power strips sit between the runs: above the machines, clear of the
-    # tap row and the merge row.
-    west_power = block_x - 4
-    east_power = block_x + 14
-    router = Router(entities, add, belt, lane_columns)
-
-    width = max(node.width() for node in nodes)
-    block_east = block_x + width + 2
-    height = ROW_PITCH * (len(nodes) + 1)
-
-    # Lanes flow south, from the feed at the top to the drain at the bottom.
-    for index in lane_index.values():
-        for y in range(0, height + 1):
-            add(belt, lane_x(index) + 0.5, y + 0.5, pnr.SOUTH)
-
-    row_y = {}
-    output_inserters = collections.defaultdict(list)
-    for node in nodes:
-        y = ROW_PITCH * (node.row + 1)
-        row_y[node.recipe] = y
-
-        # The block: machines, an output belt, and one input belt row per
-        # ingredient. The near row starts one tile west of the block so that
-        # its tap column clears the second row.
-        south = node.ingredients[:ROWS_SOUTH]
-        north = node.ingredients[ROWS_SOUTH:]
-
-        for x in range(block_x, block_east + 1):
-            add(belt, x + 0.5, y + OUTPUT_ROW + 0.5, pnr.WEST)
+    def _place_node_machines_and_belts(
+        self,
+        node: Node,
+        y: int,
+        south: Sequence[tuple[str, float]],
+        north: Sequence[tuple[str, float]],
+    ) -> None:
+        """Place the machines, inserters, and local belts for one recipe row."""
+        for x in range(self.block_x, self.block_east + 1):
+            self.add(
+                self.belt,
+                x + TILE_CENTRE_OFFSET,
+                y + OUTPUT_ROW + TILE_CENTRE_OFFSET,
+                pnr.WEST,
+            )
         for offset, _ in enumerate(south):
-            start = block_x - 1 if offset == 0 else block_x
-            for x in range(start, block_east + 1):
-                add(belt, x + 0.5, y + INPUT_ROW + offset + 0.5, pnr.EAST)
+            start = self.block_x - 1 if offset == 0 else self.block_x
+            for x in range(start, self.block_east + 1):
+                self.add(
+                    self.belt,
+                    x + TILE_CENTRE_OFFSET,
+                    y + INPUT_ROW + offset + TILE_CENTRE_OFFSET,
+                    pnr.EAST,
+                )
 
         for index in range(node.machines):
-            centre = block_x + 1.5 + pnr.MACHINE_SPACING * index
-            add(node.machine_name, centre, y + MACHINE_ROW + 1.5, None, {"recipe": node.recipe})
-            # A normal inserter takes the near belt row, a long-handed one the
-            # second, on a different tile of the machine. A third ingredient
-            # comes from the north, over the output belt, so its long-handed
-            # inserter faces north.
-            if south:
-                add("bulk-inserter", centre, y + INPUT_INSERTER_ROW + 0.5, pnr.SOUTH)
-            if len(south) > 1:
-                add("long-handed-inserter", centre - 1, y + INPUT_INSERTER_ROW + 0.5, pnr.SOUTH)
-            output_inserters[node.recipe].append(
-                add("bulk-inserter", centre, y + OUTPUT_INSERTER_ROW + 0.5, pnr.SOUTH)
-            )
-            if north:
-                add("long-handed-inserter", centre - 1, y + OUTPUT_INSERTER_ROW + 0.5, pnr.NORTH)
+            centre = self.block_x + MACHINE_CENTRE_OFFSET + pnr.MACHINE_SPACING * index
+            self._place_single_machine(node, centre, y, len(south), bool(north))
 
-        # Taps: a bridge from the lane, a belt east on its own row, then a
-        # north column onto the belt of its own ingredient. One row per
-        # ingredient, or two taps would share a row and collide.
+    def _place_node_taps_and_merge(
+        self,
+        node: Node,
+        y: int,
+        south: Sequence[tuple[str, float]],
+        north: Sequence[tuple[str, float]],
+    ) -> None:
+        """Route the bus taps and output merge for one recipe row."""
         for offset, (item, _) in enumerate(south):
-            index = lane_index.get(item)
+            index = self.lane_index.get(item)
             if index is None:
                 continue
             tap_row = y + INPUT_ROW + 2 + offset
             x = lane_x(index) + BRIDGE_OFFSET
-            add("fast-inserter", x + 0.5, tap_row + 0.5, pnr.WEST)
-            target = block_x - 1 + offset
-            router.run(x + 1, target - 1, tap_row, pnr.EAST)
+            self.add(
+                "fast-inserter",
+                x + TILE_CENTRE_OFFSET,
+                tap_row + TILE_CENTRE_OFFSET,
+                pnr.WEST,
+            )
+            target = self.block_x - 1 + offset
+            self.router.run(x + 1, target - 1, tap_row, pnr.EAST)
             for row in range(y + INPUT_ROW + offset + 1, tap_row + 1):
-                add(belt, target + 0.5, row + 0.5, pnr.NORTH)
+                self.add(
+                    self.belt,
+                    target + TILE_CENTRE_OFFSET,
+                    row + TILE_CENTRE_OFFSET,
+                    pnr.NORTH,
+                )
 
-        # A third ingredient runs east on the north row instead, and its
-        # long-handed inserter takes it two tiles in.
         for item, _ in north:
-            index = lane_index.get(item)
+            index = self.lane_index.get(item)
             if index is None:
                 continue
             tap_row = y + NORTH_ROW
             x = lane_x(index) + BRIDGE_OFFSET
-            add("fast-inserter", x + 0.5, tap_row + 0.5, pnr.WEST)
-            end = block_x + pnr.MACHINE_SPACING * (node.machines - 1)
-            router.run(x + 1, end, tap_row, pnr.EAST)
+            self.add(
+                "fast-inserter",
+                x + TILE_CENTRE_OFFSET,
+                tap_row + TILE_CENTRE_OFFSET,
+                pnr.WEST,
+            )
+            end = self.block_x + pnr.MACHINE_SPACING * (node.machines - 1)
+            self.router.run(x + 1, end, tap_row, pnr.EAST)
 
-        # One merge: the output belt runs west, a bridge drops onto the lane.
         item = node.results[0][0]
-        index = lane_index.get(item)
-        if index is None:
-            continue
-        x = lane_x(index) + BRIDGE_OFFSET
-        router.run(block_x - 1, x + 1, y + OUTPUT_ROW, pnr.WEST)
-        add("fast-inserter", x + 0.5, y + OUTPUT_ROW + 0.5, pnr.EAST)
+        index = self.lane_index.get(item)
+        if index is not None:
+            x = lane_x(index) + BRIDGE_OFFSET
+            self.router.run(self.block_x - 1, x + 1, y + OUTPUT_ROW, pnr.WEST)
+            self.add(
+                "fast-inserter",
+                x + TILE_CENTRE_OFFSET,
+                y + OUTPUT_ROW + TILE_CENTRE_OFFSET,
+                pnr.EAST,
+            )
 
-    # A demanded item holds its plan rate. The rig feeds every raw item without
-    # a limit, so a machine runs at full speed and the measured rate is far
-    # above the plan. A clock holds the output inserter of the demanded machine
-    # to one item each period, and the chain behind it backs up.
-    for node in nodes:
-        want = demand.get(node.results[0][0])
-        if not want:
-            continue
-        period = max(2, round(3600.0 / want))
-        window = min(period, INSERTER_SWING_TICKS)
-        y = row_y[node.recipe]
-        clock = add(
-            "arithmetic-combinator",
-            block_x - 8.5,
-            y + 3.5,
-            pnr.NORTH,
-            {
-                "control_behavior": {
-                    "arithmetic_conditions": {
-                        "operation": "+",
-                        "first_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
-                        "second_constant": 1,
-                        "output_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
+    def place_blocks(self) -> None:
+        """Place all recipe blocks and their bus connections."""
+        for node in self.nodes:
+            y = ROW_PITCH * (node.row + 1)
+            self.row_y[node.recipe] = y
+            south = node.ingredients[:ROWS_SOUTH]
+            north = node.ingredients[ROWS_SOUTH:]
+            self._place_node_machines_and_belts(node, y, south, north)
+            self._place_node_taps_and_merge(node, y, south, north)
+
+    def place_clocks(self) -> None:
+        """Place rate-limiting clock and gate combinators on demanded outputs."""
+        for node in self.nodes:
+            want = self.demand.get(node.results[0][0])
+            if not want:
+                continue
+            period = max(2, round(TICKS_PER_MINUTE / want))
+            window = min(period, INSERTER_SWING_TICKS)
+            y = self.row_y[node.recipe]
+            clock = self.add(
+                "arithmetic-combinator",
+                self.block_x - CLOCK_COMBINATOR_X_OFFSET,
+                y + COMBINATOR_Y_OFFSET,
+                pnr.NORTH,
+                {
+                    "control_behavior": {
+                        "arithmetic_conditions": {
+                            "operation": "+",
+                            "first_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
+                            "second_constant": 1,
+                            "output_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
+                        }
                     }
-                }
-            },
-        )
-        gate = add(
-            "arithmetic-combinator",
-            block_x - 1.5,
-            y + 3.5,
-            pnr.NORTH,
-            {
-                "control_behavior": {
-                    "arithmetic_conditions": {
-                        "operation": "%",
-                        "first_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
-                        "second_constant": period,
-                        "output_signal": {"type": "virtual", "name": GATE_SIGNAL},
-                    }
-                }
-            },
-        )
-        wire(clock["entity_number"], 1, clock["entity_number"], 2)
-        wire(clock["entity_number"], 2, gate["entity_number"], 1)
-        for inserter in output_inserters[node.recipe]:
-            inserter["control_behavior"] = {
-                "circuit_enable_disable": True,
-                "circuit_condition": {
-                    "first_signal": {"type": "virtual", "name": GATE_SIGNAL},
-                    "comparator": "<",
-                    "constant": window,
                 },
-            }
-            wire(gate["entity_number"], 2, inserter["entity_number"], 1)
-
-    # Feed every lane that nothing produces, drain every demanded item.
-    produced = {item for node in nodes for item, _ in node.results}
-    for item, index in lane_index.items():
-        if item in produced:
-            continue
-        add(
-            "infinity-chest",
-            lane_x(index) + BRIDGE_OFFSET + 1.5,
-            0.5,
-            None,
-            {
-                "infinity_settings": {
-                    "remove_unfiltered_items": True,
-                    "filters": [{"name": item, "count": 1000, "mode": "at-least", "index": 1}],
+            )
+            gate = self.add(
+                "arithmetic-combinator",
+                self.block_x - GATE_COMBINATOR_X_OFFSET,
+                y + COMBINATOR_Y_OFFSET,
+                pnr.NORTH,
+                {
+                    "control_behavior": {
+                        "arithmetic_conditions": {
+                            "operation": "%",
+                            "first_signal": {"type": "virtual", "name": CLOCK_SIGNAL},
+                            "second_constant": period,
+                            "output_signal": {"type": "virtual", "name": GATE_SIGNAL},
+                        }
+                    }
+                },
+            )
+            clock_num = int(str(clock["entity_number"]))
+            gate_num = int(str(gate["entity_number"]))
+            self.wire(clock_num, 1, clock_num, 2)
+            self.wire(clock_num, 2, gate_num, 1)
+            for ins in self.output_inserters[node.recipe]:
+                ins["control_behavior"] = {
+                    "circuit_enable_disable": True,
+                    "circuit_condition": {
+                        "first_signal": {"type": "virtual", "name": GATE_SIGNAL},
+                        "comparator": "<",
+                        "constant": window,
+                    },
                 }
-            },
+                self.wire(gate_num, 2, int(str(ins["entity_number"])), 1)
+
+    def place_rig(self) -> None:
+        """Place infinity feeds and output drains on bus lanes."""
+        produced = {item for node in self.nodes for item, _ in node.results}
+        for item, index in self.lane_index.items():
+            if item in produced:
+                continue
+            self.add(
+                "infinity-chest",
+                lane_x(index) + BRIDGE_OFFSET + MACHINE_CENTRE_OFFSET,
+                TILE_CENTRE_OFFSET,
+                None,
+                {
+                    "infinity_settings": {
+                        "remove_unfiltered_items": True,
+                        "filters": [
+                            {
+                                "name": item,
+                                "count": INFINITY_FILTER_COUNT,
+                                "mode": "at-least",
+                                "index": 1,
+                            }
+                        ],
+                    }
+                },
+            )
+            self.add(
+                "fast-inserter",
+                lane_x(index) + BRIDGE_OFFSET + TILE_CENTRE_OFFSET,
+                TILE_CENTRE_OFFSET,
+                pnr.EAST,
+            )
+
+        for item in self.demand:
+            index = self.lane_index.get(item)
+            if index is None:
+                continue
+            self.add(
+                "fast-inserter",
+                lane_x(index) + BRIDGE_OFFSET + TILE_CENTRE_OFFSET,
+                self.height + TILE_CENTRE_OFFSET,
+                pnr.WEST,
+            )
+            self.add(
+                "steel-chest",
+                lane_x(index) + BRIDGE_OFFSET + MACHINE_CENTRE_OFFSET,
+                self.height + TILE_CENTRE_OFFSET,
+            )
+
+    def place_power(self) -> None:
+        """Place power substations and solar panels clear of recipe blocks."""
+        power_rows = (
+            [POWER_ROW_PADDING]
+            + [self.row_y[node.recipe] for node in self.nodes]
+            + [self.height + POWER_ROW_PADDING]
         )
-        add("fast-inserter", lane_x(index) + BRIDGE_OFFSET + 0.5, 0.5, pnr.EAST)
+        for y in power_rows:
+            for x in SUBSTATION_X_POSITIONS:
+                if self._clear_of_block(x, SUBSTATION_WIDTH):
+                    self.add("substation", x, y + MACHINE_CENTRE_OFFSET)
+            for x in SOLAR_PANEL_X_POSITIONS:
+                if self._clear_of_block(x, SOLAR_PANEL_WIDTH):
+                    self.add("solar-panel", x, y + MACHINE_CENTRE_OFFSET)
 
-    for item in demand:
-        index = lane_index.get(item)
-        if index is None:
-            continue
-        add("fast-inserter", lane_x(index) + BRIDGE_OFFSET + 0.5, height + 0.5, pnr.WEST)
-        add("steel-chest", lane_x(index) + BRIDGE_OFFSET + 1.5, height + 0.5)
-
-    # Power. A substation reaches 9 tiles, so one row of them covers the bus
-    # and a block. A panel stands five tiles from its substation, so every
-    # network has a source. A pair that would land on a block is dropped: the
-    # block owns its tiles.
-    def clear_of_block(x, width):
+    def _clear_of_block(self, x: float, width: int) -> bool:
+        """Return True when a structure of given width at x does not overlap a block."""
         first = int(round(x - width / 2.0))
-        return first + width - 1 < block_x or first > block_east
-
-    power_rows = [4] + [row_y[node.recipe] for node in nodes] + [height + 4]
-    for y in power_rows:
-        for x in (2.5, 17.5, 32.5, 47.5, 53.5, 71.5):
-            if clear_of_block(x, 2):
-                add("substation", x, y + 1.5)
-        for x in (7.5, 22.5, 37.5, 56.5, 67.5):
-            if clear_of_block(x, 3):
-                add("solar-panel", x, y + 1.5)
-
-    vias["count"] = router.vias
-    return entities, block_x, height, vias
+        return first + width - 1 < self.block_x or first > self.block_east
 
 
-def report(data, nodes, entities, footprints, vias):
-    lines = []
+def build(
+    data: solve.Data,
+    nodes: Sequence[Node],
+    lane_index: dict[str, int],
+    demand: dict[str, float],
+    belt: str,
+    inserter: str,
+) -> tuple[list[dict[str, object]], int, int, dict[str, int]]:
+    """Build every entity of the base and the rig that feeds and drains it."""
+    builder = _BaseBuilder(nodes, lane_index, demand, belt)
+    builder.place_lanes()
+    builder.place_blocks()
+    builder.place_clocks()
+    builder.place_rig()
+    builder.place_power()
+    return builder.entities, builder.block_x, builder.height, {"count": builder.router.vias}
+
+
+def report(
+    data: solve.Data,
+    nodes: Sequence[Node],
+    entities: Sequence[dict[str, object]],
+    footprints: dict[str, tuple[int, int]],
+    vias: dict[str, int],
+) -> list[str]:
+    """Return summary lines for the planned multi-block base."""
+    lines: list[str] = []
     for node in nodes:
-        in_rate = sum(node.crafts_per_min / 60.0 * amount for _, amount in node.ingredients)
-        out_rate = sum(node.crafts_per_min / 60.0 * amount for _, amount in node.results)
+        in_rate = sum(
+            node.crafts_per_min / SECONDS_PER_MINUTE * amount for _, amount in node.ingredients
+        )
+        out_rate = sum(
+            node.crafts_per_min / SECONDS_PER_MINUTE * amount for _, amount in node.results
+        )
         lines.append(
             f"  {node.recipe:28} {node.machines:3} machine(s) "
             f"in {in_rate:8.3f}/s out {out_rate:8.3f}/s row {node.row}"
@@ -478,14 +700,15 @@ def report(data, nodes, entities, footprints, vias):
     lines.append(f"entities    {len(entities)}")
     lines.append(f"vias        {vias['count']} underground pairs")
     lines.append(f"overlap     {len(clashes)} tiles claimed twice")
-    for name, tile in clashes[:8]:
+    for name, tile in clashes[:MAX_REPORTED_CLASHES]:
         lines.append(f"clash       {name} at {tile}")
     lines.append(f"power       {pnr.check_power(data, entities)} entities outside a supply area")
     return lines
 
 
-def demand_of(args):
-    demand = {}
+def demand_of(args: argparse.Namespace) -> dict[str, float]:
+    """Parse CLI demand specifications into an item-to-rate dictionary."""
+    demand: dict[str, float] = {}
     for text in args.demand:
         item, _, rate = text.partition(":")
         demand[item] = float(rate or 1.0)
@@ -732,7 +955,13 @@ end)
 """
 
 
-def write_mod(entities, demand, mod_dir, ticks):
+def write_mod(
+    entities: Sequence[dict[str, object]],
+    demand: dict[str, float],
+    mod_dir: str | os.PathLike[str],
+    ticks: int,
+) -> None:
+    """Write the probe mod that builds the base and measures demanded output."""
     mod = pathlib.Path(mod_dir)
     mod.mkdir(parents=True, exist_ok=True)
     (mod / "info.json").write_text(
@@ -741,7 +970,7 @@ def write_mod(entities, demand, mod_dir, ticks):
         ' "dependencies": ["base >= 2.1", "space-age"]}\n'
     )
     text = (
-        MEASURE_TEMPLATE.replace("WARMUPTICKS", str(ticks // 4))
+        MEASURE_TEMPLATE.replace("WARMUPTICKS", str(ticks // WARMUP_DIVISOR))
         .replace("TICKS", str(ticks))
         .replace("SOLAR", str(pnr.RIG_SOLAR_MULTIPLIER))
         .replace("EXPECTED_TABLE", pnr.lua_value(demand))
@@ -751,7 +980,8 @@ def write_mod(entities, demand, mod_dir, ticks):
     (mod / "control.lua").write_text(text)
 
 
-def main():
+def main() -> None:
+    """Parse CLI arguments and run base planning, building, or measurement."""
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["plan", "build", "measure"])
     parser.add_argument("demand", nargs="+")
@@ -760,18 +990,18 @@ def main():
     parser.add_argument("--inserter", default="fast-inserter")
     parser.add_argument("--out", default=None)
     parser.add_argument("--mod", default=None)
-    parser.add_argument("--ticks", type=int, default=18000)
+    parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS)
     args = parser.parse_args()
 
     data = solve.Data(args.dump)
     demand = demand_of(args)
-    nodes, rates, raw, surplus = plan(data, demand, args.belt, args.inserter)
+    nodes, _rates, _raw, _surplus = plan(data, demand, args.belt, args.inserter)
     lane_index, lanes = assign_lanes(nodes)
     entities, block_x, height, vias = build(
         data, nodes, lane_index, demand, args.belt, args.inserter
     )
 
-    footprints = pnr.footprints_of(data, {e["name"] for e in entities})
+    footprints = pnr.footprints_of(data, {str(e["name"]) for e in entities})
     print(f"demand      {demand}")
     print(f"geometry    bus {len(lanes)} lanes to x {block_x}, height {height}")
     for line in report(data, nodes, entities, footprints, vias):

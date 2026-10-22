@@ -14,81 +14,150 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+TICKS_PER_MINUTE = 3600.0
+TICKS_PER_SECOND = 60.0
+DEFAULT_SAMPLE_INTERVAL = 60
+SATISFACTION_RATIO = 0.9
+BOTTLENECK_RATIO = 0.85
+STARVATION_RATIO = 0.05
+YELLOW_BELT_CAPACITY_SPM = 900.0
+CONGESTION_SATURATION_PCT = 95.0
+PERCENTAGE_SCALE = 100.0
+MAX_REPORTED_BOTTLENECKS = 10
+
+NON_RECIPE_CELLS = (
+    "belt_merge2",
+    "belt_split2",
+    "display_panel",
+    "arithmetic_combinator",
+    "decider_combinator",
+)
+
+
+def _as_float(val: object, default: float = 0.0) -> float:
+    """Convert an arbitrary object to float, or return default."""
+    if isinstance(val, (int, float, str)):
+        try:
+            return float(val)
+        except ValueError:
+            return default
+    return default
+
+
+def _as_int(val: object, default: int = 0) -> int:
+    """Convert an arbitrary object to int, or return default."""
+    if isinstance(val, (int, float, str)):
+        try:
+            return int(val)
+        except ValueError:
+            return default
+    return default
+
+
+def _build_material_stat(
+    sample_counts: list[tuple[int, int]],
+    first_tick: int | None,
+    duration_minutes: float,
+) -> dict[str, Any]:
+    """Compute summary dictionary for one material from its sample series."""
+    initial_count = sample_counts[0][1] if sample_counts else 0
+    last_count = sample_counts[-1][1] if sample_counts else 0
+    total_items = max(0, last_count - initial_count)
+    rate_spm = total_items / duration_minutes if duration_minutes > 0 else 0.0
+    arrival_sec = round(first_tick / TICKS_PER_SECOND, 2) if first_tick is not None else None
+    return {
+        "initial_count": initial_count,
+        "final_count": last_count,
+        "total_items": total_items,
+        "rate_spm": round(rate_spm, 2),
+        "first_arrival_tick": first_tick,
+        "first_arrival_seconds": arrival_sec,
+        "samples": sample_counts,
+    }
+
+
+def _collect_all_materials(samples: Sequence[Mapping[str, object]]) -> list[str]:
+    """Return sorted list of all material keys across telemetry samples."""
+    all_materials: set[str] = set()
+    for s in samples:
+        taps = s.get("taps", {})
+        if isinstance(taps, Mapping):
+            all_materials.update(str(k) for k in taps.keys())
+    return sorted(all_materials)
+
 
 def calculate_net_rates(
-    samples: list[dict[str, Any]], sample_interval: int, ticks_total: int
+    samples: Sequence[Mapping[str, object]],
+    sample_interval: int,
+    ticks_total: int,
 ) -> dict[str, dict[str, Any]]:
     """Compute throughput rates and item counts for each tapped net."""
     if not samples:
         return {}
 
-    all_materials: set[str] = set()
+    materials = _collect_all_materials(samples)
+    counts_by_mat: dict[str, list[tuple[int, int]]] = {m: [] for m in materials}
+    first_by_mat: dict[str, int | None] = {m: None for m in materials}
+
     for s in samples:
-        all_materials.update(s.get("taps", {}).keys())
+        tick = _as_int(s.get("tick", 0))
+        taps_obj = s.get("taps", {})
+        taps = taps_obj if isinstance(taps_obj, Mapping) else {}
+        for mat in materials:
+            cnt = _as_int(taps.get(mat, 0))
+            counts_by_mat[mat].append((tick, cnt))
+            if cnt > 0 and first_by_mat[mat] is None:
+                first_by_mat[mat] = tick
 
-    net_stats: dict[str, dict[str, Any]] = {}
-    duration_minutes = (ticks_total / 3600.0) if ticks_total > 0 else 1.0
+    duration_minutes = (ticks_total / TICKS_PER_MINUTE) if ticks_total > 0 else 1.0
+    return {
+        mat: _build_material_stat(counts_by_mat[mat], first_by_mat[mat], duration_minutes)
+        for mat in materials
+    }
 
-    for mat in sorted(all_materials):
-        first_tick: int | None = None
-        sample_counts: list[tuple[int, int]] = []
 
-        for s in samples:
-            tick = s.get("tick", 0)
-            taps = s.get("taps", {})
-            cnt = taps.get(mat, 0)
-            sample_counts.append((tick, cnt))
-            if cnt > 0 and first_tick is None:
-                first_tick = tick
+def _rate_percentage(observed: float, planned: float) -> float:
+    """Compute observed-to-planned percentage."""
+    if planned > 0:
+        return round((observed / planned) * PERCENTAGE_SCALE, 1)
+    return PERCENTAGE_SCALE if observed > 0 else 0.0
 
-        initial_count = sample_counts[0][1] if sample_counts else 0
-        last_count = sample_counts[-1][1] if sample_counts else 0
-        total_items = max(0, last_count - initial_count)
-        rate_spm = total_items / duration_minutes if duration_minutes > 0 else 0.0
 
-        net_stats[mat] = {
-            "initial_count": initial_count,
-            "final_count": last_count,
-            "total_items": total_items,
-            "rate_spm": round(rate_spm, 2),
-            "first_arrival_tick": first_tick,
-            "first_arrival_seconds": round(first_tick / 60.0, 2)
-            if first_tick is not None
-            else None,
-            "samples": sample_counts,
-        }
-
-    return net_stats
+def _classify_rate_status(
+    obs_rate: float,
+    target_rate: float,
+    labels: tuple[str, str, str],
+) -> str:
+    """Classify observed rate against target rate using three status labels."""
+    if obs_rate >= target_rate * SATISFACTION_RATIO:
+        return labels[0]
+    if obs_rate > 0:
+        return labels[1]
+    return labels[2]
 
 
 def analyze_inputs(
-    netlist_data: dict[str, Any], net_stats: dict[str, dict[str, Any]]
+    netlist_data: Mapping[str, object],
+    net_stats: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, Any]]:
     """Analyze primary boundary input feeds."""
-    raw_rates = netlist_data.get("raw_rates_per_min", {})
-    inputs = netlist_data.get("inputs", [])
+    raw_rates_obj = netlist_data.get("raw_rates_per_min", {})
+    raw_rates = raw_rates_obj if isinstance(raw_rates_obj, Mapping) else {}
+    inputs_obj = netlist_data.get("inputs", [])
+    inputs = [str(x) for x in inputs_obj] if isinstance(inputs_obj, Sequence) else []
     results: list[dict[str, Any]] = []
 
     for mat in sorted(inputs):
-        plan_rate = float(raw_rates.get(mat, 0.0))
+        plan_rate = _as_float(raw_rates.get(mat, 0.0))
         stats = net_stats.get(mat, {})
-        obs_rate = float(stats.get("rate_spm", 0.0))
-        total_items = int(stats.get("total_items", 0))
-
-        if plan_rate > 0:
-            fulfillment_pct = round((obs_rate / plan_rate) * 100.0, 1)
-        else:
-            fulfillment_pct = 100.0 if obs_rate > 0 else 0.0
-
-        if obs_rate >= plan_rate * 0.9:
-            status = "SATISFIED"
-        elif obs_rate > 0:
-            status = "DEFICIENT"
-        else:
-            status = "IDLE"
+        obs_rate = _as_float(stats.get("rate_spm", 0.0))
+        total_items = _as_int(stats.get("total_items", 0))
+        fulfillment_pct = _rate_percentage(obs_rate, plan_rate)
+        status = _classify_rate_status(obs_rate, plan_rate, ("SATISFIED", "DEFICIENT", "IDLE"))
 
         results.append(
             {
@@ -105,31 +174,28 @@ def analyze_inputs(
 
 
 def analyze_outputs(
-    netlist_data: dict[str, Any], net_stats: dict[str, dict[str, Any]]
+    netlist_data: Mapping[str, object],
+    net_stats: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, Any]]:
     """Analyze primary boundary science pack sinks."""
-    demand = netlist_data.get("demand", {})
-    outputs = netlist_data.get("outputs", [])
+    demand_obj = netlist_data.get("demand", {})
+    demand = demand_obj if isinstance(demand_obj, Mapping) else {}
+    outputs_obj = netlist_data.get("outputs", [])
+    outputs = [str(x) for x in outputs_obj] if isinstance(outputs_obj, Sequence) else []
     results: list[dict[str, Any]] = []
 
     for mat in sorted(outputs):
-        target_rate = float(demand.get(mat, 0.0))
+        target_rate = _as_float(demand.get(mat, 0.0))
         stats = net_stats.get(mat, {})
-        obs_rate = float(stats.get("rate_spm", 0.0))
-        total_items = int(stats.get("total_items", 0))
-        first_tick = stats.get("first_arrival_tick")
-
-        if target_rate > 0:
-            achievement_pct = round((obs_rate / target_rate) * 100.0, 1)
-        else:
-            achievement_pct = 100.0 if obs_rate > 0 else 0.0
-
-        if obs_rate >= target_rate * 0.9:
-            status = "ON_TARGET"
-        elif obs_rate > 0:
-            status = "BELOW_TARGET"
-        else:
-            status = "NO_PRODUCTION"
+        obs_rate = _as_float(stats.get("rate_spm", 0.0))
+        total_items = _as_int(stats.get("total_items", 0))
+        first_tick_obj = stats.get("first_arrival_tick")
+        first_tick = _as_int(first_tick_obj) if first_tick_obj is not None else None
+        achievement_pct = _rate_percentage(obs_rate, target_rate)
+        status = _classify_rate_status(
+            obs_rate, target_rate, ("ON_TARGET", "BELOW_TARGET", "NO_PRODUCTION")
+        )
+        arrival_sec = round(first_tick / TICKS_PER_SECOND, 2) if first_tick is not None else None
 
         results.append(
             {
@@ -139,9 +205,7 @@ def analyze_outputs(
                 "total_items": total_items,
                 "achievement_pct": achievement_pct,
                 "first_arrival_tick": first_tick,
-                "first_arrival_sec": round(first_tick / 60.0, 2)
-                if first_tick is not None
-                else None,
+                "first_arrival_sec": arrival_sec,
                 "status": status,
             }
         )
@@ -150,24 +214,25 @@ def analyze_outputs(
 
 
 def analyze_merges(
-    netlist_data: dict[str, Any], net_stats: dict[str, dict[str, Any]]
+    netlist_data: Mapping[str, object],
+    net_stats: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, Any]]:
     """Analyze convergent splitter merge trees aggregated by material."""
-    instances = netlist_data.get("instances", [])
+    instances_obj = netlist_data.get("instances", [])
+    instances = instances_obj if isinstance(instances_obj, Sequence) else []
     merges_by_mat: dict[str, int] = {}
     for inst in instances:
-        if inst.get("cell") in ("belt_merge2", "belt_split2"):
-            mat = inst.get("recipe", "")
+        if isinstance(inst, Mapping) and inst.get("cell") in ("belt_merge2", "belt_split2"):
+            mat = str(inst.get("recipe", ""))
             merges_by_mat[mat] = merges_by_mat.get(mat, 0) + 1
 
     results: list[dict[str, Any]] = []
     for mat, count in sorted(merges_by_mat.items()):
         stats = net_stats.get(mat, {})
-        obs_rate = float(stats.get("rate_spm", 0.0))
+        obs_rate = _as_float(stats.get("rate_spm", 0.0))
         # Standard yellow transport belt bandwidth: 15 items/sec = 900 items/min
-        belt_capacity = 900.0
-        saturation_pct = round((obs_rate / belt_capacity) * 100.0, 1)
-        is_congested = saturation_pct >= 95.0
+        saturation_pct = round((obs_rate / YELLOW_BELT_CAPACITY_SPM) * PERCENTAGE_SCALE, 1)
+        is_congested = saturation_pct >= CONGESTION_SATURATION_PCT
 
         results.append(
             {
@@ -182,52 +247,61 @@ def analyze_merges(
     return results
 
 
-def analyze_transform_stages(
-    netlist_data: dict[str, Any], net_stats: dict[str, dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Analyze recipe stages: stoichiometry conservation and machine utilization."""
-    cells = netlist_data.get("cells", {})
-    instances = netlist_data.get("instances", [])
-    results: list[dict[str, Any]] = []
-
-    recipe_instances: dict[str, list[dict[str, Any]]] = {}
+def _group_recipe_instances(
+    instances: Sequence[object],
+) -> dict[str, list[Mapping[str, object]]]:
+    """Group non-routing netlist instances by recipe name."""
+    recipe_instances: dict[str, list[Mapping[str, object]]] = {}
     for inst in instances:
-        cell_id = inst.get("cell", "")
-        if cell_id in (
-            "belt_merge2",
-            "belt_split2",
-            "display_panel",
-            "arithmetic_combinator",
-            "decider_combinator",
-        ):
+        if not isinstance(inst, Mapping):
             continue
-        rec = inst.get("recipe", "")
+        cell_id = str(inst.get("cell", ""))
+        if cell_id in NON_RECIPE_CELLS:
+            continue
+        rec = str(inst.get("recipe", ""))
         if rec:
             recipe_instances.setdefault(rec, []).append(inst)
+    return recipe_instances
 
+
+def analyze_transform_stages(
+    netlist_data: Mapping[str, object],
+    net_stats: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, Any]]:
+    """Analyze recipe stages: stoichiometry conservation and machine utilization."""
+    cells_obj = netlist_data.get("cells", {})
+    cells = cells_obj if isinstance(cells_obj, Mapping) else {}
+    instances_obj = netlist_data.get("instances", [])
+    instances = instances_obj if isinstance(instances_obj, Sequence) else []
+    results: list[dict[str, Any]] = []
+
+    recipe_instances = _group_recipe_instances(instances)
     for rec, inst_list in sorted(recipe_instances.items()):
-        first_cell_id = inst_list[0].get("cell", "")
-        cell_info = cells.get(first_cell_id, {})
-        inputs = cell_info.get("inputs", [])
-        machine = cell_info.get("machine", "assembling-machine")
+        first_cell_id = str(inst_list[0].get("cell", ""))
+        cell_info_obj = cells.get(first_cell_id, {})
+        cell_info = cell_info_obj if isinstance(cell_info_obj, Mapping) else {}
+        inputs_obj = cell_info.get("inputs", [])
+        inputs = [str(x) for x in inputs_obj] if isinstance(inputs_obj, Sequence) else []
+        machine = str(cell_info.get("machine", "assembling-machine"))
 
-        total_plan_rate = sum(float(i.get("plan_rate_per_min", 0.0)) for i in inst_list)
-        total_rated_capacity = sum(float(i.get("rated_per_min", 0.0)) for i in inst_list)
+        total_plan_rate = sum(_as_float(i.get("plan_rate_per_min", 0.0)) for i in inst_list)
+        total_rated_capacity = sum(_as_float(i.get("rated_per_min", 0.0)) for i in inst_list)
 
         output_stats = net_stats.get(rec, {})
-        obs_output_rate = float(output_stats.get("rate_spm", 0.0))
-
+        obs_output_rate = _as_float(output_stats.get("rate_spm", 0.0))
         utilization_pct = (
-            round((obs_output_rate / total_rated_capacity) * 100.0, 1)
+            round((obs_output_rate / total_rated_capacity) * PERCENTAGE_SCALE, 1)
             if total_rated_capacity > 0
             else 0.0
         )
 
-        input_flows = []
-        for inp in inputs:
-            inp_stats = net_stats.get(inp, {})
-            inp_rate = float(inp_stats.get("rate_spm", 0.0))
-            input_flows.append({"input_material": inp, "rate_spm": inp_rate})
+        input_flows = [
+            {
+                "input_material": inp,
+                "rate_spm": _as_float(net_stats.get(inp, {}).get("rate_spm", 0.0)),
+            }
+            for inp in inputs
+        ]
 
         results.append(
             {
@@ -245,113 +319,121 @@ def analyze_transform_stages(
     return results
 
 
+def _diagnose_single_stage(stage: Mapping[str, object]) -> dict[str, Any] | None:
+    """Evaluate one transform stage for starvation or backpressure."""
+    rec = str(stage.get("recipe", ""))
+    plan_rate = _as_float(stage.get("plan_rate_spm", 0.0))
+    obs_rate = _as_float(stage.get("observed_output_rate_spm", 0.0))
+
+    if plan_rate <= 0 or obs_rate >= plan_rate * BOTTLENECK_RATIO:
+        return None
+
+    deficit = round(plan_rate - obs_rate, 2)
+    inputs_obj = stage.get("inputs", [])
+    inputs = inputs_obj if isinstance(inputs_obj, Sequence) else []
+    starving_inputs = [
+        str(inp_flow["input_material"])
+        for inp_flow in inputs
+        if isinstance(inp_flow, Mapping)
+        and _as_float(inp_flow.get("rate_spm", 0.0)) <= STARVATION_RATIO * plan_rate
+    ]
+
+    if starving_inputs:
+        return {
+            "severity": "HIGH",
+            "type": "STAGE_STARVATION",
+            "target": rec,
+            "description": (
+                f"Recipe '{rec}' starved by upstream input(s): {', '.join(starving_inputs)}."
+            ),
+            "impact_score": deficit,
+        }
+    return {
+        "severity": "MEDIUM",
+        "type": "STAGE_BACKPRESSURE",
+        "target": rec,
+        "description": (
+            f"Recipe '{rec}' has inputs available but outputs are stalled. "
+            f"Output belt backpressure or machine transfer delay suspected."
+        ),
+        "impact_score": deficit,
+    }
+
+
 def diagnose_bottlenecks(
-    stages: list[dict[str, Any]],
-    input_results: list[dict[str, Any]],
-    net_stats: dict[str, dict[str, Any]],
+    stages: Sequence[Mapping[str, object]],
+    input_results: Sequence[Mapping[str, object]],
+    net_stats: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, Any]]:
     """Diagnose factory bottlenecks: differentiate starvation from backpressure."""
     bottlenecks: list[dict[str, Any]] = []
 
-    # Check input boundary deficits
     for inp in input_results:
-        if inp["status"] == "DEFICIENT":
+        if inp.get("status") == "DEFICIENT":
+            mat = str(inp.get("material", ""))
+            obs = _as_float(inp.get("observed_rate_spm", 0.0))
+            plan = _as_float(inp.get("plan_rate_spm", 0.0))
+            pct = _as_float(inp.get("fulfillment_pct", 0.0))
             bottlenecks.append(
                 {
                     "severity": "HIGH",
                     "type": "INPUT_STARVATION",
-                    "target": inp["material"],
+                    "target": mat,
                     "description": (
-                        f"Raw input '{inp['material']}' delivers {inp['observed_rate_spm']:.1f}/min "
-                        f"({inp['fulfillment_pct']}% of planned {inp['plan_rate_spm']:.1f}/min)."
+                        f"Raw input '{mat}' delivers {obs:.1f}/min "
+                        f"({pct}% of planned {plan:.1f}/min)."
                     ),
-                    "impact_score": round(inp["plan_rate_spm"] - inp["observed_rate_spm"], 2),
+                    "impact_score": round(plan - obs, 2),
                 }
             )
 
-    # Check recipe stages
     for stage in stages:
-        rec = stage["recipe"]
-        plan_rate = stage["plan_rate_spm"]
-        obs_rate = stage["observed_output_rate_spm"]
+        diag = _diagnose_single_stage(stage)
+        if diag is not None:
+            bottlenecks.append(diag)
 
-        if plan_rate <= 0 or obs_rate >= plan_rate * 0.85:
-            continue
-
-        deficit = plan_rate - obs_rate
-
-        starving_inputs = []
-        for inp_flow in stage["inputs"]:
-            inp_mat = inp_flow["input_material"]
-            inp_rate = inp_flow["rate_spm"]
-            if inp_rate <= 0.05 * plan_rate:
-                starving_inputs.append(inp_mat)
-
-        if starving_inputs:
-            bottlenecks.append(
-                {
-                    "severity": "HIGH",
-                    "type": "STAGE_STARVATION",
-                    "target": rec,
-                    "description": (
-                        f"Recipe '{rec}' starved by upstream input(s): {', '.join(starving_inputs)}."
-                    ),
-                    "impact_score": round(deficit, 2),
-                }
-            )
-        else:
-            bottlenecks.append(
-                {
-                    "severity": "MEDIUM",
-                    "type": "STAGE_BACKPRESSURE",
-                    "target": rec,
-                    "description": (
-                        f"Recipe '{rec}' has inputs available but outputs are stalled. "
-                        f"Output belt backpressure or machine transfer delay suspected."
-                    ),
-                    "impact_score": round(deficit, 2),
-                }
-            )
-
-    bottlenecks.sort(key=lambda b: b.get("impact_score", 0.0), reverse=True)
+    bottlenecks.sort(key=lambda b: _as_float(b.get("impact_score", 0.0)), reverse=True)
     return bottlenecks
 
 
+def _compute_transit_latency(inp_tick: object, out_tick: object) -> tuple[int | None, float | None]:
+    """Compute tick and second transit latency between upstream and downstream ticks."""
+    if isinstance(inp_tick, int) and isinstance(out_tick, int) and out_tick >= inp_tick:
+        ticks = out_tick - inp_tick
+        return ticks, round(ticks / TICKS_PER_SECOND, 2)
+    return None, None
+
+
+def _extract_cell_inputs(cells: Mapping[str, object], cell_id: str) -> list[str]:
+    """Return the list of input material names for a cell definition."""
+    cell_info_obj = cells.get(cell_id, {})
+    cell_info = cell_info_obj if isinstance(cell_info_obj, Mapping) else {}
+    inputs_obj = cell_info.get("inputs", [])
+    return [str(x) for x in inputs_obj] if isinstance(inputs_obj, Sequence) else []
+
+
 def analyze_propagation_dag(
-    netlist_data: dict[str, Any], net_stats: dict[str, dict[str, Any]]
+    netlist_data: Mapping[str, object],
+    net_stats: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, Any]]:
     """Trace signal wavefront arrival latency across the dependency DAG."""
-    cells = netlist_data.get("cells", {})
-    instances = netlist_data.get("instances", [])
+    cells_obj = netlist_data.get("cells", {})
+    cells = cells_obj if isinstance(cells_obj, Mapping) else {}
+    instances_obj = netlist_data.get("instances", [])
+    instances = instances_obj if isinstance(instances_obj, Sequence) else []
     dag_edges: list[dict[str, Any]] = []
 
     for inst in instances:
-        cell_id = inst.get("cell", "")
-        if cell_id in (
-            "belt_merge2",
-            "belt_split2",
-            "display_panel",
-            "arithmetic_combinator",
-            "decider_combinator",
-        ):
+        if not isinstance(inst, Mapping):
             continue
-        cell_info = cells.get(cell_id, {})
-        inputs = cell_info.get("inputs", [])
-        rec = inst.get("recipe", "")
-
-        out_stats = net_stats.get(rec, {})
-        out_tick = out_stats.get("first_arrival_tick")
-
-        for inp in inputs:
-            inp_stats = net_stats.get(inp, {})
-            inp_tick = inp_stats.get("first_arrival_tick")
-
-            latency_ticks = (
-                (out_tick - inp_tick)
-                if (out_tick is not None and inp_tick is not None and out_tick >= inp_tick)
-                else None
-            )
-
+        cell_id = str(inst.get("cell", ""))
+        if cell_id in NON_RECIPE_CELLS:
+            continue
+        rec = str(inst.get("recipe", ""))
+        out_tick = net_stats.get(rec, {}).get("first_arrival_tick")
+        for inp in _extract_cell_inputs(cells, cell_id):
+            inp_tick = net_stats.get(inp, {}).get("first_arrival_tick")
+            latency_ticks, latency_sec = _compute_transit_latency(inp_tick, out_tick)
             dag_edges.append(
                 {
                     "upstream": inp,
@@ -359,20 +441,26 @@ def analyze_propagation_dag(
                     "upstream_arrival_tick": inp_tick,
                     "downstream_arrival_tick": out_tick,
                     "transit_latency_ticks": latency_ticks,
-                    "transit_latency_sec": round(latency_ticks / 60.0, 2)
-                    if latency_ticks is not None
-                    else None,
+                    "transit_latency_sec": latency_sec,
                 }
             )
 
     return dag_edges
 
 
-def analyze_shapes(trace_data: dict[str, Any], netlist_data: dict[str, Any]) -> dict[str, Any]:
+def analyze_shapes(
+    trace_data: Mapping[str, object],
+    netlist_data: Mapping[str, object],
+) -> dict[str, Any]:
     """Execute complete shape-based telemetry analysis."""
-    ticks_total = int(trace_data.get("ticks_total", 0))
-    sample_interval = int(trace_data.get("sample_interval", 60))
-    samples = trace_data.get("samples", [])
+    ticks_total = _as_int(trace_data.get("ticks_total", 0))
+    sample_interval = _as_int(trace_data.get("sample_interval", DEFAULT_SAMPLE_INTERVAL))
+    samples_obj = trace_data.get("samples", [])
+    samples = (
+        [s for s in samples_obj if isinstance(s, Mapping)]
+        if isinstance(samples_obj, Sequence)
+        else []
+    )
 
     net_stats = calculate_net_rates(samples, sample_interval, ticks_total)
     inputs_analysis = analyze_inputs(netlist_data, net_stats)
@@ -382,12 +470,12 @@ def analyze_shapes(trace_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
     bottlenecks = diagnose_bottlenecks(stages_analysis, inputs_analysis, net_stats)
     dag_analysis = analyze_propagation_dag(netlist_data, net_stats)
 
-    total_items_recorded = sum(s["total_items"] for s in net_stats.values())
+    total_items_recorded = sum(_as_int(s["total_items"]) for s in net_stats.values())
 
     return {
         "summary": {
             "simulation_ticks": ticks_total,
-            "simulation_seconds": round(ticks_total / 60.0, 2),
+            "simulation_seconds": round(ticks_total / TICKS_PER_SECOND, 2),
             "sample_interval_ticks": sample_interval,
             "total_samples": len(samples),
             "tapped_nets_count": len(net_stats),
@@ -403,74 +491,93 @@ def analyze_shapes(trace_data: dict[str, Any], netlist_data: dict[str, Any]) -> 
     }
 
 
-def format_markdown_report(analysis: dict[str, Any]) -> str:
+def _format_bottlenecks_section(bottlenecks: Sequence[Mapping[str, object]]) -> list[str]:
+    """Format the bottleneck diagnosis markdown section."""
+    lines = ["## 3. Bottleneck Diagnosis"]
+    if bottlenecks:
+        for idx, bn in enumerate(bottlenecks[:MAX_REPORTED_BOTTLENECKS], 1):
+            lines.append(f"{idx}. **[{bn['severity']}] {bn['type']}** on `{bn['target']}`")
+            lines.append(f"   {bn['description']}")
+    else:
+        lines.append("No active starvation or backpressure bottlenecks detected.\n")
+    lines.append("")
+    return lines
+
+
+def _format_merges_section(merges: Sequence[Mapping[str, object]]) -> list[str]:
+    """Format the convergent splitter merges markdown section."""
+    lines = ["## 5. Convergent Splitter Merges (By Material)"]
+    if merges:
+        lines.append("| Material | Splitters | Throughput (SPM) | Belt Saturation | Congestion |")
+        lines.append("|:---|:---:|:---:|:---:|:---:|")
+        for m in merges:
+            cong = "**CONGESTED**" if m.get("is_congested") else "Normal"
+            lines.append(
+                f"| `{m['material']}` | {m['splitters_count']} | {_as_float(m['throughput_spm']):.1f} | "
+                f"{_as_float(m['belt_saturation_pct']):.1f}% | {cong} |"
+            )
+        lines.append("")
+    return lines
+
+
+def format_markdown_report(analysis: Mapping[str, object]) -> str:
     """Format analysis findings as clean technical markdown."""
-    summary = analysis["summary"]
-    out: list[str] = []
+    summary_obj = analysis.get("summary", {})
+    summary: dict[str, Any] = dict(summary_obj) if isinstance(summary_obj, Mapping) else {}
+    outputs_obj = analysis.get("boundary_outputs", [])
+    boundary_outputs: list[Any] = list(outputs_obj) if isinstance(outputs_obj, Sequence) else []
+    inputs_obj = analysis.get("boundary_inputs", [])
+    boundary_inputs: list[Any] = list(inputs_obj) if isinstance(inputs_obj, Sequence) else []
+    stages_obj = analysis.get("transform_stages", [])
+    transform_stages: list[Any] = list(stages_obj) if isinstance(stages_obj, Sequence) else []
+    bns_obj = analysis.get("bottlenecks", [])
+    bottlenecks = (
+        [b for b in bns_obj if isinstance(b, Mapping)] if isinstance(bns_obj, Sequence) else []
+    )
+    merges_obj = analysis.get("convergent_merges", [])
+    merges = (
+        [m for m in merges_obj if isinstance(m, Mapping)]
+        if isinstance(merges_obj, Sequence)
+        else []
+    )
 
-    out.append("# Factory Telemetry Shape Analysis Report\n")
-    out.append("## 1. Simulation Summary")
-    out.append(
-        f"- **Simulation Duration**: {summary['simulation_ticks']} ticks ({summary['simulation_seconds']:.1f} seconds)"
-    )
-    out.append(
-        f"- **Sample Interval**: {summary['sample_interval_ticks']} ticks ({summary['total_samples']} samples)"
-    )
-    out.append(f"- **Tapped Nets**: {summary['tapped_nets_count']} telemetry points")
-    out.append(f"- **Item Movements Logged**: {summary['total_item_transfers_recorded']} units\n")
-
-    out.append("## 2. Boundary Outputs (Science Pack Throughput)")
-    out.append(
-        "| Science Pack | Target (SPM) | Observed (SPM) | Progress | First Arrival | Status |"
-    )
-    out.append("|:---|:---:|:---:|:---:|:---:|:---|")
-    for row in analysis["boundary_outputs"]:
+    out: list[str] = [
+        "# Factory Telemetry Shape Analysis Report\n",
+        "## 1. Simulation Summary",
+        f"- **Simulation Duration**: {summary['simulation_ticks']} ticks ({summary['simulation_seconds']:.1f} seconds)",
+        f"- **Sample Interval**: {summary['sample_interval_ticks']} ticks ({summary['total_samples']} samples)",
+        f"- **Tapped Nets**: {summary['tapped_nets_count']} telemetry points",
+        f"- **Item Movements Logged**: {summary['total_item_transfers_recorded']} units\n",
+        "## 2. Boundary Outputs (Science Pack Throughput)",
+        "| Science Pack | Target (SPM) | Observed (SPM) | Progress | First Arrival | Status |",
+        "|:---|:---:|:---:|:---:|:---:|:---|",
+    ]
+    for row in boundary_outputs:
         arr = f"{row['first_arrival_sec']:.1f}s" if row["first_arrival_sec"] is not None else "None"
         out.append(
             f"| `{row['material']}` | {row['target_rate_spm']:.1f} | {row['observed_rate_spm']:.2f} | "
             f"{row['achievement_pct']:.1f}% | {arr} | **{row['status']}** |"
         )
     out.append("")
-
-    out.append("## 3. Bottleneck Diagnosis")
-    bottlenecks = analysis.get("bottlenecks", [])
-    if bottlenecks:
-        for idx, bn in enumerate(bottlenecks[:10], 1):
-            out.append(f"{idx}. **[{bn['severity']}] {bn['type']}** on `{bn['target']}`")
-            out.append(f"   {bn['description']}")
-    else:
-        out.append("No active starvation or backpressure bottlenecks detected.\n")
-    out.append("")
+    out.extend(_format_bottlenecks_section(bottlenecks))
 
     out.append("## 4. Boundary Inputs (Supply Continuity)")
     out.append(
         "| Input Material | Planned (SPM) | Observed (SPM) | Fulfillment | Total Units | Status |"
     )
     out.append("|:---|:---:|:---:|:---:|:---:|:---|")
-    for row in analysis["boundary_inputs"]:
+    for row in boundary_inputs:
         out.append(
             f"| `{row['material']}` | {row['plan_rate_spm']:.1f} | {row['observed_rate_spm']:.2f} | "
             f"{row['fulfillment_pct']:.1f}% | {row['total_items']} | {row['status']} |"
         )
     out.append("")
-
-    out.append("## 5. Convergent Splitter Merges (By Material)")
-    merges = analysis.get("convergent_merges", [])
-    if merges:
-        out.append("| Material | Splitters | Throughput (SPM) | Belt Saturation | Congestion |")
-        out.append("|:---|:---:|:---:|:---:|:---:|")
-        for m in merges:
-            cong = "**CONGESTED**" if m["is_congested"] else "Normal"
-            out.append(
-                f"| `{m['material']}` | {m['splitters_count']} | {m['throughput_spm']:.1f} | "
-                f"{m['belt_saturation_pct']:.1f}% | {cong} |"
-            )
-        out.append("")
+    out.extend(_format_merges_section(merges))
 
     out.append("## 6. Recipe Transform Stages (Utilization)")
     out.append("| Recipe | Machine | Instances | Plan (SPM) | Observed (SPM) | Utilization |")
     out.append("|:---|:---|:---:|:---:|:---:|:---:|")
-    for stg in analysis["transform_stages"]:
+    for stg in transform_stages:
         out.append(
             f"| `{stg['recipe']}` | {stg['machine']} | {stg['instance_count']} | "
             f"{stg['plan_rate_spm']:.1f} | {stg['observed_output_rate_spm']:.2f} | "

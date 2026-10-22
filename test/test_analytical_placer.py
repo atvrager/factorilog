@@ -23,6 +23,22 @@ from foundry.def_parser import parse_def
 from foundry.entity_helpers import check_collisions, check_underground_pairing
 
 
+def _get_comp_dims(
+    comp: dict[str, Any],
+    inst_map: dict[str, dict[str, Any]],
+    cells_map: dict[str, dict[str, Any]],
+) -> tuple[int, int, int]:
+    """Return (width, height, horizontal_padding) for a placed component."""
+    cname = comp["name"]
+    macro = inst_map.get(cname, {}).get("cell", comp.get("macro", ""))
+    cmeta = cells_map.get(macro, {})
+    is_small = "split" in macro or "merge" in macro
+    w = int(cmeta.get("width", 1 if is_small else 3))
+    h = int(cmeta.get("height", 2 if is_small else 3))
+    pad = 16 if "merge" in cname else (10 if "split" in cname else 8)
+    return w, h, pad
+
+
 def _simulate_rank_row_placement(
     def_data: dict[str, Any],
     netlist_data: dict[str, Any],
@@ -37,8 +53,7 @@ def _simulate_rank_row_placement(
 
     by_rank: dict[int, list[dict[str, Any]]] = {}
     for comp in ranked_def.get("components", []):
-        cname = comp["name"]
-        r = int(inst_map.get(cname, {}).get("rank", 0))
+        r = int(inst_map.get(comp["name"], {}).get("rank", 0))
         by_rank.setdefault(r, []).append(comp)
 
     channel_h = 12
@@ -47,17 +62,11 @@ def _simulate_rank_row_placement(
     max_x = 30
 
     for r in sorted(by_rank.keys()):
-        comps = by_rank[r]
         rx = core_margin + 2
         row_h = 3
-        for comp in comps:
-            cname = comp["name"]
-            macro = inst_map.get(cname, {}).get("cell", comp.get("macro", ""))
-            cmeta = cells_map.get(macro, {})
-            w = int(cmeta.get("width", 1 if "split" in macro or "merge" in macro else 3))
-            h = int(cmeta.get("height", 2 if "split" in macro or "merge" in macro else 3))
+        for comp in by_rank[r]:
+            w, h, pad = _get_comp_dims(comp, inst_map, cells_map)
             row_h = max(row_h, h)
-            pad = 16 if "merge" in cname else 10 if "split" in cname else 8
             comp["x"] = int(rx * dbu)
             comp["y"] = int(cur_y * dbu)
             comp["orient"] = "N"

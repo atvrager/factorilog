@@ -18,6 +18,7 @@ because lane packing is a place-and-route decision.
 from __future__ import annotations
 
 import collections
+import heapq
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -275,26 +276,22 @@ def _recipe_entry_amount(entries: list[pdk.ProtoRecord], target_name: str) -> fl
     return 1.0
 
 
-def _consumer_demands_for_item(
-    data: solve.Data, rates: dict[str, float], item_name: str
-) -> list[float]:
-    """Collect per-recipe consumption rates for item_name across all active recipes."""
-    demands: list[float] = []
+def _build_consumer_demands_index(
+    data: solve.Data, rates: Mapping[str, float]
+) -> dict[str, list[float]]:
+    """Index per-recipe consumption rates by item name across all active recipes."""
+    by_item: dict[str, list[float]] = {}
     for c_rec, c_rate in rates.items():
         c_proto = data.recipes.get(c_rec)
         if not c_proto:
             continue
-        demands.extend(
-            c_rate * solve.amount_of(ing)
-            for ing in c_proto.get("ingredients", [])
-            if solve.name_of(ing) == item_name
-        )
-    return demands
+        for ing in c_proto.get("ingredients", []):
+            by_item.setdefault(solve.name_of(ing), []).append(c_rate * solve.amount_of(ing))
+    return by_item
 
 
 def _partitioned_driver_count(
-    data: solve.Data,
-    rates: dict[str, float],
+    demands_by_item: Mapping[str, Sequence[float]],
     recipe_proto: pdk.ProtoRecord,
     out_name: str,
     rate: float,
@@ -309,7 +306,7 @@ def _partitioned_driver_count(
         return base_count
     max_drvs_bus = max(1, int((BUS_EFFECTIVE_CAPACITY_RATIO * belt_capacity) // drv_cap))
     b_max_cap = min(belt_capacity, max_drvs_bus * drv_cap)
-    c_totals = _consumer_demands_for_item(data, rates, out_name)
+    c_totals = demands_by_item.get(out_name, ())
     if len(c_totals) <= 1:
         return base_count
     whole_d = sum(d for d in c_totals if d <= b_max_cap + FLOAT_TOL)
@@ -376,7 +373,7 @@ def _resolve_recipe_cell_and_count(
     data: solve.Data,
     tech: pdk.Pdk,
     nl: Netlist,
-    rates: dict[str, float],
+    demands_by_item: Mapping[str, Sequence[float]],
     plan_count: dict[str, float],
     machine_override: str | Mapping[str, str] | None,
     scale_for_throughput: bool,
@@ -411,7 +408,7 @@ def _resolve_recipe_cell_and_count(
         count += 1
     elif nl.belt_capacity > 0 and len(outs) == 1 and recipe_proto:
         count = _partitioned_driver_count(
-            data, rates, recipe_proto, outs[0], rate, eff_cpm, nl.belt_capacity, count
+            demands_by_item, recipe_proto, outs[0], rate, eff_cpm, nl.belt_capacity, count
         )
     count = _pow2_promoted_count(
         recipe, recipe_proto, rate, eff_cpm, nl.belt_capacity, nl.fluids, count
@@ -434,6 +431,7 @@ def _scale_steam_power_to_placed_load(
     """Scale steam-power and boiler-steam rates to cover integer placed machines and inserters."""
     ins_watts = solve.inserter_peak_watts(data)
     placed_watts = float(extra_power_watts)
+    demands_by_item = _build_consumer_demands_index(data, rates)
     for recipe, rate in sorted(rates.items()):
         if recipe in ("boiler-steam", "steam-power"):
             continue
@@ -441,7 +439,7 @@ def _scale_steam_power_to_placed_load(
             data,
             tech,
             nl,
-            rates,
+            demands_by_item,
             plan_count,
             machine_override,
             scale_for_throughput,
@@ -496,13 +494,14 @@ def _populate_recipe_instances(
     is_single_pack: bool,
 ) -> None:
     """Instantiate machines for each recipe in rates and wire their input/output nets."""
+    demands_by_item = _build_consumer_demands_index(data, rates)
     for recipe, rate in sorted(rates.items()):
         recipe_proto = data.recipes[recipe]
         cell, eff_cpm, count = _resolve_recipe_cell_and_count(
             data,
             tech,
             nl,
-            rates,
+            demands_by_item,
             plan_count,
             machine_override,
             scale_for_throughput,
@@ -512,10 +511,14 @@ def _populate_recipe_instances(
         )
         nl.cells[cell["cell"]] = cell
         share = rate / count
-        ing_list = recipe_proto.get("ingredients", [])
-        res_list = solve.Data.results_of(recipe_proto)
-        in_amts = {p: _recipe_entry_amount(ing_list, p) for p in cell.get("inputs", [])}
-        out_amts = {p: _recipe_entry_amount(res_list, p) for p in cell.get("outputs", [])}
+        ing_map = {
+            solve.name_of(e): solve.amount_of(e) for e in recipe_proto.get("ingredients", [])
+        }
+        res_map = {
+            solve.name_of(e): solve.amount_of(e) for e in solve.Data.results_of(recipe_proto)
+        }
+        in_amts = {p: ing_map.get(p, 1.0) for p in cell.get("inputs", [])}
+        out_amts = {p: res_map.get(p, 1.0) for p in cell.get("outputs", [])}
         for index in range(count):
             inst = Instance(
                 f"u_{sanitize(recipe)}_{index + 1}",
@@ -1267,6 +1270,10 @@ class _SplitTreeContext:
         self.inst_by_name = inst_by_name
         self.synthesize_trees = synthesize_trees
         self.entries: list[tuple[str, str, str, str]] = []
+        self.bal_entries: list[tuple[str, str, str, str, str]] | None = None
+        self.ordered_sinks: list[str] = []
+        self.ordered_drivers: list[str] = []
+        self.recipe_totals: dict[str, float] = {}
         self.count = [0]
         self.sink_ranks = [inst_by_name[s].rank for s in net.sinks if s in inst_by_name]
         self.driver_ranks = [inst_by_name[d].rank for d in net.drivers if d in inst_by_name]
@@ -1661,14 +1668,13 @@ def _evaluate_multibus_candidate(
     cand_k: int,
     cand_ks: list[int],
     force_multibus: bool,
-    ordered_sinks: list[str],
-    ordered_drivers: list[str],
-    recipe_totals: dict[str, float],
     bus_max_cap: float,
     max_drv_rated: float,
 ) -> tuple[list[list[str]], list[list[str]], list[float], list[float]] | None:
     """Evaluate a single candidate k for multibus partitioning."""
     net = ctx.net
+    ordered_sinks = ctx.ordered_sinks
+    ordered_drivers = ctx.ordered_drivers
     s_groups = _partition_sinks_by_demand(
         ordered_sinks,
         net.sink_rates,
@@ -1687,7 +1693,7 @@ def _evaluate_multibus_candidate(
         ordered_sinks,
         ordered_drivers,
         net,
-        recipe_totals,
+        ctx.recipe_totals,
         bus_max_cap,
         max_drv_rated,
         ctx.inst_by_name,
@@ -1751,6 +1757,8 @@ def _plan_multibus_partition(
         net.sinks,
         key=lambda s: (inst_by_name[s].rank if s in inst_by_name else ctx.rank, _natural_key(s)),
     )
+    ctx.ordered_drivers = ordered_drivers
+    ctx.ordered_sinks = ordered_sinks
     max_drv_rated, max_drvs_per_bus, bus_max_cap = _compute_driver_bus_limits(
         net, ordered_drivers, belt_cap
     )
@@ -1764,7 +1772,7 @@ def _plan_multibus_partition(
         max_sink_groups,
         len(sink_recipes),
     )
-    recipe_totals = {
+    ctx.recipe_totals = {
         r: sum(
             max(FLOAT_TOL, net.sink_rates.get(s, 1.0))
             for s in ordered_sinks
@@ -1778,9 +1786,6 @@ def _plan_multibus_partition(
             cand_k,
             cand_ks,
             force_multibus,
-            ordered_sinks,
-            ordered_drivers,
-            recipe_totals,
             bus_max_cap,
             max_drv_rated,
         )
@@ -1789,24 +1794,26 @@ def _plan_multibus_partition(
     return None
 
 
-def _retarget_balancer_output(
-    bal_entries: list[tuple[str, str, str, str, str]], out_wire: str, single_target: str
+def _retarget_balancer_outputs(
+    bal_entries: list[tuple[str, str, str, str, str]], retarget_map: Mapping[str, str]
 ) -> None:
-    """Rewrite a balancer output wire directly to a single sink target wire."""
+    """Rewrite balancer output wires in `retarget_map` directly to their single sink targets."""
+    if not retarget_map:
+        return
     for idx, (b_name, b_a1, b_a2, b_y1, b_y2) in enumerate(bal_entries):
-        if b_y1 == out_wire:
-            bal_entries[idx] = (b_name, b_a1, b_a2, single_target, b_y2)
-        elif b_y2 == out_wire:
-            bal_entries[idx] = (b_name, b_a1, b_a2, b_y1, single_target)
+        new_y1 = retarget_map.get(b_y1, b_y1)
+        new_y2 = retarget_map.get(b_y2, b_y2)
+        if new_y1 != b_y1 or new_y2 != b_y2:
+            bal_entries[idx] = (b_name, b_a1, b_a2, new_y1, new_y2)
 
 
 def _split_balanced_bus_inputs(
     ctx: _SplitTreeContext,
-    bal_entries: list[tuple[str, str, str, str, str]],
     bal_count: list[int],
 ) -> None:
     """Balance multi-belt raw input buses and build split trees per balanced output."""
     nl, net = ctx.nl, ctx.net
+    bal_entries = ctx.bal_entries if ctx.bal_entries is not None else []
     bus_wires = [sanitize(b) for b in net.bus_inputs]
     balanced_outputs = _balance_inputs(
         nl, ctx.material, net.material, bus_wires, bal_entries, bal_count
@@ -1830,11 +1837,13 @@ def _split_balanced_bus_inputs(
         )
     if not ctx.synthesize_trees:
         return
+    retarget_map: dict[str, str] = {}
     for out_wire, sub_sink_names in zip(balanced_outputs, sink_groups, strict=False):
         if len(sub_sink_names) > 1:
             _build_rank_grouped_tree(ctx, out_wire, sub_sink_names)
         elif len(sub_sink_names) == 1:
-            _retarget_balancer_output(bal_entries, out_wire, f"{ctx.material}__{sub_sink_names[0]}")
+            retarget_map[out_wire] = f"{ctx.material}__{sub_sink_names[0]}"
+    _retarget_balancer_outputs(bal_entries, retarget_map)
 
 
 def _retarget_merge_output(
@@ -1917,11 +1926,12 @@ def split_net(
         return []
     inst_by_name = {inst.name: inst for inst in nl.instances}
     ctx = _SplitTreeContext(nl, net, inst_by_name, synthesize_trees)
+    ctx.bal_entries = bal_entries
     orig_drivers = net.orig_drivers or list(net.drivers)
     multibus_plan = _plan_multibus_partition(ctx, orig_drivers)
 
     if len(net.bus_inputs) > 1 and bal_entries is not None:
-        _split_balanced_bus_inputs(ctx, bal_entries, [0])
+        _split_balanced_bus_inputs(ctx, [0])
     elif multibus_plan is not None:
         _apply_multibus_plan(ctx, multibus_plan)
     elif synthesize_trees:
@@ -2438,9 +2448,9 @@ class _RankDependencyGraph:
     def find_driver_x(self, start: str, inst_abs_center: dict[str, float]) -> float:
         """Breadth-first search upstream to find the first placed driver X coordinate."""
         visited: set[str] = set()
-        q = [start]
+        q = collections.deque([start])
         while q:
-            c = q.pop(0)
+            c = q.popleft()
             if c in inst_abs_center:
                 return inst_abs_center[c]
             for prv in self.reverse_deps.get(c, set()):
@@ -2463,10 +2473,10 @@ class _RankDependencyGraph:
         """Find machine instances in `rank_set` reachable from `start` within the rank."""
         adj = self.forward_deps if forward else self.reverse_deps
         visited: set[str] = set()
-        q = [start]
+        q = collections.deque([start])
         machs: set[str] = set()
         while q:
-            c = q.pop(0)
+            c = q.popleft()
             for neighbor in adj.get(c, set()):
                 if neighbor in rank_set and neighbor not in visited:
                     visited.add(neighbor)
@@ -2626,18 +2636,22 @@ def _toposort_rank_instances(
 ) -> list[str]:
     """Topologically sort instances within a rank using `rank_sort_keys` as tie-breaker."""
     rank_deps = {name: {d for d in deps.get(name, set()) if d in rank_insts} for name in rank_insts}
-    ready = [name for name, d_set in rank_deps.items() if not d_set]
+    ready_heap = [(rank_sort_keys[name], name) for name, d_set in rank_deps.items() if not d_set]
+    heapq.heapify(ready_heap)
+    queued_or_done: set[str] = {name for _, name in ready_heap}
+    done_set: set[str] = set()
     sorted_insts: list[str] = []
-    while ready:
-        ready.sort(key=lambda name: rank_sort_keys[name])
-        curr = ready.pop(0)
+    while ready_heap:
+        _, curr = heapq.heappop(ready_heap)
         sorted_insts.append(curr)
+        done_set.add(curr)
         for other, d_set in rank_deps.items():
             if curr in d_set:
                 d_set.remove(curr)
-                if not d_set and other not in sorted_insts and other not in ready:
-                    ready.append(other)
-    sorted_insts.extend(name for name in rank_insts if name not in sorted_insts)
+                if not d_set and other not in queued_or_done:
+                    queued_or_done.add(other)
+                    heapq.heappush(ready_heap, (rank_sort_keys[other], other))
+    sorted_insts.extend(name for name in rank_insts if name not in done_set)
     return sorted_insts
 
 

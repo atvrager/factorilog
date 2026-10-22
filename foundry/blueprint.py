@@ -11,7 +11,9 @@ document packs the game version as (major << 48) | (minor << 32) | ...
 import base64
 import json
 import zlib
-from typing import Any
+from typing import Any, TypeAlias
+
+BlueprintRecord: TypeAlias = dict[str, Any]
 
 # The single-character prefix of a 2.0 exchange string.
 FORMAT_PREFIX = "0"
@@ -19,36 +21,34 @@ FORMAT_PREFIX = "0"
 # Game version 2.0.0, packed for the `version` field of a blueprint.
 VERSION_2_0 = 2 << 48
 
+MAX_DEFAULT_ICONS = 4
+ZLIB_MAX_COMPRESSION = 9
 
-def encode(
-    entities: list[dict[str, Any]],
-    label: str,
-    wires: list[list[int]] | None = None,
-    icons: list[dict[str, Any]] | None = None,
-    tiles: list[dict[str, Any]] | None = None,
-    snap_to_grid: dict[str, int] | None = None,
-    absolute_snapping: bool | None = None,
-) -> str:
-    """Encode entities and optional tiles into an exchange string."""
-    if icons is None:
-        icons = []
-        seen: set[str] = set()
-        for ent in entities:
-            name = ent.get("name")
-            if name and name not in seen:
-                seen.add(name)
-                icons.append(
-                    {
-                        "index": len(icons) + 1,
-                        "signal": {"type": "item", "name": name},
-                    }
-                )
-                if len(icons) == 4:
-                    break
-        if not icons:
-            icons = [{"index": 1, "signal": {"type": "item", "name": "assembling-machine-1"}}]
 
-    encoded_entities: list[dict[str, Any]] = []
+def _default_icons_for_entities(entities: list[BlueprintRecord]) -> list[BlueprintRecord]:
+    """Build up to four unique item icons from the entity list."""
+    icons: list[BlueprintRecord] = []
+    seen: set[str] = set()
+    for ent in entities:
+        name = ent.get("name")
+        if name and name not in seen:
+            seen.add(name)
+            icons.append(
+                {
+                    "index": len(icons) + 1,
+                    "signal": {"type": "item", "name": name},
+                }
+            )
+            if len(icons) == MAX_DEFAULT_ICONS:
+                break
+    if not icons:
+        icons = [{"index": 1, "signal": {"type": "item", "name": "assembling-machine-1"}}]
+    return icons
+
+
+def _number_entities(entities: list[BlueprintRecord]) -> list[BlueprintRecord]:
+    """Assign sequential 1-based entity numbers where missing."""
+    encoded_entities: list[BlueprintRecord] = []
     for idx, ent in enumerate(entities, start=1):
         if "entity_number" not in ent:
             e = dict(ent)
@@ -56,12 +56,27 @@ def encode(
             encoded_entities.append(e)
         else:
             encoded_entities.append(ent)
+    return encoded_entities
 
-    bp_dict: dict[str, Any] = {
+
+def encode(
+    entities: list[BlueprintRecord],
+    label: str,
+    wires: list[list[int]] | None = None,
+    icons: list[BlueprintRecord] | None = None,
+    tiles: list[BlueprintRecord] | None = None,
+    snap_to_grid: dict[str, int] | None = None,
+    absolute_snapping: bool | None = None,
+) -> str:
+    """Encode entities and optional tiles into an exchange string."""
+    resolved_icons = _default_icons_for_entities(entities) if icons is None else icons
+    encoded_entities = _number_entities(entities)
+
+    bp_dict: BlueprintRecord = {
         "item": "blueprint",
         "label": label,
         "version": VERSION_2_0,
-        "icons": icons,
+        "icons": resolved_icons,
         "entities": encoded_entities,
     }
     if wires:
@@ -75,7 +90,7 @@ def encode(
 
     document = {"blueprint": bp_dict}
     raw = json.dumps(document, separators=(",", ":")).encode()
-    return FORMAT_PREFIX + base64.b64encode(zlib.compress(raw, 9)).decode()
+    return FORMAT_PREFIX + base64.b64encode(zlib.compress(raw, ZLIB_MAX_COMPRESSION)).decode()
 
 
 def decode(string: str) -> dict[str, Any]:

@@ -48,6 +48,10 @@ SENTENCE_FAIL_WORDS = 26
 PARAGRAPH_MAX_SENTENCES = 6
 MAX_FINDINGS = 200
 MAX_FINDINGS_PER_LINE = 3
+SENTENCE_PREVIEW_LEN = 80
+COMMIT_LINE_PREVIEW_LEN = 40
+COMMIT_SHA_LEN = 12
+USAGE_EXIT_CODE = 2
 
 PROSE_EXTS = frozenset({".md", ".txt", ".rst", ".adoc"})
 # Machine-generated files.  Their comments are output of a tool and not prose
@@ -68,12 +72,20 @@ SKIP_DIRS = frozenset(
 
 
 class Severity(enum.Enum):
+    """Severity level for a linter finding."""
+
     ERROR = "error"
     WARNING = "warning"
 
     @property
     def rank(self) -> int:
+        """Return sort rank where error precedes warning."""
         return 0 if self is Severity.ERROR else 1
+
+    @property
+    def github_level(self) -> str:
+        """Return the GitHub Actions annotation level."""
+        return "error" if self is Severity.ERROR else "warning"
 
 
 class Rule:
@@ -431,8 +443,10 @@ BLOCK_COMMENT = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Finding:
+    """One prose or commit message violation."""
+
     path: str
     line: int
     col: int
@@ -442,13 +456,15 @@ class Finding:
     detail: str
 
     def render(self) -> str:
+        """Format the finding for terminal display."""
         head = (
             f"{self.path}:{self.line}:{self.col}: {self.severity.value}: {self.text} [{self.rule}]"
         )
         return f"{head}\n    {self.detail}" if self.detail else head
 
     def github(self) -> str:
-        kind = "error" if self.severity is Severity.ERROR else "warning"
+        """Format the finding as a GitHub Actions annotation."""
+        kind = self.severity.github_level
         return (
             f"::{kind} file={self.path},line={self.line},col={self.col}::{self.rule}: {self.text}"
         )
@@ -457,17 +473,12 @@ class Finding:
 # ------------------------------------------------------------------ cleaning
 
 
-def _blank(match: re.Match) -> str:
-    """Replace a match with spaces.  Keeps line length, so columns stay true."""
-    return re.sub(r"[^\n]", " ", match.group(0))
-
-
 def clean_line(line: str) -> str:
     """Remove code, links, and markup from one prose line."""
     if TABLE_SEP.match(line):
         return ""
     for pattern in (INLINE_CODE, HTML_COMMENT, BADGE, LINK_TARGET, URL):
-        line = pattern.sub(_blank, line)
+        line = pattern.sub(lambda m: " " * len(m.group(0)), line)
     return line
 
 
@@ -485,6 +496,16 @@ def markdown_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
+def _advance_quoted_string(payload: str, idx: int, quote: str) -> tuple[int, str]:
+    """Advance index by one step inside a string literal."""
+    char = payload[idx]
+    if char == "\\":
+        return idx + 2, quote
+    if char == quote:
+        return idx + 1, ""
+    return idx + 1, quote
+
+
 def _find_line_comment(payload: str, token: str) -> int:
     """Index of the first real line comment, or -1.
 
@@ -496,15 +517,10 @@ def _find_line_comment(payload: str, token: str) -> int:
     quote = ""
     idx = 0
     while idx < len(payload):
-        char = payload[idx]
         if quote:
-            if char == "\\":
-                idx += 2
-                continue
-            if char == quote:
-                quote = ""
-            idx += 1
+            idx, quote = _advance_quoted_string(payload, idx, quote)
             continue
+        char = payload[idx]
         if char in "\"'":
             quote = char
             idx += 1
@@ -513,6 +529,38 @@ def _find_line_comment(payload: str, token: str) -> int:
             return idx
         idx += 1
     return -1
+
+
+def _consume_block_comments(
+    lineno: int,
+    payload: str,
+    block: tuple[str, str],
+    in_block: bool,
+    out: list[tuple[int, str]],
+) -> tuple[str, bool]:
+    """Extract block comment segments from one line and return remaining text."""
+    open_delim, close_delim = block
+    while payload:
+        if in_block:
+            end = payload.find(close_delim)
+            if end < 0:
+                out.append((lineno, payload))
+                return "", True
+            out.append((lineno, payload[:end]))
+            payload = payload[end + len(close_delim) :]
+            in_block = False
+            continue
+        start = payload.find(open_delim)
+        if start < 0:
+            break
+        rest = payload[start + len(open_delim) :]
+        end = rest.find(close_delim)
+        if end < 0:
+            out.append((lineno, rest))
+            return "", True
+        out.append((lineno, rest[:end]))
+        payload = rest[end + len(close_delim) :]
+    return payload, in_block
 
 
 def comment_lines(path: Path, text: str) -> list[tuple[int, str]]:
@@ -528,29 +576,7 @@ def comment_lines(path: Path, text: str) -> list[tuple[int, str]]:
     for lineno, raw in enumerate(text.splitlines(), 1):
         payload = raw
         if block is not None:
-            while payload:
-                if in_block:
-                    end = payload.find(block[1])
-                    if end < 0:
-                        out.append((lineno, payload))
-                        payload = ""
-                        break
-                    out.append((lineno, payload[:end]))
-                    payload = payload[end + len(block[1]) :]
-                    in_block = False
-                    continue
-                start = payload.find(block[0])
-                if start < 0:
-                    break
-                rest = payload[start + len(block[0]) :]
-                end = rest.find(block[1])
-                if end < 0:
-                    out.append((lineno, rest))
-                    in_block = True
-                    payload = ""
-                    break
-                out.append((lineno, rest[:end]))
-                payload = rest[end + len(block[1]) :]
+            payload, in_block = _consume_block_comments(lineno, payload, block, in_block, out)
         if payload and line_token is not None:
             idx = _find_line_comment(payload, line_token)
             if idx >= 0:
@@ -569,6 +595,7 @@ def prose_lines(path: Path, text: str) -> list[tuple[int, str]]:
 
 
 def count_words(sentence: str) -> int:
+    """Count words that contain at least one alphanumeric character."""
     return sum(1 for token in WORD.findall(sentence) if any(c.isalnum() for c in token))
 
 
@@ -617,165 +644,224 @@ def split_sentences(text: str) -> list[tuple[int, str]]:
     return [(offset, s.strip()) for offset, s in merged if s.strip()]
 
 
+def _check_sentence_length(
+    path: str,
+    lineno: int,
+    sentence: str,
+    warnings_block: bool,
+    findings: list[Finding],
+) -> None:
+    """Check one sentence against word count limits."""
+    words = count_words(sentence)
+    if words >= SENTENCE_FAIL_WORDS:
+        findings.append(
+            Finding(
+                path,
+                lineno,
+                1,
+                Severity.ERROR,
+                Rule.SENTENCE,
+                f"sentence has {words} words (STE limit {SENTENCE_FAIL_WORDS - 1})",
+                sentence[:SENTENCE_PREVIEW_LEN],
+            )
+        )
+    elif words >= SENTENCE_WARN_WORDS:
+        findings.append(
+            Finding(
+                path,
+                lineno,
+                1,
+                Severity.ERROR if warnings_block else Severity.WARNING,
+                Rule.SENTENCE,
+                f"sentence has {words} words (STE limit {SENTENCE_WARN_WORDS - 1})",
+                sentence[:SENTENCE_PREVIEW_LEN],
+            )
+        )
+
+
+def _flush_paragraph(
+    path: str,
+    paragraph: list[tuple[int, str]],
+    warnings_block: bool,
+    findings: list[Finding],
+) -> None:
+    """Flush accumulated paragraph lines and check sentence and paragraph limits."""
+    if not paragraph:
+        return
+    joined = " ".join(t for _, t in paragraph)
+    offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for lineno, text in paragraph:
+        offsets.append((cursor, lineno))
+        cursor += len(text) + 1
+    sentences = split_sentences(joined)
+    for offset, sentence in sentences:
+        lineno = max((ln for off, ln in offsets if off <= offset), default=paragraph[0][0])
+        _check_sentence_length(path, lineno, sentence, warnings_block, findings)
+    if len(sentences) > PARAGRAPH_MAX_SENTENCES:
+        findings.append(
+            Finding(
+                path,
+                paragraph[0][0],
+                1,
+                Severity.ERROR if warnings_block else Severity.WARNING,
+                Rule.PARAGRAPH,
+                f"paragraph has {len(sentences)} sentences (limit {PARAGRAPH_MAX_SENTENCES})",
+                "",
+            )
+        )
+    paragraph.clear()
+
+
+def _collect_paragraphs(segments: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Group consecutive connected prose segments into paragraphs."""
+    active = [(lineno, text) for lineno, text in segments if not IGNORE.search(text)]
+    paragraphs: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    carries_on = False
+    previous = 0
+    for lineno, text in active:
+        stripped = text.strip()
+        if current and ((previous and lineno != previous + 1) or not stripped or not carries_on):
+            paragraphs.append(current)
+            current = []
+        if stripped:
+            current.append((lineno, text))
+            carries_on = ends_open(text)
+            previous = lineno
+    if current:
+        paragraphs.append(current)
+    return paragraphs
+
+
 def lint_text(path: str, segments: list[tuple[int, str]], strict: bool) -> list[Finding]:
     """Apply every rule to the prose segments of one file."""
     findings: list[Finding] = []
     warnings_block = strict
-    paragraph: list[tuple[int, str]] = []
-
-    def flush() -> None:
-        if not paragraph:
-            return
-        joined = " ".join(t for _, t in paragraph)
-        offsets = []
-        cursor = 0
-        for lineno, text in paragraph:
-            offsets.append((cursor, lineno))
-            cursor += len(text) + 1
-        sentences = split_sentences(joined)
-        for offset, sentence in sentences:
-            lineno = max((ln for off, ln in offsets if off <= offset), default=paragraph[0][0])
-            words = count_words(sentence)
-            if words >= SENTENCE_FAIL_WORDS:
-                findings.append(
-                    Finding(
-                        path,
-                        lineno,
-                        1,
-                        Severity.ERROR,
-                        Rule.SENTENCE,
-                        f"sentence has {words} words (STE limit {SENTENCE_FAIL_WORDS - 1})",
-                        sentence[:80],
-                    )
-                )
-            elif words >= SENTENCE_WARN_WORDS:
-                findings.append(
-                    Finding(
-                        path,
-                        lineno,
-                        1,
-                        Severity.ERROR if warnings_block else Severity.WARNING,
-                        Rule.SENTENCE,
-                        f"sentence has {words} words (STE limit {SENTENCE_WARN_WORDS - 1})",
-                        sentence[:80],
-                    )
-                )
-        if len(sentences) > PARAGRAPH_MAX_SENTENCES:
-            findings.append(
-                Finding(
-                    path,
-                    paragraph[0][0],
-                    1,
-                    Severity.ERROR if warnings_block else Severity.WARNING,
-                    Rule.PARAGRAPH,
-                    f"paragraph has {len(sentences)} sentences (limit {PARAGRAPH_MAX_SENTENCES})",
-                    "",
-                )
-            )
-        paragraph.clear()
-
-    carries_on = False
-    previous = 0
-    for lineno, text in segments:
-        if IGNORE.search(text):
-            continue
-
-        # A line joins the paragraph only when the line before it stops in the
-        # middle of a sentence.  This keeps a run of short label comments from
-        # reading as one long sentence.
-        #
-        # A gap in the line numbers also breaks the paragraph.  `--diff` keeps
-        # only the added lines, so two added lines that are far apart would
-        # otherwise merge into a sentence that exists nowhere.
-        if previous and lineno != previous + 1:
-            flush()
-
-        if not text.strip() or not carries_on:
-            flush()
-
-        if not text.strip():
-            continue
-
-        paragraph.append((lineno, text))
-        carries_on = ends_open(text)
-        previous = lineno
-        add_line_findings(path, lineno, text, warnings_block, findings)
-
-    flush()
+    for paragraph in _collect_paragraphs(segments):
+        lines_snapshot = list(paragraph)
+        _flush_paragraph(path, paragraph, warnings_block, findings)
+        for lineno, text in lines_snapshot:
+            add_line_findings(path, lineno, text, warnings_block, findings)
     return findings
 
 
-def add_line_findings(
-    path: str, lineno: int, text: str, warnings_block: bool, out: list[Finding]
-) -> None:
-    hits: list[Finding] = []
-
-    def add(col: int, severity: Severity, rule: str, message: str, detail: str = "") -> None:
-        hits.append(Finding(path, lineno, col, severity, rule, message, detail))
-
-    warn = Severity.ERROR if warnings_block else Severity.WARNING
-
-    for match in re.finditer(r";", text):
-        add(match.start() + 1, Severity.ERROR, Rule.SEMICOLON, "semicolon in prose")
-
-    for match in CONTRACTION_RE.finditer(text):
-        add(
+def _check_error_patterns(path: str, lineno: int, text: str, hits: list[Finding]) -> None:
+    """Check error-level inline regex patterns on one line."""
+    hits.extend(
+        Finding(
+            path,
+            lineno,
+            match.start() + 1,
+            Severity.ERROR,
+            Rule.SEMICOLON,
+            "semicolon in prose",
+            "",
+        )
+        for match in re.finditer(r";", text)
+    )
+    hits.extend(
+        Finding(
+            path,
+            lineno,
             match.start() + 1,
             Severity.ERROR,
             Rule.CONTRACTION,
             f'contraction "{match.group(0)}"',
+            "",
         )
+        for match in CONTRACTION_RE.finditer(text)
+    )
 
     for match in LATIN_RE.finditer(text):
         key = match.group(0).lower().rstrip(".")
         replacement = LATIN.get(match.group(0).lower()) or LATIN.get(key + ".") or LATIN.get(key)
-        add(
-            match.start() + 1,
-            Severity.ERROR,
-            Rule.LATIN,
-            f'Latin abbreviation "{match.group(0)}": use "{replacement}"',
+        hits.append(
+            Finding(
+                path,
+                lineno,
+                match.start() + 1,
+                Severity.ERROR,
+                Rule.LATIN,
+                f'Latin abbreviation "{match.group(0)}": use "{replacement}"',
+                "",
+            )
         )
 
     for match in WORDY_RE.finditer(text):
         replacement = WORDY[match.group(0).lower()]
         detail = f'use "{replacement}"' if replacement else "delete the phrase"
-        add(
-            match.start() + 1,
-            Severity.ERROR,
-            Rule.WORDY,
-            f'wordy phrase "{match.group(0)}"',
-            detail,
+        hits.append(
+            Finding(
+                path,
+                lineno,
+                match.start() + 1,
+                Severity.ERROR,
+                Rule.WORDY,
+                f'wordy phrase "{match.group(0)}"',
+                detail,
+            )
         )
 
-    for match in HYPE_RE.finditer(text):
-        add(
+    hits.extend(
+        Finding(
+            path,
+            lineno,
             match.start() + 1,
             Severity.ERROR,
             Rule.HYPE,
             f'praise or filler "{match.group(0)}"',
             HYPE[match.group(0).lower()],
         )
+        for match in HYPE_RE.finditer(text)
+    )
+    hits.extend(
+        Finding(
+            path,
+            lineno,
+            match.start() + 1,
+            Severity.ERROR,
+            Rule.HYPE,
+            "emoji in technical prose",
+            "",
+        )
+        for match in EMOJI_RE.finditer(text)
+    )
 
-    for match in EMOJI_RE.finditer(text):
-        add(match.start() + 1, Severity.ERROR, Rule.HYPE, "emoji in technical prose")
 
-    for match in EXPLETIVE_RE.finditer(text):
-        add(
+def add_line_findings(
+    path: str, lineno: int, text: str, warnings_block: bool, out: list[Finding]
+) -> None:
+    """Check one prose line for inline STE violations and append findings."""
+    hits: list[Finding] = []
+    _check_error_patterns(path, lineno, text, hits)
+    warn = Severity.ERROR if warnings_block else Severity.WARNING
+
+    hits.extend(
+        Finding(
+            path,
+            lineno,
             match.start() + 1,
             warn,
             Rule.EXPLETIVE,
             f'expletive "{match.group(0)}"',
+            "",
         )
-
-    for match in PASSIVE_RE.finditer(text):
-        if match.group(1).lower() in PASSIVE_STOP:
-            continue
-        add(
+        for match in EXPLETIVE_RE.finditer(text)
+    )
+    hits.extend(
+        Finding(
+            path,
+            lineno,
             match.start() + 1,
             warn,
             Rule.PASSIVE,
             f'passive voice "{match.group(0)}"',
+            "",
         )
+        for match in PASSIVE_RE.finditer(text)
+        if match.group(1).lower() not in PASSIVE_STOP
+    )
 
     out.extend(sorted(hits, key=lambda f: f.col)[:MAX_FINDINGS_PER_LINE])
 
@@ -784,6 +870,7 @@ def add_line_findings(
 
 
 def read_text(path: Path) -> str:
+    """Read UTF-8 text from path, or return an empty string on error."""
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -814,6 +901,7 @@ def tracked_files() -> list[Path]:
 
 
 def is_lintable(path: Path) -> bool:
+    """Return True if path has a prose or source-comment file extension."""
     if path.name in SKIP_FILES:
         return False
     ext = path.suffix.lower()
@@ -821,6 +909,7 @@ def is_lintable(path: Path) -> bool:
 
 
 def expand(paths: list[str]) -> list[Path]:
+    """Expand file and directory arguments into lintable file paths."""
     out: list[Path] = []
     for raw in paths:
         path = Path(raw)
@@ -862,18 +951,8 @@ def staged_added_lines() -> dict[str, set[int]]:
     return added
 
 
-def commit_findings(text: str, name: str = "<commit>") -> list[Finding]:
-    """The mechanical rules of one commit message."""
-    out: list[Finding] = []
-    lines = text.splitlines()
-    subject_index = next((i for i, line in enumerate(lines) if line.strip()), None)
-    if subject_index is None:
-        return [
-            Finding(name, 1, 1, Severity.ERROR, Rule.SUBJECT_CASE, "the message has no subject", "")
-        ]
-
-    subject = lines[subject_index].rstrip()
-    lineno = subject_index + 1
+def _check_commit_subject(name: str, lineno: int, subject: str, out: list[Finding]) -> None:
+    """Check commit message subject line rules."""
     if len(subject) > SUBJECT_HARD:
         out.append(
             Finding(
@@ -936,6 +1015,20 @@ def commit_findings(text: str, name: str = "<commit>") -> list[Finding]:
             )
         )
 
+
+def commit_findings(text: str, name: str = "<commit>") -> list[Finding]:
+    """The mechanical rules of one commit message."""
+    out: list[Finding] = []
+    lines = text.splitlines()
+    subject_index = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if subject_index is None:
+        return [
+            Finding(name, 1, 1, Severity.ERROR, Rule.SUBJECT_CASE, "the message has no subject", "")
+        ]
+
+    subject = lines[subject_index].rstrip()
+    _check_commit_subject(name, subject_index + 1, subject, out)
+
     body = lines[subject_index + 1 :]
     if any(line.strip() for line in body) and body and body[0].strip():
         out.append(
@@ -961,7 +1054,7 @@ def commit_findings(text: str, name: str = "<commit>") -> list[Finding]:
                     Severity.ERROR,
                     Rule.TRAILING_WS,
                     "trailing whitespace",
-                    stripped[-40:],
+                    stripped[-COMMIT_LINE_PREVIEW_LEN:],
                 )
             )
         if (
@@ -977,7 +1070,7 @@ def commit_findings(text: str, name: str = "<commit>") -> list[Finding]:
                     Severity.WARNING,
                     Rule.BODY_WRAP,
                     f"body line is {len(line)} characters (limit {BODY_MAX})",
-                    line[:40],
+                    line[:COMMIT_LINE_PREVIEW_LEN],
                 )
             )
     return out
@@ -1002,6 +1095,7 @@ def read_stdin(text: str | None = None) -> list[tuple[int, str]]:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse command-line options for the STE linter."""
     parser = argparse.ArgumentParser(
         prog="ste-lint.py", description="Dictionary-free ASD-STE100 prose linter."
     )
@@ -1028,65 +1122,69 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-
-    if args.list_rules:
-        for rule, text in RULE_HELP.items():
-            print(f"{rule}  {text}")
-        return 0
-
+def _lint_commit_range(commit_range: str, strict: bool) -> list[Finding]:
+    """Lint commit messages across a git commit range."""
     findings: list[Finding] = []
-    if args.stdin:
-        message = sys.stdin.read()
-        findings += commit_findings(message)
-        findings += lint_text("<stdin>", read_stdin(message), args.strict)
-    elif args.commit_log:
-        log = subprocess.run(
-            ["git", "log", "--no-merges", "--format=%H%x00%B%x00", args.commit_log],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout
-        parts = log.split("\x00")
-        for index in range(0, len(parts) - 1, 2):
-            sha = parts[index].strip()
-            if not sha:
-                continue
-            message = parts[index + 1]
-            name = sha[:12]
-            findings += commit_findings(message, name)
-            findings += lint_text(name, read_stdin(message), args.strict)
-    else:
-        if not (args.paths or args.all or args.diff):
-            print("ste-lint: give paths, or --stdin/--all/--diff", file=sys.stderr)
-            return 2
-        if args.paths:
-            targets = expand(args.paths)
-            added: dict[str, set[int]] | None = None
-        else:
-            targets = tracked_files() if args.all else []
-            added = staged_added_lines() if args.diff else None
-            if added is not None:
-                targets = [ROOT / name for name in added if is_lintable(ROOT / name)]
-                # `is_lintable` sees only the extension. The directory and
-                # file skip lists apply in every mode, so a staged file in
-                # `reference/` or a lock file never enters the prose check.
-                targets = [p for p in targets if not SKIP_DIRS.intersection(p.parts)]
-                targets = [p for p in targets if p.name not in SKIP_FILES]
-        for path in targets:
-            segments = prose_lines(path, read_text(path))
-            if added is not None:
-                key = str(path.relative_to(ROOT)) if path.is_absolute() else str(path)
-                keep = added.get(key, set())
-                segments = [(ln, text) for ln, text in segments if ln in keep]
-            try:
-                display = str(path.relative_to(ROOT))
-            except ValueError:
-                display = str(path)
-            findings += lint_text(display, segments, args.strict)
+    log = subprocess.run(
+        ["git", "log", "--no-merges", "--format=%H%x00%B%x00", commit_range],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    parts = log.split("\x00")
+    for index in range(0, len(parts) - 1, 2):
+        sha = parts[index].strip()
+        if not sha:
+            continue
+        message = parts[index + 1]
+        name = sha[:COMMIT_SHA_LEN]
+        findings += commit_findings(message, name)
+        findings += lint_text(name, read_stdin(message), strict)
+    return findings
 
+
+def _resolve_targets(args: argparse.Namespace) -> tuple[list[Path], dict[str, set[int]] | None]:
+    """Resolve target files and optional staged line map from CLI args."""
+    if args.paths:
+        return expand(args.paths), None
+    if args.all:
+        return tracked_files(), None
+    added = staged_added_lines() if args.diff else None
+    if added is None:
+        return [], None
+    targets = [ROOT / name for name in added if is_lintable(ROOT / name)]
+    # `is_lintable` sees only the extension.
+    # The directory and file skip lists apply in every mode.
+    # A staged file in `reference/` or a lock file never enters the prose check.
+    targets = [p for p in targets if not SKIP_DIRS.intersection(p.parts)]
+    targets = [p for p in targets if p.name not in SKIP_FILES]
+    return targets, added
+
+
+def _lint_file_targets(
+    targets: list[Path],
+    added: dict[str, set[int]] | None,
+    strict: bool,
+) -> list[Finding]:
+    """Lint resolved file targets and return all findings."""
+    findings: list[Finding] = []
+    for path in targets:
+        segments = prose_lines(path, read_text(path))
+        if added is not None:
+            key = str(path.relative_to(ROOT)) if path.is_absolute() else str(path)
+            keep = added.get(key, set())
+            segments = [(ln, text) for ln, text in segments if ln in keep]
+        try:
+            display = str(path.relative_to(ROOT))
+        except ValueError:
+            display = str(path)
+        findings += lint_text(display, segments, strict)
+    return findings
+
+
+def _emit_findings(findings: list[Finding], args: argparse.Namespace) -> int:
+    """Sort, print, and summarize findings, then return the exit status."""
     findings.sort(key=lambda f: (f.path, f.line, f.col, f.severity.rank))
     for finding in findings[: args.max]:
         print(finding.github() if args.github else finding.render())
@@ -1097,6 +1195,33 @@ def main(argv: list[str]) -> int:
         tail = f", {overflow} not shown" if overflow > 0 else ""
         print(f"ste-lint: {len(findings)} finding(s), {errors} error(s){tail}")
     return 1 if errors else 0
+
+
+def main(argv: list[str]) -> int:
+    """Run the STE linter CLI and return the exit status."""
+    args = parse_args(argv)
+
+    if args.list_rules:
+        for rule, text in RULE_HELP.items():
+            print(f"{rule}  {text}")
+        return 0
+
+    if args.stdin:
+        message = sys.stdin.read()
+        findings = commit_findings(message) + lint_text("<stdin>", read_stdin(message), args.strict)
+        return _emit_findings(findings, args)
+
+    if args.commit_log:
+        findings = _lint_commit_range(args.commit_log, args.strict)
+        return _emit_findings(findings, args)
+
+    if not (args.paths or args.all or args.diff):
+        print("ste-lint: give paths, or --stdin/--all/--diff", file=sys.stderr)
+        return USAGE_EXIT_CODE
+
+    targets, added = _resolve_targets(args)
+    findings = _lint_file_targets(targets, added, args.strict)
+    return _emit_findings(findings, args)
 
 
 if __name__ == "__main__":

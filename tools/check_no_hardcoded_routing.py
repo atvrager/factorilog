@@ -54,25 +54,28 @@ class HardcodedRoutingVisitor(ast.NodeVisitor):
                 f"Layout and untangling algorithms must be net-agnostic."
             )
 
+    def _check_constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, (int, float)):
+            self._check_large_number(node, node.value)
+        elif isinstance(node.value, str):
+            self._check_net_string(node, node.value)
+
+    def _check_expr(self, expr: ast.AST) -> None:
+        if isinstance(expr, ast.Constant):
+            self._check_constant(expr)
+        elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+            for elt in expr.elts:
+                if isinstance(elt, ast.Constant):
+                    self._check_constant(elt)
+
     def visit_Compare(self, node: ast.Compare) -> None:
-        # Inspect left and comparators
-        all_exprs = [node.left, *node.comparators]
-        for expr in all_exprs:
-            if isinstance(expr, ast.Constant):
-                if isinstance(expr.value, (int, float)):
-                    self._check_large_number(expr, expr.value)
-                elif isinstance(expr.value, str):
-                    self._check_net_string(expr, expr.value)
-            elif isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
-                for elt in expr.elts:
-                    if isinstance(elt, ast.Constant):
-                        if isinstance(elt.value, (int, float)):
-                            self._check_large_number(elt, elt.value)
-                        elif isinstance(elt.value, str):
-                            self._check_net_string(elt, elt.value)
+        """Inspect comparison expressions for hardcoded coordinates and net names."""
+        for expr in [node.left, *node.comparators]:
+            self._check_expr(expr)
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
+        """Inspect dictionary literals for hardcoded wire coordinate values."""
         # Inspect dict values for hardcoded wire geometries like {"x1": 179500, "y1": 674500}
         for k, v in zip(node.keys, node.values, strict=True):
             if (
@@ -85,11 +88,9 @@ class HardcodedRoutingVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        """Inspect assignment statements for hardcoded coordinates and net names."""
         if isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, (int, float)):
-                self._check_large_number(node.value, node.value.value)
-            elif isinstance(node.value.value, str):
-                self._check_net_string(node.value, node.value.value)
+            self._check_constant(node.value)
         self.generic_visit(node)
 
 

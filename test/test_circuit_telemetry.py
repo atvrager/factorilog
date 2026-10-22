@@ -265,19 +265,23 @@ END DESIGN
         ent_by_num = {e["entity_number"]: e for e in entities}
         for ent in entities:
             pos_a = (ent["position"]["x"], ent["position"]["y"])
-            for conn_port in ent.get("connections", {}).values():
-                for color, links in conn_port.items():
-                    for link in links:
-                        target_id = link.get("entity_id")
-                        if target_id and target_id in ent_by_num:
-                            target_ent = ent_by_num[target_id]
-                            pos_b = (target_ent["position"]["x"], target_ent["position"]["y"])
-                            wire_len = math.hypot(pos_a[0] - pos_b[0], pos_a[1] - pos_b[1])
-                            self.assertLessEqual(
-                                wire_len,
-                                9.0,
-                                f"Direct wire length {wire_len:.2f} between {ent['name']} and {target_ent['name']} exceeds 9.0 tiles limit",
-                            )
+            links = [
+                link
+                for conn_port in ent.get("connections", {}).values()
+                for link_list in conn_port.values()
+                for link in link_list
+            ]
+            for link in links:
+                target_ent = ent_by_num.get(link.get("entity_id"))
+                if not target_ent:
+                    continue
+                pos_b = (target_ent["position"]["x"], target_ent["position"]["y"])
+                wire_len = math.hypot(pos_a[0] - pos_b[0], pos_a[1] - pos_b[1])
+                self.assertLessEqual(
+                    wire_len,
+                    9.0,
+                    f"Direct wire length {wire_len:.2f} between {ent['name']} and {target_ent['name']} exceeds 9.0 tiles limit",
+                )
 
 
 if __name__ == "__main__":

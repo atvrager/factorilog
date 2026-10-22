@@ -6,7 +6,7 @@ Implements lane allocation for 6-tile street corridors and non-blocking
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypeAlias
 
 from foundry.entity_helpers import (
     DIRECTION_EAST,
@@ -16,6 +16,14 @@ from foundry.entity_helpers import (
     OPPOSITE_DIR,
     get_compatible_underground_belt,
 )
+
+EntityDict: TypeAlias = dict[str, Any]
+
+LANE_COUNT = 6
+MAX_LANE_INDEX = 5
+FORWARD_LANE_LIMIT = 3
+TILE_CENTER_OFFSET = 0.5
+CROSSING_HALF_SPAN = 3.0
 
 
 class ChannelLane:
@@ -30,7 +38,7 @@ class ChannelLane:
         item_type: str | None = None,
         tier: str = "fast-transport-belt",
     ) -> None:
-        if lane_index < 0 or lane_index > 5:
+        if lane_index < 0 or lane_index > MAX_LANE_INDEX:
             raise ValueError(f"lane_index must be between 0 and 5, got {lane_index}")
         if orientation not in ("H", "V"):
             raise ValueError(f"orientation must be 'H' or 'V', got {orientation}")
@@ -50,6 +58,19 @@ class ChannelLane:
     def is_fluid(self) -> bool:
         """Check whether this lane carries fluid pipe."""
         return "pipe" in self.tier
+
+    def assign(
+        self,
+        net_name: str,
+        direction: int,
+        item_type: str | None,
+        tier: str,
+    ) -> None:
+        """Assign net metadata and direction to this lane."""
+        self.net_name = net_name
+        self.direction = direction
+        self.item_type = item_type
+        self.tier = tier
 
 
 class StreetChannel:
@@ -78,13 +99,18 @@ class StreetChannel:
             fwd_dir, rev_dir = DIRECTION_SOUTH, DIRECTION_NORTH
 
         self.lanes: list[ChannelLane] = [
-            ChannelLane(i, orientation, fwd_dir if i < 3 else rev_dir, tier=default_tier)
-            for i in range(6)
+            ChannelLane(
+                i,
+                orientation,
+                fwd_dir if i < FORWARD_LANE_LIMIT else rev_dir,
+                tier=default_tier,
+            )
+            for i in range(LANE_COUNT)
         ]
 
     def get_lane_coord(self, lane_index: int) -> float:
         """Return the physical coordinate across the 6-tile corridor for a lane."""
-        return self.base_coord + lane_index + 0.5
+        return self.base_coord + lane_index + TILE_CENTER_OFFSET
 
     def get_lane(self, lane_index: int) -> ChannelLane:
         """Return lane by index."""
@@ -106,6 +132,24 @@ class StreetChannel:
         """Return all lanes matching specified direction."""
         return [lane for lane in self.lanes if lane.direction == direction]
 
+    def _find_candidate_lane(
+        self,
+        direction: int,
+        preferred_lane: int | None,
+    ) -> ChannelLane | None:
+        """Locate the first free lane matching preference or direction."""
+        if preferred_lane is not None:
+            if not (0 <= preferred_lane <= MAX_LANE_INDEX):
+                raise ValueError(f"preferred_lane must be 0..5, got {preferred_lane}")
+            if not self.lanes[preferred_lane].is_allocated:
+                return self.lanes[preferred_lane]
+
+        free_lanes = self.unallocated_lanes
+        matching = [lane for lane in free_lanes if lane.direction == direction]
+        if matching:
+            return matching[0]
+        return free_lanes[0] if free_lanes else None
+
     def allocate_lane(
         self,
         net_name: str,
@@ -122,33 +166,10 @@ class StreetChannel:
             if lane.is_allocated and lane.net_name == net_name and lane.direction == direction:
                 return lane
 
-        if preferred_lane is not None:
-            if preferred_lane < 0 or preferred_lane > 5:
-                raise ValueError(f"preferred_lane must be 0..5, got {preferred_lane}")
-            lane = self.lanes[preferred_lane]
-            if not lane.is_allocated:
-                lane.net_name = net_name
-                lane.direction = direction
-                lane.item_type = item_type
-                lane.tier = assigned_tier
-                return lane
-
-        # Find first matching unallocated lane with compatible direction
-        for lane in self.lanes:
-            if not lane.is_allocated and lane.direction == direction:
-                lane.net_name = net_name
-                lane.item_type = item_type
-                lane.tier = assigned_tier
-                return lane
-
-        # Otherwise find any unallocated lane
-        for lane in self.lanes:
-            if not lane.is_allocated:
-                lane.net_name = net_name
-                lane.direction = direction
-                lane.item_type = item_type
-                lane.tier = assigned_tier
-                return lane
+        candidate = self._find_candidate_lane(direction, preferred_lane)
+        if candidate is not None:
+            candidate.assign(net_name, direction, item_type, assigned_tier)
+            return candidate
 
         raise RuntimeError(f"Street channel {self.channel_id} has no free lanes for net {net_name}")
 
@@ -164,42 +185,149 @@ class StreetChannel:
         for i in range(len(self.lanes)):
             self.free_lane(i)
 
+    def _make_lane_tile_entity(self, lane: ChannelLane, c: int) -> EntityDict:
+        """Build one belt or pipe entity at tile index c along lane."""
+        fixed_coord = self.get_lane_coord(lane.lane_index)
+        tile_center = c + TILE_CENTER_OFFSET
+        pos = (
+            {"x": tile_center, "y": fixed_coord}
+            if self.orientation == "H"
+            else {"x": fixed_coord, "y": tile_center}
+        )
+        if lane.is_fluid:
+            return {"name": "pipe", "position": pos}
+        return {
+            "name": lane.tier,
+            "position": pos,
+            "direction": lane.direction,
+        }
+
     def emit_straight_belts(
         self,
         start_coord: float | None = None,
         end_coord: float | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[EntityDict]:
         """Emit continuous surface transport belts along allocated lanes."""
-        entities: list[dict[str, Any]] = []
+        entities: list[EntityDict] = []
         c_start = int(self.span_min if start_coord is None else start_coord)
         c_end = int(self.span_max if end_coord is None else end_coord)
 
         for lane in self.lanes:
             if not lane.is_allocated:
                 continue
-
-            fixed_coord = self.get_lane_coord(lane.lane_index)
-            is_pipe = lane.is_fluid
-
-            for c in range(c_start, c_end):
-                tile_center = c + 0.5
-                if self.orientation == "H":
-                    pos = {"x": tile_center, "y": fixed_coord}
-                else:
-                    pos = {"x": fixed_coord, "y": tile_center}
-
-                if is_pipe:
-                    entities.append({"name": "pipe", "position": pos})
-                else:
-                    entities.append(
-                        {
-                            "name": lane.tier,
-                            "position": pos,
-                            "direction": lane.direction,
-                        }
-                    )
+            entities.extend(self._make_lane_tile_entity(lane, c) for c in range(c_start, c_end))
 
         return entities
+
+
+def _emit_vertical_lane_span(
+    lane: ChannelLane,
+    vx: float,
+    y_min: float,
+    y_max: float,
+) -> list[EntityDict]:
+    """Emit straight vertical crossing entities for one allocated lane."""
+    if lane.is_fluid:
+        in_y = (
+            y_min - TILE_CENTER_OFFSET
+            if lane.direction == DIRECTION_SOUTH
+            else y_max + TILE_CENTER_OFFSET
+        )
+        out_y = (
+            y_max + TILE_CENTER_OFFSET
+            if lane.direction == DIRECTION_SOUTH
+            else y_min - TILE_CENTER_OFFSET
+        )
+        return [
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": vx, "y": in_y},
+                "direction": OPPOSITE_DIR[lane.direction],
+            },
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": vx, "y": out_y},
+                "direction": lane.direction,
+            },
+        ]
+
+    return [
+        {
+            "name": lane.tier,
+            "position": {"x": vx, "y": y_min + step + TILE_CENTER_OFFSET},
+            "direction": lane.direction,
+        }
+        for step in range(LANE_COUNT)
+    ]
+
+
+def _emit_horizontal_lane_span(
+    lane: ChannelLane,
+    hy: float,
+    x_min: float,
+    x_max: float,
+) -> list[EntityDict]:
+    """Emit straight horizontal underground crossing entities for one allocated lane."""
+    in_x = (
+        x_min - TILE_CENTER_OFFSET
+        if lane.direction == DIRECTION_EAST
+        else x_max + TILE_CENTER_OFFSET
+    )
+    out_x = (
+        x_max + TILE_CENTER_OFFSET
+        if lane.direction == DIRECTION_EAST
+        else x_min - TILE_CENTER_OFFSET
+    )
+    if lane.is_fluid:
+        return [
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": in_x, "y": hy},
+                "direction": OPPOSITE_DIR[lane.direction],
+            },
+            {
+                "name": "pipe-to-ground",
+                "position": {"x": out_x, "y": hy},
+                "direction": lane.direction,
+            },
+        ]
+
+    crossing_gap = round(x_max - x_min)
+    candidate_ug = lane.tier.replace("transport-belt", "underground-belt")
+    ug_tier = get_compatible_underground_belt(min_span=crossing_gap, preferred_name=candidate_ug)
+    return [
+        {
+            "name": ug_tier,
+            "type": "input",
+            "position": {"x": in_x, "y": hy},
+            "direction": lane.direction,
+        },
+        {
+            "name": ug_tier,
+            "type": "output",
+            "position": {"x": out_x, "y": hy},
+            "direction": lane.direction,
+        },
+    ]
+
+
+def _emit_linear_belt_run(
+    tier: str,
+    direction: int,
+    fixed_coord: float,
+    start_val: float,
+    limit_val: float,
+    step_val: float,
+    horizontal: bool,
+) -> list[EntityDict]:
+    """Emit a 1D run of belt tiles along X or Y until reaching limit_val."""
+    result: list[EntityDict] = []
+    cur = start_val
+    while (cur < limit_val) if step_val > 0 else (cur > limit_val):
+        pos = {"x": cur, "y": fixed_coord} if horizontal else {"x": fixed_coord, "y": cur}
+        result.append({"name": tier, "position": pos, "direction": direction})
+        cur += step_val
+    return result
 
 
 class RouterIntersection:
@@ -269,281 +397,190 @@ class RouterIntersection:
             )
         )
 
-    def emit_intersection_entities(self) -> list[dict[str, Any]]:
-        """Emit all physical entities for the 4-way crossroad."""
-        entities: list[dict[str, Any]] = []
+    def _emit_h_to_v_turn(
+        self,
+        from_l: int,
+        to_l: int,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ) -> list[EntityDict]:
+        """Emit belt tiles for a horizontal-to-vertical 90-degree turn."""
+        h_lane = self.h_channel.lanes[from_l]
+        v_lane = self.v_channel.lanes[to_l]
+        tx = self.v_channel.get_lane_coord(to_l)
+        ty = self.h_channel.get_lane_coord(from_l)
+        entities: list[EntityDict] = []
 
-        # Crossing bounds: [center_x - 3, center_x + 3] x [center_y - 3, center_y + 3]
-        x_min = self.center_x - 3.0
-        x_max = self.center_x + 3.0
-        y_min = self.center_y - 3.0
-        y_max = self.center_y + 3.0
+        if h_lane.direction == DIRECTION_EAST:
+            entities.extend(
+                _emit_linear_belt_run(
+                    h_lane.tier, DIRECTION_EAST, ty, x_min + TILE_CENTER_OFFSET, tx, 1.0, True
+                )
+            )
+        elif h_lane.direction == DIRECTION_WEST:
+            entities.extend(
+                _emit_linear_belt_run(
+                    h_lane.tier, DIRECTION_WEST, ty, x_max - TILE_CENTER_OFFSET, tx, -1.0, True
+                )
+            )
 
-        # Set of lanes participating in 90-degree turns
-        h_turning_lanes = {from_l for (o, from_l, _, _) in self.turns if o == "H"} | {
+        entities.append(
+            {"name": v_lane.tier, "position": {"x": tx, "y": ty}, "direction": v_lane.direction}
+        )
+
+        if v_lane.direction == DIRECTION_SOUTH:
+            entities.extend(
+                _emit_linear_belt_run(v_lane.tier, DIRECTION_SOUTH, tx, ty + 1.0, y_max, 1.0, False)
+            )
+        elif v_lane.direction == DIRECTION_NORTH:
+            entities.extend(
+                _emit_linear_belt_run(
+                    v_lane.tier, DIRECTION_NORTH, tx, ty - 1.0, y_min, -1.0, False
+                )
+            )
+        return entities
+
+    def _emit_v_to_h_turn(
+        self,
+        from_l: int,
+        to_l: int,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ) -> list[EntityDict]:
+        """Emit belt tiles for a vertical-to-horizontal 90-degree turn."""
+        v_lane = self.v_channel.lanes[from_l]
+        h_lane = self.h_channel.lanes[to_l]
+        tx = self.v_channel.get_lane_coord(from_l)
+        ty = self.h_channel.get_lane_coord(to_l)
+        entities: list[EntityDict] = []
+
+        if v_lane.direction == DIRECTION_SOUTH:
+            entities.extend(
+                _emit_linear_belt_run(
+                    v_lane.tier, DIRECTION_SOUTH, tx, y_min + TILE_CENTER_OFFSET, ty, 1.0, False
+                )
+            )
+        elif v_lane.direction == DIRECTION_NORTH:
+            entities.extend(
+                _emit_linear_belt_run(
+                    v_lane.tier, DIRECTION_NORTH, tx, y_max - TILE_CENTER_OFFSET, ty, -1.0, False
+                )
+            )
+
+        entities.append(
+            {"name": h_lane.tier, "position": {"x": tx, "y": ty}, "direction": h_lane.direction}
+        )
+
+        if h_lane.direction == DIRECTION_EAST:
+            entities.extend(
+                _emit_linear_belt_run(h_lane.tier, DIRECTION_EAST, ty, tx + 1.0, x_max, 1.0, True)
+            )
+        elif h_lane.direction == DIRECTION_WEST:
+            entities.extend(
+                _emit_linear_belt_run(h_lane.tier, DIRECTION_WEST, ty, tx - 1.0, x_min, -1.0, True)
+            )
+        return entities
+
+    def _emit_switch_entity(
+        self,
+        orient: str,
+        la: int,
+        lb: int,
+        filter_item: str | None,
+        approach_offset: int,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ) -> EntityDict:
+        """Emit one 2x2 splitter switch entity on a channel approach."""
+        min_lane = min(la, lb)
+        if orient == "H":
+            y_center = self.h_channel.base_coord + min_lane + 1.0
+            lane = self.h_channel.lanes[la]
+            x_pos = (
+                (x_min - TILE_CENTER_OFFSET - approach_offset)
+                if lane.direction == DIRECTION_EAST
+                else (x_max + TILE_CENTER_OFFSET + approach_offset)
+            )
+            pos = {"x": x_pos, "y": y_center}
+        else:
+            x_center = self.v_channel.base_coord + min_lane + 1.0
+            lane = self.v_channel.lanes[la]
+            y_pos = (
+                (y_min - TILE_CENTER_OFFSET - approach_offset)
+                if lane.direction == DIRECTION_SOUTH
+                else (y_max + TILE_CENTER_OFFSET + approach_offset)
+            )
+            pos = {"x": x_center, "y": y_pos}
+
+        splitter_ent: EntityDict = {
+            "name": lane.tier.replace("transport-belt", "splitter"),
+            "position": pos,
+            "direction": lane.direction,
+        }
+        if filter_item:
+            splitter_ent["filter"] = filter_item
+        return splitter_ent
+
+    def _turning_lane_sets(self) -> tuple[set[int], set[int]]:
+        """Collect horizontal and vertical lane indices involved in turns."""
+        h_turning = {from_l for (o, from_l, _, _) in self.turns if o == "H"} | {
             to_l for (_, _, o, to_l) in self.turns if o == "H"
         }
-        v_turning_lanes = {from_l for (o, from_l, _, _) in self.turns if o == "V"} | {
+        v_turning = {from_l for (o, from_l, _, _) in self.turns if o == "V"} | {
             to_l for (_, _, o, to_l) in self.turns if o == "V"
         }
+        return h_turning, v_turning
 
-        # 1. Straight Vertical (M2) traffic across the 6x6 crossing zone
-        for lane in self.v_channel.lanes:
-            if not lane.is_allocated or lane.lane_index in v_turning_lanes:
-                continue
-
-            vx = self.v_channel.get_lane_coord(lane.lane_index)
-            is_pipe = lane.is_fluid
-
-            if is_pipe:
-                # Vertical pipe uses pipe-to-ground across crossing
-                in_y = y_min - 0.5 if lane.direction == DIRECTION_SOUTH else y_max + 0.5
-                out_y = y_max + 0.5 if lane.direction == DIRECTION_SOUTH else y_min - 0.5
-                entities.append(
-                    {
-                        "name": "pipe-to-ground",
-                        "position": {"x": vx, "y": in_y},
-                        "direction": OPPOSITE_DIR[lane.direction],
-                    }
-                )
-                entities.append(
-                    {
-                        "name": "pipe-to-ground",
-                        "position": {"x": vx, "y": out_y},
-                        "direction": lane.direction,
-                    }
-                )
-            else:
-                for step in range(6):
-                    cur_y = y_min + step + 0.5
-                    entities.append(
-                        {
-                            "name": lane.tier,
-                            "position": {"x": vx, "y": cur_y},
-                            "direction": lane.direction,
-                        }
-                    )
-
-        # 2. Straight Horizontal (M1) traffic dives underground across vertical traffic
-        for lane in self.h_channel.lanes:
-            if not lane.is_allocated or lane.lane_index in h_turning_lanes:
-                continue
-
-            hy = self.h_channel.get_lane_coord(lane.lane_index)
-            is_pipe = lane.is_fluid
-
-            if is_pipe:
-                # Pipe-to-ground spanning the 6-tile street crossing
-                in_x = x_min - 0.5 if lane.direction == DIRECTION_EAST else x_max + 0.5
-                out_x = x_max + 0.5 if lane.direction == DIRECTION_EAST else x_min - 0.5
-                entities.append(
-                    {
-                        "name": "pipe-to-ground",
-                        "position": {"x": in_x, "y": hy},
-                        "direction": OPPOSITE_DIR[lane.direction],
-                    }
-                )
-                entities.append(
-                    {
-                        "name": "pipe-to-ground",
-                        "position": {"x": out_x, "y": hy},
-                        "direction": lane.direction,
-                    }
-                )
-            else:
-                # Underground belt pair spanning the street crossing
-                crossing_gap = round(x_max - x_min)
-                candidate_ug = lane.tier.replace("transport-belt", "underground-belt")
-                ug_tier = get_compatible_underground_belt(
-                    min_span=crossing_gap, preferred_name=candidate_ug
-                )
-
-                in_x = x_min - 0.5 if lane.direction == DIRECTION_EAST else x_max + 0.5
-                out_x = x_max + 0.5 if lane.direction == DIRECTION_EAST else x_min - 0.5
-                entities.append(
-                    {
-                        "name": ug_tier,
-                        "type": "input",
-                        "position": {"x": in_x, "y": hy},
-                        "direction": lane.direction,
-                    }
-                )
-                entities.append(
-                    {
-                        "name": ug_tier,
-                        "type": "output",
-                        "position": {"x": out_x, "y": hy},
-                        "direction": lane.direction,
-                    }
-                )
-
-        # 3. Turning connections
+    def _emit_turn_entities(
+        self,
+        x_min: float,
+        x_max: float,
+        y_min: float,
+        y_max: float,
+    ) -> list[EntityDict]:
+        """Emit all turning belt segments inside the crossing zone."""
+        result: list[EntityDict] = []
         for from_o, from_l, to_o, to_l in self.turns:
             if from_o == "H" and to_o == "V":
-                h_lane = self.h_channel.lanes[from_l]
-                v_lane = self.v_channel.lanes[to_l]
-                tx = self.v_channel.get_lane_coord(to_l)
-                ty = self.h_channel.get_lane_coord(from_l)
-
-                # Horizontal approach segment inside crossing zone
-                if h_lane.direction == DIRECTION_EAST:
-                    x_cur = x_min + 0.5
-                    while x_cur < tx:
-                        entities.append(
-                            {
-                                "name": h_lane.tier,
-                                "position": {"x": x_cur, "y": ty},
-                                "direction": DIRECTION_EAST,
-                            }
-                        )
-                        x_cur += 1.0
-                elif h_lane.direction == DIRECTION_WEST:
-                    x_cur = x_max - 0.5
-                    while x_cur > tx:
-                        entities.append(
-                            {
-                                "name": h_lane.tier,
-                                "position": {"x": x_cur, "y": ty},
-                                "direction": DIRECTION_WEST,
-                            }
-                        )
-                        x_cur -= 1.0
-
-                # Corner tile at (tx, ty)
-                entities.append(
-                    {
-                        "name": v_lane.tier,
-                        "position": {"x": tx, "y": ty},
-                        "direction": v_lane.direction,
-                    }
-                )
-
-                # Vertical exit segment inside crossing zone
-                if v_lane.direction == DIRECTION_SOUTH:
-                    y_cur = ty + 1.0
-                    while y_cur < y_max:
-                        entities.append(
-                            {
-                                "name": v_lane.tier,
-                                "position": {"x": tx, "y": y_cur},
-                                "direction": DIRECTION_SOUTH,
-                            }
-                        )
-                        y_cur += 1.0
-                elif v_lane.direction == DIRECTION_NORTH:
-                    y_cur = ty - 1.0
-                    while y_cur > y_min:
-                        entities.append(
-                            {
-                                "name": v_lane.tier,
-                                "position": {"x": tx, "y": y_cur},
-                                "direction": DIRECTION_NORTH,
-                            }
-                        )
-                        y_cur -= 1.0
-
+                result.extend(self._emit_h_to_v_turn(from_l, to_l, x_min, x_max, y_min, y_max))
             elif from_o == "V" and to_o == "H":
-                v_lane = self.v_channel.lanes[from_l]
-                h_lane = self.h_channel.lanes[to_l]
-                tx = self.v_channel.get_lane_coord(from_l)
-                ty = self.h_channel.get_lane_coord(to_l)
+                result.extend(self._emit_v_to_h_turn(from_l, to_l, x_min, x_max, y_min, y_max))
+        return result
 
-                # Vertical approach segment inside crossing zone
-                if v_lane.direction == DIRECTION_SOUTH:
-                    y_cur = y_min + 0.5
-                    while y_cur < ty:
-                        entities.append(
-                            {
-                                "name": v_lane.tier,
-                                "position": {"x": tx, "y": y_cur},
-                                "direction": DIRECTION_SOUTH,
-                            }
-                        )
-                        y_cur += 1.0
-                elif v_lane.direction == DIRECTION_NORTH:
-                    y_cur = y_max - 0.5
-                    while y_cur > ty:
-                        entities.append(
-                            {
-                                "name": v_lane.tier,
-                                "position": {"x": tx, "y": y_cur},
-                                "direction": DIRECTION_NORTH,
-                            }
-                        )
-                        y_cur -= 1.0
+    def emit_intersection_entities(self) -> list[EntityDict]:
+        """Emit all physical entities for the 4-way crossroad."""
+        entities: list[EntityDict] = []
 
-                # Corner tile at (tx, ty)
-                entities.append(
-                    {
-                        "name": h_lane.tier,
-                        "position": {"x": tx, "y": ty},
-                        "direction": h_lane.direction,
-                    }
-                )
+        x_min = self.center_x - CROSSING_HALF_SPAN
+        x_max = self.center_x + CROSSING_HALF_SPAN
+        y_min = self.center_y - CROSSING_HALF_SPAN
+        y_max = self.center_y + CROSSING_HALF_SPAN
 
-                # Horizontal exit segment inside crossing zone
-                if h_lane.direction == DIRECTION_EAST:
-                    x_cur = tx + 1.0
-                    while x_cur < x_max:
-                        entities.append(
-                            {
-                                "name": h_lane.tier,
-                                "position": {"x": x_cur, "y": ty},
-                                "direction": DIRECTION_EAST,
-                            }
-                        )
-                        x_cur += 1.0
-                elif h_lane.direction == DIRECTION_WEST:
-                    x_cur = tx - 1.0
-                    while x_cur > x_min:
-                        entities.append(
-                            {
-                                "name": h_lane.tier,
-                                "position": {"x": x_cur, "y": ty},
-                                "direction": DIRECTION_WEST,
-                            }
-                        )
-                        x_cur -= 1.0
+        h_turning_lanes, v_turning_lanes = self._turning_lane_sets()
 
-        # 4. Lane switches (2x2 splitters on approaches)
+        for lane in self.v_channel.allocated_lanes:
+            if lane.lane_index not in v_turning_lanes:
+                vx = self.v_channel.get_lane_coord(lane.lane_index)
+                entities.extend(_emit_vertical_lane_span(lane, vx, y_min, y_max))
+
+        for lane in self.h_channel.allocated_lanes:
+            if lane.lane_index not in h_turning_lanes:
+                hy = self.h_channel.get_lane_coord(lane.lane_index)
+                entities.extend(_emit_horizontal_lane_span(lane, hy, x_min, x_max))
+
+        entities.extend(self._emit_turn_entities(x_min, x_max, y_min, y_max))
+
         for orient, la, lb, filter_item, approach_offset in self.switches:
-            if orient == "H":
-                min_lane = min(la, lb)
-                y_center = self.h_channel.base_coord + min_lane + 1.0
-                lane = self.h_channel.lanes[la]
-                # Splitter placed on approach before the underground entrance
-                x_pos = (
-                    (x_min - 0.5 - approach_offset)
-                    if lane.direction == DIRECTION_EAST
-                    else (x_max + 0.5 + approach_offset)
+            entities.append(
+                self._emit_switch_entity(
+                    orient, la, lb, filter_item, approach_offset, x_min, x_max, y_min, y_max
                 )
-                splitter_name = lane.tier.replace("transport-belt", "splitter")
-                splitter_ent: dict[str, Any] = {
-                    "name": splitter_name,
-                    "position": {"x": x_pos, "y": y_center},
-                    "direction": lane.direction,
-                }
-                if filter_item:
-                    splitter_ent["filter"] = filter_item
-                entities.append(splitter_ent)
-            else:
-                min_lane = min(la, lb)
-                x_center = self.v_channel.base_coord + min_lane + 1.0
-                lane = self.v_channel.lanes[la]
-                # Splitter placed on approach before the surface entrance
-                y_pos = (
-                    (y_min - 0.5 - approach_offset)
-                    if lane.direction == DIRECTION_SOUTH
-                    else (y_max + 0.5 + approach_offset)
-                )
-                splitter_name = lane.tier.replace("transport-belt", "splitter")
-                splitter_ent = {
-                    "name": splitter_name,
-                    "position": {"x": x_center, "y": y_pos},
-                    "direction": lane.direction,
-                }
-                if filter_item:
-                    splitter_ent["filter"] = filter_item
-                entities.append(splitter_ent)
+            )
 
         return entities

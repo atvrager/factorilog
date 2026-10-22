@@ -41,6 +41,9 @@ INSERTER_OFFSETS: dict[int, tuple[tuple[int, int], tuple[int, int]]] = {
     DIRECTION_WEST: ((-1, 0), (1, 0)),
 }
 
+YELLOW_BELT_THROUGHPUT = 15.0
+FAST_BELT_THROUGHPUT = 30.0
+
 
 class PatternType(enum.Enum):
     """Enumeration of legal physical belt routing patterns."""
@@ -78,7 +81,7 @@ class BeltPattern:
 def get_straight_pattern(direction: int, belt_name: str = "transport-belt") -> BeltPattern:
     """Create a straight belt pattern for a cardinal direction."""
     dx, dy = DIR_STEPS[direction]
-    speed_factor = 15.0 if belt_name == "transport-belt" else 30.0
+    speed_factor = YELLOW_BELT_THROUGHPUT if belt_name == "transport-belt" else FAST_BELT_THROUGHPUT
     return BeltPattern(
         pattern_type=PatternType.STRAIGHT,
         direction=direction,
@@ -93,7 +96,7 @@ def get_turn_pattern(in_dir: int, out_dir: int, belt_name: str = "transport-belt
     """Create a 90-degree corner turn pattern."""
     in_dx, in_dy = DIR_STEPS[in_dir]
     out_dx, out_dy = DIR_STEPS[out_dir]
-    speed_factor = 15.0 if belt_name == "transport-belt" else 30.0
+    speed_factor = YELLOW_BELT_THROUGHPUT if belt_name == "transport-belt" else FAST_BELT_THROUGHPUT
     return BeltPattern(
         pattern_type=PatternType.TURN,
         direction=out_dir,
@@ -110,7 +113,7 @@ def get_sideload_pattern(
     """Create a sideloading pattern onto a straight belt."""
     main_dx, main_dy = DIR_STEPS[main_dir]
     side_dx, side_dy = DIR_STEPS[side_dir]
-    speed_factor = 15.0 if belt_name == "transport-belt" else 30.0
+    speed_factor = YELLOW_BELT_THROUGHPUT if belt_name == "transport-belt" else FAST_BELT_THROUGHPUT
     return BeltPattern(
         pattern_type=PatternType.SIDELOAD,
         direction=main_dir,
@@ -128,7 +131,7 @@ def get_dual_merge_pattern(
     l_dx, l_dy = DIR_STEPS[left_in_dir]
     r_dx, r_dy = DIR_STEPS[right_in_dir]
     out_dx, out_dy = DIR_STEPS[out_dir]
-    speed_factor = 15.0 if belt_name == "transport-belt" else 30.0
+    speed_factor = YELLOW_BELT_THROUGHPUT if belt_name == "transport-belt" else FAST_BELT_THROUGHPUT
     return BeltPattern(
         pattern_type=PatternType.DUAL_MERGE,
         direction=out_dir,
@@ -144,7 +147,9 @@ def get_underground_pair_pattern(
 ) -> BeltPattern:
     """Create an underground pair pattern with entrance and exit hoods."""
     dx, dy = DIR_STEPS[direction]
-    speed_factor = 15.0 if tier_name == "underground-belt" else 30.0
+    speed_factor = (
+        YELLOW_BELT_THROUGHPUT if tier_name == "underground-belt" else FAST_BELT_THROUGHPUT
+    )
     return BeltPattern(
         pattern_type=PatternType.UNDERGROUND_PAIR,
         direction=direction,

@@ -116,7 +116,7 @@ BAY_CORE_MIN_RY = 17
 BAY_PORT_MIN_LAT = 19
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DrcViolation:
     """A single physical design rule violation."""
 
@@ -128,7 +128,7 @@ class DrcViolation:
     severity: str = "ERROR"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ChassisGeom:
     """Runtime geometry parameters for chassis matrix discipline checks."""
 
@@ -967,12 +967,11 @@ class BeltDrcChecker:
             if curr in known_reaching_sink:
                 reached_from = curr
                 break
-            ents = tile_map.get(curr, ())
-            if not ents:
+            if not tile_map.get(curr):
                 dead_end_tile = curr
                 continue
             reached_from = self._expand_sink_search_tile(
-                curr, ents, known_reaching_sink, visited, parent_tile, queue, tile_map
+                curr, known_reaching_sink, visited, parent_tile, queue, tile_map
             )
 
         if reached_from is not None:
@@ -986,7 +985,6 @@ class BeltDrcChecker:
     def _expand_sink_search_tile(
         self,
         curr: tuple[int, int],
-        ents: Sequence[EntityRecord],
         known_reaching_sink: set[tuple[int, int]],
         visited: set[tuple[int, int]],
         parent_tile: dict[tuple[int, int], tuple[int, int]],
@@ -994,7 +992,7 @@ class BeltDrcChecker:
         tile_map: TileMap,
     ) -> tuple[int, int] | None:
         """Expand one tile during downstream sink search; return reaching tile if sink hit."""
-        for e in ents:
+        for e in tile_map.get(curr, ()):
             if self._belt_directly_hits_sink(curr, e, known_reaching_sink):
                 return curr
             for parent, nxt in self._next_transport_tiles(curr, e, tile_map):
@@ -2064,10 +2062,25 @@ class BeltDrcChecker:
         heading = int(getattr(port, "heading", DIRECTION_NORTH))
         return any(_ent_name(e) == "transport-belt" and _ent_dir(e) == heading for e in core_ents)
 
+    @staticmethod
+    def _index_mst_routes_by_prefix(
+        router_routes: Mapping[str, object] | None,
+    ) -> dict[str, list[tuple[str, object]]]:
+        """Group highway MST routes by their shared prefix for O(1) lookup."""
+        by_prefix: dict[str, list[tuple[str, object]]] = {}
+        if not router_routes:
+            return by_prefix
+        for k_name, k_route in router_routes.items():
+            if "_hwy_mst_" in k_name:
+                prefix = k_name.rsplit("_hwy_mst_", 1)[0] + "_hwy_mst_"
+                by_prefix.setdefault(prefix, []).append((k_name, k_route))
+        return by_prefix
+
     def _check_floorplan_route_discipline(
         self,
         route_objs: Sequence[object],
         router_routes: Mapping[str, object] | None,
+        mst_by_prefix: Mapping[str, Sequence[tuple[str, object]]],
         checked_hwy_names: set[str],
         geom: _ChassisGeom,
     ) -> list[DrcViolation]:
@@ -2084,7 +2097,14 @@ class BeltDrcChecker:
                 d_pos = tuple(getattr(d_port, "channel_pos", (0, 0)))
                 violations.extend(
                     self._check_route_target_pair(
-                        r_name, s_pos, s_seg, d_pos, router_routes, checked_hwy_names, geom
+                        r_name,
+                        s_pos,
+                        s_seg,
+                        d_pos,
+                        router_routes,
+                        mst_by_prefix,
+                        checked_hwy_names,
+                        geom,
                     )
                 )
         return violations
@@ -2096,6 +2116,7 @@ class BeltDrcChecker:
         s_seg: tuple[str, int, int] | None,
         d_pos: tuple[int, int],
         router_routes: Mapping[str, object] | None,
+        mst_by_prefix: Mapping[str, Sequence[tuple[str, object]]],
         checked_hwy_names: set[str],
         geom: _ChassisGeom,
     ) -> list[DrcViolation]:
@@ -2117,7 +2138,14 @@ class BeltDrcChecker:
             )
         for cand_name in (r_name, f"{r_name}_hwy"):
             v = self._check_single_highway_switchbox(
-                cand_name, s_pos, d_pos, "Highway trunk", router_routes, checked_hwy_names, geom
+                cand_name,
+                s_pos,
+                d_pos,
+                "Highway trunk",
+                router_routes,
+                mst_by_prefix,
+                checked_hwy_names,
+                geom,
             )
             if v is not None:
                 violations.append(v)
@@ -2128,6 +2156,7 @@ class BeltDrcChecker:
         highway_specs: Sequence[object],
         port_channel_coords: set[tuple[int, int]],
         router_routes: Mapping[str, object] | None,
+        mst_by_prefix: Mapping[str, Sequence[tuple[str, object]]],
         checked_hwy_names: set[str],
         geom: _ChassisGeom,
     ) -> list[DrcViolation]:
@@ -2155,7 +2184,14 @@ class BeltDrcChecker:
                     )
                 )
             v = self._check_single_highway_switchbox(
-                h_name, s_pos, d_pos, "Highway net", router_routes, checked_hwy_names, geom
+                h_name,
+                s_pos,
+                d_pos,
+                "Highway net",
+                router_routes,
+                mst_by_prefix,
+                checked_hwy_names,
+                geom,
             )
             if v is not None:
                 violations.append(v)
@@ -2168,6 +2204,7 @@ class BeltDrcChecker:
         d_pos: tuple[int, int],
         label: str,
         router_routes: Mapping[str, object] | None,
+        mst_by_prefix: Mapping[str, Sequence[tuple[str, object]]],
         checked_hwy_names: set[str],
         geom: _ChassisGeom,
     ) -> DrcViolation | None:
@@ -2182,8 +2219,8 @@ class BeltDrcChecker:
             and not any(self._in_switchbox(tx, ty, geom) for tx, ty in coords)
         ):
             mst_prefix = h_name.rsplit("_hwy_mst_", 1)[0] + "_hwy_mst_"
-            for k_name, k_route in router_routes.items():
-                if k_name != h_name and k_name.startswith(mst_prefix):
+            for k_name, k_route in mst_by_prefix.get(mst_prefix, ()):
+                if k_name != h_name:
                     coords.extend(self._expand_route_coords(k_route))
         if coords and not any(self._in_switchbox(tx, ty, geom) for tx, ty in coords):
             return DrcViolation(
@@ -2457,17 +2494,23 @@ class BeltDrcChecker:
         )
 
         checked_hwy_names: set[str] = set()
+        mst_by_prefix = self._index_mst_routes_by_prefix(router_routes)
         fp_routes = getattr(macro_floorplan, "routes", {})
         route_objs = list(fp_routes.values()) if isinstance(fp_routes, Mapping) else list(fp_routes)
         violations.extend(
             self._check_floorplan_route_discipline(
-                route_objs, router_routes, checked_hwy_names, geom
+                route_objs, router_routes, mst_by_prefix, checked_hwy_names, geom
             )
         )
         if highway_specs:
             violations.extend(
                 self._check_highway_spec_discipline(
-                    highway_specs, port_channel_coords, router_routes, checked_hwy_names, geom
+                    highway_specs,
+                    port_channel_coords,
+                    router_routes,
+                    mst_by_prefix,
+                    checked_hwy_names,
+                    geom,
                 )
             )
         if def_data:

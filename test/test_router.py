@@ -446,61 +446,40 @@ class TestDualLaneMazeRouter(unittest.TestCase):
 
             raise
 
-    def test_military_science_factory(self) -> None:
-        """Route the military science factory and diagnose DRC violations."""
-        def_path = None
-        netlist_path = None
-        for base in [
+    @staticmethod
+    def _find_science_artifacts(stem: str) -> tuple[Path | None, Path | None]:
+        """Locate DEF and netlist JSON artifacts for a science factory."""
+        for base in (
             Path("flow"),
             Path("bazel-bin/flow"),
             Path(__file__).parent.parent / "flow",
             Path(__file__).parent.parent / "bazel-bin/flow",
-        ]:
-            c_def = (
-                base / "military_science.def"
-                if base.name != "flow"
-                else base.parent / "flow/military_science.def"
-            )
-            c_net = (
-                base / "military_science_netlist.json"
-                if base.name != "flow"
-                else base.parent / "flow/military_science_netlist.json"
-            )
+        ):
+            flow_dir = base if base.name == "flow" else base.parent / "flow"
+            c_def = flow_dir / f"{stem}.def"
+            c_net = flow_dir / f"{stem}_netlist.json"
             if c_def.exists() and c_net.exists():
-                def_path = c_def
-                netlist_path = c_net
-                break
+                return c_def, c_net
+        return None, None
 
+    def test_military_science_factory(self) -> None:
+        """Route the military science factory and diagnose DRC violations."""
+        def_path, netlist_path = self._find_science_artifacts("military_science")
         if not def_path or not netlist_path:
-            self.skipTest(f"military_science build artifacts not present")
+            self.skipTest("military_science build artifacts not present")
 
-        from foundry.def2bp import (
-            parse_def,
-            build_entities,
-            place_components,
-            route_with_maze_router,
-        )
+        from foundry.def2bp import build_entities, parse_def
 
         def_data = parse_def(def_path.read_text())
         netlist_data = json.loads(netlist_path.read_text())
 
-        entities, wires = build_entities(
+        entities, _wires = build_entities(
             def_data, netlist_data, strict_drc=False, use_maze_router=True, engine=self.engine
         )
         placement = def_data["_placement"]
 
         failed_nets = [n for n, r in placement.router_routes.items() if not r.is_success]
         self.assertEqual(len(failed_nets), 0, f"Failed nets in military_science: {failed_nets}")
-
-        scale = 1.0 / float(def_data.get("units", 1000))
-        sys.stderr.write("\nENTITIES AROUND (170.5, 197.5):\n")
-        for e in entities:
-            pos = e.get("position", {})
-            ex, ey = float(pos.get("x", 0)), float(pos.get("y", 0))
-            if 168 <= ex <= 173 and 195 <= ey <= 200:
-                sys.stderr.write(
-                    f"  {e.get('name')} at ({ex}, {ey}) dir={e.get('direction')} type={e.get('type')}\n"
-                )
         self.assertGreater(len(entities), 0)
 
     def test_automation_science_factory(self) -> None:

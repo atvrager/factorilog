@@ -31,6 +31,24 @@ TARGET_SYMBOL_PATTERNS = {
     "splitter_resolve": r"^SplitterLogic::resolveSplitting\(SplitterDirection, TransportLine&, TransportLine&, TransportLine&, TransportLine&, MapTick, bool&, bool\)$",
 }
 
+COMPILED_SYMBOL_PATTERNS = {k: re.compile(p) for k, p in TARGET_SYMBOL_PATTERNS.items()}
+NM_SYMBOL_PARTS = 3
+HEX_BASE = 16
+
+
+def _parse_nm_output(stdout: str) -> dict[str, int]:
+    """Parse demangled nm output lines into a symbol-to-address map."""
+    raw_map: dict[str, int] = {}
+    for line in stdout.splitlines():
+        parts = line.strip().split(" ", 2)
+        if len(parts) == NM_SYMBOL_PARTS:
+            addr_hex, _, demangled = parts
+            try:
+                raw_map[demangled] = int(addr_hex, HEX_BASE)
+            except ValueError:
+                continue
+    return raw_map
+
 
 def resolve_factorio_binary(custom_path: str | Path | None = None) -> Path | None:
     """Find a readable Factorio executable on the system."""
@@ -66,18 +84,8 @@ class FactorioSymbolFinder:
                 f"Failed to read symbol table from {self.binary_path}: {err}"
             ) from err
 
-        raw_map: dict[str, int] = {}
-        for line in proc.stdout.splitlines():
-            parts = line.strip().split(" ", 2)
-            if len(parts) == 3:
-                addr_hex, _, demangled = parts
-                try:
-                    raw_map[demangled] = int(addr_hex, 16)
-                except ValueError:
-                    continue
-
-        compiled_patterns = {k: re.compile(p) for k, p in TARGET_SYMBOL_PATTERNS.items()}
-        for key, regex in compiled_patterns.items():
+        raw_map = _parse_nm_output(proc.stdout)
+        for key, regex in COMPILED_SYMBOL_PATTERNS.items():
             for sym, addr in raw_map.items():
                 if regex.search(sym):
                     self._offsets[key] = addr
