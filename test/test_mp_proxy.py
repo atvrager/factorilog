@@ -141,6 +141,79 @@ class TestMpProtocolUnit(unittest.TestCase):
         self.assertEqual(len(pay_bld), 12)
         self.assertEqual(struct.unpack("<iiBBBB", pay_bld), (768, 1024, 2, 0, 0, 0))
 
+        act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(into_entity=True)
+        self.assertEqual(act_ft_in, mp_proxy.ACTION_FAST_ENTITY_TRANSFER)
+        self.assertEqual(pay_ft_in, b"\x01")
+
+        act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(into_entity=False)
+        self.assertEqual(act_ft_out, mp_proxy.ACTION_FAST_ENTITY_TRANSFER)
+        self.assertEqual(pay_ft_out, b"\x00")
+
+        act_fs, pay_fs = mp_proxy.build_fast_entity_split_action(into_entity=True)
+        self.assertEqual(act_fs, mp_proxy.ACTION_FAST_ENTITY_SPLIT)
+        self.assertEqual(pay_fs, b"\x01")
+
+        act_res, pay_res = mp_proxy.build_start_research_action(15)
+        self.assertEqual(act_res, mp_proxy.ACTION_START_RESEARCH)
+        self.assertEqual(struct.unpack("<H", pay_res), (15,))
+
+    def test_lazy_bastard_max_hand_craft_invariant(self) -> None:
+        """Verify dynamic extraction and strict enforcement of the lazy-bastard max hand-craft limit."""
+        fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
+        raw_data = json.loads(fixture_path.read_text(encoding="utf-8"))
+        max_crafts = mp_proxy.extract_lazy_bastard_limit(raw_data)
+        self.assertGreater(max_crafts, 0)
+
+        proxy = mp_proxy.FactorioLockstepProxy(
+            listen_host="127.0.0.1",
+            listen_port=_get_free_udp_port(),
+            server_host="127.0.0.1",
+            server_port=_get_free_udp_port(),
+            max_hand_crafts=max_crafts,
+        )
+
+        # Queuing within the budget succeeds
+        act_c1, pay_c1 = mp_proxy.build_craft_action(recipe_id=10, count=max_crafts - 1)
+        proxy.queue_action(act_c1, player_index=0, payload=pay_c1)
+        self.assertEqual(proxy.pending_action_count(), 1)
+
+        # Queuing the final allowed hand-craft succeeds
+        act_c2, pay_c2 = mp_proxy.build_craft_action(recipe_id=10, count=1)
+        proxy.queue_action(act_c2, player_index=0, payload=pay_c2)
+        self.assertEqual(proxy.pending_action_count(), 2)
+
+        # Queuing one more hand-craft beyond max_crafts raises ValueError and increments blocked count
+        act_over, pay_over = mp_proxy.build_craft_action(recipe_id=10, count=1)
+        with self.assertRaises(ValueError):
+            proxy.queue_action(act_over, player_index=0, payload=pay_over)
+        self.assertEqual(proxy.stats.blocked_hand_craft_actions, 1)
+        self.assertEqual(proxy.pending_action_count(), 2)
+
+        # Also verify wire-level scanning and stripping of client-emitted Craft actions
+        hb_flags = (
+            mp_proxy.HB_HAS_TICK_CLOSURES
+            | mp_proxy.HB_HAS_SINGLE_TICK_CLOSURE
+            | mp_proxy.HB_ALL_TICK_CLOSURES_EMPTY
+        )
+        empty_pkt = (
+            bytes([mp_proxy.MSG_CLIENT_TO_SERVER_HEARTBEAT, hb_flags])
+            + struct.pack("<I", 50)
+            + struct.pack("<Q", 900)
+            + struct.pack("<Q", 900)
+        )
+        craft_pkt = mp_proxy.inject_action_into_empty_client_heartbeat(
+            empty_pkt,
+            action_type=mp_proxy.ACTION_CRAFT,
+            player_index=0,
+            action_payload=pay_over,
+        )
+        assert craft_pkt is not None
+        self.assertEqual(mp_proxy.scan_heartbeat_for_crafts(craft_pkt, 1), [(10, 1)])
+        stripped_craft = mp_proxy.strip_client_cancellation_actions(
+            craft_pkt, frozenset({mp_proxy.ACTION_CRAFT})
+        )
+        self.assertEqual(stripped_craft, empty_pkt)
+
     def test_strip_client_cancellation_actions(self) -> None:
         """Verify stripping client-idle StopWalking/StopMining while preserving non-suppressed actions."""
         hb_flags = (
@@ -312,6 +385,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             id_mappings = mp_proxy.extract_save_id_mappings(save_zip)
             build_ach_map = id_mappings.get("build-entity-achievement", {})
             item_map = id_mappings.get("item", {})
+            recipe_map = id_mappings.get("recipe", {})
             self.assertTrue(
                 build_ach_map,
                 f"Failed to extract build-entity-achievement mappings from save: {list(id_mappings)}",
@@ -320,6 +394,14 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 item_map,
                 f"Failed to extract item mappings from save: {list(id_mappings)}",
             )
+            self.assertTrue(
+                recipe_map,
+                f"Failed to extract recipe mappings from save: {list(id_mappings)}",
+            )
+
+            fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
+            fixture_data = json.loads(fixture_path.read_text(encoding="utf-8"))
+            max_hand_crafts = mp_proxy.extract_lazy_bastard_limit(fixture_data)
 
             # Dynamically resolve the target achievement ID and placeable entity item ID
             target_ach_name = next(
@@ -334,19 +416,49 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             )
             target_item_id = item_map[target_item_name]
 
-            # Add target_item_name and scenario telemetry hook to control.lua inside mp_test.zip
+            furnace_item_name = next(
+                (name for name in item_map if "stone-furnace" in name),
+                next(iter(item_map)),
+            )
+            furnace_item_id = item_map[furnace_item_name]
+
+            fuel_item_name = next(
+                (name for name in item_map if name == "coal"),
+                next(iter(item_map)),
+            )
+            fuel_item_id = item_map[fuel_item_name]
+
+            smelt_ore_name = next(
+                (name for name in item_map if name == "iron-ore"),
+                next(iter(item_map)),
+            )
+            smelt_ore_id = item_map[smelt_ore_name]
+
+            craft_recipe_name = next(
+                (name for name in recipe_map if name == "iron-gear-wheel"),
+                next(iter(recipe_map)),
+            )
+            craft_recipe_id = recipe_map[craft_recipe_name]
+
+            # Add starter items and scenario telemetry hook to control.lua inside mp_test.zip
             mp_proxy.augment_save_freeplay_created_items(
                 save_zip,
-                {target_item_name: 1},
+                {
+                    target_item_name: 1,
+                    furnace_item_name: 1,
+                    fuel_item_name: 5,
+                    smelt_ore_name: 2,
+                },
                 enable_telemetry=True,
             )
 
-            # Step 3: Start UDP Lockstep Proxy
+            # Step 3: Start UDP Lockstep Proxy with lazy-bastard max_hand_crafts limit
             proxy = mp_proxy.FactorioLockstepProxy(
                 listen_host="127.0.0.1",
                 listen_port=proxy_port,
                 server_host="127.0.0.1",
                 server_port=server_port,
+                max_hand_crafts=max_hand_crafts,
             )
             proxy.start()
 
@@ -460,20 +572,28 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 # 1. Discover nearest mineral patch from factorilog_state.json
                 # 2. Walk character to within mining reach of the patch
                 # 3. Select the resource tile and mine ore into player inventory
-                # 4. Pipette + Build assembling machine to unlock native achievement
+                # 4. Place stone-furnace, load fuel + iron-ore through FastEntityTransfer(into_entity=True)
+                # 5. Extract smelted iron-plate through FastEntityTransfer(into_entity=False) and hand-craft
+                #    iron-gear-wheel within the lazy-bastard max_hand_crafts invariant
+                # 6. Pipette + Build assembling machine to unlock native achievement
                 state_file = server_dir / "script-output" / "factorilog_state.json"
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
+                furnace_x = 0.0
+                furnace_y = 0.0
                 initial_ore = 0
                 mined_ore = 0
                 mining_phase = False
+                smelt_queued = False
+                smelt_started_at = 0.0
+                extract_and_craft_queued = False
                 build_queued = False
                 last_cmd_time = 0.0
                 last_state: mp_proxy.PlayerWorldState | None = None
 
                 success = False
-                join_deadline = time.monotonic() + 35.0
+                join_deadline = time.monotonic() + 50.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
                     if state is not None and proxy.stats.empty_client_heartbeats_seen >= 5:
@@ -532,9 +652,77 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                                 act_bm, player_index=0, payload=pay_bm
                                             )
                                             last_cmd_time = now
-                            elif not build_queued:
-                                build_queued = True
+                            elif not smelt_queued and proxy.pending_action_count() == 0:
+                                smelt_queued = True
+                                smelt_started_at = now
+                                furnace_x = state.player_x
+                                furnace_y = state.player_y - 2.0
                                 act_sm, pay_sm = mp_proxy.build_stop_mining_action()
+                                act_pip_f, pay_pip_f = mp_proxy.build_pipette_item_action(
+                                    furnace_item_id
+                                )
+                                act_bld_f, pay_bld_f = mp_proxy.build_place_entity_action(
+                                    furnace_x, furnace_y, direction=0
+                                )
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
+                                    furnace_x, furnace_y
+                                )
+                                act_pip_c, pay_pip_c = mp_proxy.build_pipette_item_action(
+                                    fuel_item_id
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_pip_o, pay_pip_o = mp_proxy.build_pipette_item_action(
+                                    smelt_ore_id
+                                )
+                                for act, pay in (
+                                    (act_sm, pay_sm),
+                                    (act_pip_f, pay_pip_f),
+                                    (act_bld_f, pay_bld_f),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f, pay_sel_f),
+                                    (act_pip_c, pay_pip_c),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f, pay_sel_f),
+                                    (act_pip_o, pay_pip_o),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                smelt_queued
+                                and not extract_and_craft_queued
+                                and proxy.pending_action_count() == 0
+                                and (now - smelt_started_at) >= 8.0
+                            ):
+                                extract_and_craft_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
+                                    furnace_x, furnace_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_craft, pay_craft = mp_proxy.build_craft_action(
+                                    craft_recipe_id, count=1
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_f, pay_sel_f),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_craft, pay_craft),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                extract_and_craft_queued
+                                and not build_queued
+                                and proxy.pending_action_count() == 0
+                                and state.hand_crafted_count >= 1
+                            ):
+                                build_queued = True
                                 act_pip, pay_pip = mp_proxy.build_pipette_item_action(
                                     target_item_id
                                 )
@@ -544,13 +732,14 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     direction=0,
                                 )
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
-                                proxy.queue_action(act_sm, player_index=0, payload=pay_sm)
                                 proxy.queue_action(act_pip, player_index=0, payload=pay_pip)
                                 proxy.queue_action(act_bld, player_index=0, payload=pay_bld)
                                 proxy.queue_action(act_clr, player_index=0, payload=pay_clr)
 
                     if (
                         mined_ore >= 1
+                        and last_state is not None
+                        and last_state.hand_crafted_count >= 1
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
                     ):
@@ -587,10 +776,29 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )
+                self.assertIsNotNone(last_state)
+                assert last_state is not None
+                self.assertGreaterEqual(
+                    last_state.hand_crafted_count,
+                    1,
+                    f"Bot did not smelt iron-plate and hand-craft {craft_recipe_name}.\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}",
+                )
+                self.assertLessEqual(
+                    last_state.hand_crafted_count,
+                    max_hand_crafts,
+                    f"Server hand_crafted_count exceeded lazy-bastard limit ({max_hand_crafts}).",
+                )
+                self.assertLessEqual(
+                    proxy.stats.hand_crafted_count,
+                    max_hand_crafts,
+                    f"Proxy hand_crafted_count exceeded lazy-bastard limit ({max_hand_crafts}).",
+                )
+                self.assertEqual(proxy.stats.blocked_hand_craft_actions, 0)
                 self.assertTrue(
                     success,
                     f"Client did not naturally emit AchievementGained ({target_ach_name}={target_ach_id}) "
-                    f"after finding/mining {res_name} and Pipette+Build actions.\n"
+                    f"after finding/mining {res_name}, smelting, hand-crafting, and Pipette+Build actions.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )

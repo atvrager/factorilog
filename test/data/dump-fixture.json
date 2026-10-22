@@ -1,4 +1,13 @@
 {
+  "achievement": {
+    "so-long-and-thanks-for-all-the-fish": {
+      "icon": "__base__/graphics/achievement/so-long-and-thanks-for-all-the-fish.png",
+      "icon_size": 128,
+      "name": "so-long-and-thanks-for-all-the-fish",
+      "order": "h[secret]-a[so-long-and-thanks-for-all-the-fish]",
+      "type": "achievement"
+    }
+  },
   "arithmetic-combinator": {
     "arithmetic-combinator": {
       "active_energy_usage": "1kW",
@@ -11434,6 +11443,41 @@
       }
     }
   },
+  "build-entity-achievement": {
+    "arachnophilia": {
+      "icon": "__base__/graphics/achievement/arachnophilia.png",
+      "icon_size": 128,
+      "name": "arachnophilia",
+      "order": "a[progress]-c[arachnophilia]",
+      "to_build": "spidertron",
+      "type": "build-entity-achievement"
+    },
+    "automate-this": {
+      "icon": "__base__/graphics/achievement/automate-this.png",
+      "icon_size": 128,
+      "name": "automate-this",
+      "order": "a[progress]-a[automate-this]",
+      "to_build": "assembling-machine-1",
+      "type": "build-entity-achievement"
+    },
+    "getting-on-track": {
+      "icon": "__base__/graphics/achievement/getting-on-track.png",
+      "icon_size": 128,
+      "name": "getting-on-track",
+      "order": "a[progress]-b[getting-on-track]",
+      "to_build": "locomotive",
+      "type": "build-entity-achievement"
+    },
+    "getting-on-track-like-a-pro": {
+      "icon": "__base__/graphics/achievement/getting-on-track-like-a-pro.png",
+      "icon_size": 128,
+      "name": "getting-on-track-like-a-pro",
+      "order": "c[teaching]-a[getting-on-track-like-a-pro]",
+      "to_build": "locomotive",
+      "type": "build-entity-achievement",
+      "within": 324000
+    }
+  },
   "cargo-landing-pad": {
     "cargo-landing-pad": {
       "build_grid_size": 2,
@@ -15719,6 +15763,47 @@
       "type": "cargo-landing-pad"
     }
   },
+  "combat-robot-count-achievement": {
+    "minions": {
+      "count": 100,
+      "icon": "__base__/graphics/achievement/minions.png",
+      "icon_size": 128,
+      "name": "minions",
+      "order": "f[kill]-g[minions]",
+      "steam_stats_name": "combat-robots",
+      "type": "combat-robot-count-achievement"
+    }
+  },
+  "complete-objective-achievement": {
+    "no-time-for-chitchat": {
+      "allowed_without_fight": false,
+      "icon": "__base__/graphics/achievement/no-time-for-chitchat.png",
+      "icon_size": 128,
+      "name": "no-time-for-chitchat",
+      "objective_condition": "rocket-launched",
+      "order": "h[limitation]-e[no-time-for-chitchat]",
+      "type": "complete-objective-achievement",
+      "within": 3240000
+    },
+    "smoke-me-a-kipper-i-will-be-back-for-breakfast": {
+      "icon": "__base__/graphics/achievement/smoke-me-a-kipper-i-will-be-back-for-breakfast.png",
+      "icon_size": 128,
+      "name": "smoke-me-a-kipper-i-will-be-back-for-breakfast",
+      "objective_condition": "rocket-launched",
+      "order": "a[progress]-x[finish-game]-a[base]",
+      "type": "complete-objective-achievement"
+    },
+    "there-is-no-spoon": {
+      "allowed_without_fight": false,
+      "icon": "__base__/graphics/achievement/there-is-no-spoon.png",
+      "icon_size": 128,
+      "name": "there-is-no-spoon",
+      "objective_condition": "rocket-launched",
+      "order": "h[limitation]-f[there-is-no-spoon]",
+      "type": "complete-objective-achievement",
+      "within": 1728000
+    }
+  },
   "constant-combinator": {
     "constant-combinator": {
       "activity_led_light": {
@@ -16095,6 +16180,27 @@
         },
         "rotate": false
       }
+    }
+  },
+  "construct-with-robots-achievement": {
+    "automated-construction": {
+      "amount": 100,
+      "icon": "__base__/graphics/achievement/automated-construction.png",
+      "icon_size": 128,
+      "limited_to_one_game": false,
+      "name": "automated-construction",
+      "order": "b[exploration]-b[construct-with-robots]-a[100]",
+      "steam_stats_name": "constructed-by-robots",
+      "type": "construct-with-robots-achievement"
+    },
+    "you-are-doing-it-right": {
+      "icon": "__base__/graphics/achievement/you-are-doing-it-right.png",
+      "icon_size": 128,
+      "limited_to_one_game": true,
+      "more_than_manually": true,
+      "name": "you-are-doing-it-right",
+      "order": "b[exploration]-b[construct-with-robots]-b[more-than-manually]",
+      "type": "construct-with-robots-achievement"
     }
   },
   "decider-combinator": {
@@ -16972,6 +17078,54 @@
       }
     }
   },
+  "deconstruct-with-robots-achievement": {
+    "automated-cleanup": {
+      "amount": 100,
+      "icon": "__base__/graphics/achievement/automated-cleanup.png",
+      "icon_size": 128,
+      "name": "automated-cleanup",
+      "order": "b[exploration]-c[deconstruct-with-robots]",
+      "steam_stats_name": "deconstructed-by-robots",
+      "type": "deconstruct-with-robots-achievement"
+    }
+  },
+  "deliver-by-robots-achievement": {
+    "delivery-service": {
+      "amount": 10000,
+      "icon": "__base__/graphics/achievement/delivery-service.png",
+      "icon_size": 128,
+      "name": "delivery-service",
+      "order": "b[exploration]-d[deliver-by-robots]-b",
+      "steam_stats_name": "delivered-by-robots",
+      "type": "deliver-by-robots-achievement"
+    },
+    "you-have-got-a-package": {
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/you-have-got-a-package.png",
+      "icon_size": 128,
+      "name": "you-have-got-a-package",
+      "order": "b[exploration]-d[deliver-by-robots]-a",
+      "type": "deliver-by-robots-achievement"
+    }
+  },
+  "deplete-resource-achievement": {
+    "mining-with-determination": {
+      "icon": "__base__/graphics/achievement/mining-with-determination.png",
+      "icon_size": 128,
+      "name": "mining-with-determination",
+      "order": "b[exploration]-h[mining-with-determination]",
+      "type": "deplete-resource-achievement"
+    }
+  },
+  "destroy-cliff-achievement": {
+    "terraformer": {
+      "icon": "__base__/graphics/achievement/terraformer.png",
+      "icon_size": 128,
+      "name": "terraformer",
+      "order": "f[kill]-e[terraformer]",
+      "type": "destroy-cliff-achievement"
+    }
+  },
   "display-panel": {
     "display-panel": {
       "background_color": [
@@ -17253,6 +17407,82 @@
         },
         "rotate": false
       }
+    }
+  },
+  "dont-build-entity-achievement": {
+    "logistic-network-embargo": {
+      "dont_build": [
+        "active-provider-chest",
+        "requester-chest",
+        "buffer-chest"
+      ],
+      "icon": "__base__/graphics/achievement/logistic-network-embargo.png",
+      "icon_size": 128,
+      "name": "logistic-network-embargo",
+      "objective_condition": "late-research",
+      "order": "h[limitation]-d[logistic-network-embargo]",
+      "research_with": [
+        "space-science-pack"
+      ],
+      "type": "dont-build-entity-achievement"
+    },
+    "raining-bullets": {
+      "allowed_without_fight": false,
+      "dont_build": "laser-turret",
+      "icon": "__base__/graphics/achievement/raining-bullets.png",
+      "icon_size": 128,
+      "name": "raining-bullets",
+      "objective_condition": "rocket-launched",
+      "order": "h[limitation]-c[raining-bullets]",
+      "type": "dont-build-entity-achievement"
+    }
+  },
+  "dont-craft-manually-achievement": {
+    "lazy-bastard": {
+      "amount": 111,
+      "icon": "__base__/graphics/achievement/lazy-bastard.png",
+      "icon_size": 128,
+      "name": "lazy-bastard",
+      "objective_condition": "rocket-launched",
+      "order": "h[limitation]-a[lazy-bastard]",
+      "type": "dont-craft-manually-achievement"
+    }
+  },
+  "dont-kill-manually-achievement": {
+    "keeping-your-hands-clean": {
+      "allowed_without_fight": false,
+      "icon": "__base__/graphics/achievement/keeping-your-hands-clean.png",
+      "icon_size": 128,
+      "name": "keeping-your-hands-clean",
+      "order": "f[kill]-i[keeping-your-hands-clean]",
+      "type": "dont-kill-manually-achievement",
+      "type_not_to_kill": "unit-spawner"
+    }
+  },
+  "dont-use-entity-in-energy-production-achievement": {
+    "solaris": {
+      "excluded": [
+        "steam-engine",
+        "steam-turbine"
+      ],
+      "icon": "__base__/graphics/achievement/solaris.png",
+      "icon_size": 128,
+      "included": "solar-panel",
+      "last_hour_only": true,
+      "minimum_energy_produced": "10GJ",
+      "name": "solaris",
+      "order": "d[production]-g[solaris]",
+      "type": "dont-use-entity-in-energy-production-achievement"
+    },
+    "steam-all-the-way": {
+      "allowed_without_fight": false,
+      "excluded": "solar-panel",
+      "icon": "__base__/graphics/achievement/steam-all-the-way.png",
+      "icon_size": 128,
+      "name": "steam-all-the-way",
+      "objective_condition": "rocket-launched",
+      "order": "h[limitation]-b[steam-all-the-way]",
+      "type": "dont-use-entity-in-energy-production-achievement"
     }
   },
   "electric-pole": {
@@ -21824,6 +22054,28 @@
           "volume": 0.49000000000000005
         }
       }
+    }
+  },
+  "group-attack-achievement": {
+    "it-stinks-and-they-dont-like-it": {
+      "allowed_without_fight": false,
+      "amount": 1,
+      "attack_type": "autonomous",
+      "entities": [
+        "small-biter",
+        "medium-biter",
+        "big-biter",
+        "behemoth-biter",
+        "small-spitter",
+        "medium-spitter",
+        "big-spitter",
+        "behemoth-spitter"
+      ],
+      "icon": "__base__/graphics/achievement/it-stinks-and-they-dont-like-it.png",
+      "icon_size": 128,
+      "name": "it-stinks-and-they-dont-like-it",
+      "order": "b[exploration]-a[it-stinks-and-they-dont-like-it]",
+      "type": "group-attack-achievement"
     }
   },
   "inserter": {
@@ -33142,6 +33394,71 @@
       "stack_size": 50,
       "subgroup": "storage",
       "type": "item"
+    }
+  },
+  "kill-achievement": {
+    "art-of-siege": {
+      "amount": 1,
+      "damage_dealer": [
+        "artillery-turret",
+        "artillery-wagon"
+      ],
+      "icon": "__base__/graphics/achievement/art-of-siege.png",
+      "icon_size": 128,
+      "name": "art-of-siege",
+      "order": "f[kill]-h[art-of-siege]",
+      "type": "kill-achievement",
+      "type_to_kill": "unit-spawner"
+    },
+    "pest-control": {
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/pest-control.png",
+      "icon_size": 128,
+      "name": "pest-control",
+      "order": "f[kill]-a[pest-control]",
+      "personally": false,
+      "to_kill": [
+        "biter-spawner",
+        "spitter-spawner"
+      ],
+      "type": "kill-achievement"
+    },
+    "pyromaniac": {
+      "amount": 10000,
+      "damage_type": "fire",
+      "icon": "__base__/graphics/achievement/pyromaniac.png",
+      "icon_size": 128,
+      "name": "pyromaniac",
+      "order": "f[kill]-c[pyromaniac]",
+      "steam_stats_name": "trees-destroyed-by-fire",
+      "type": "kill-achievement",
+      "type_to_kill": "tree"
+    },
+    "run-forrest-run": {
+      "amount": 100,
+      "damage_type": "impact",
+      "icon": "__base__/graphics/achievement/run-forrest-run.png",
+      "icon_size": 128,
+      "in_vehicle": true,
+      "name": "run-forrest-run",
+      "order": "f[kill]-d[run-forrest-run]",
+      "personally": true,
+      "steam_stats_name": "trees-destroyed-by-impact",
+      "type": "kill-achievement",
+      "type_to_kill": "tree"
+    },
+    "steamrolled": {
+      "amount": 10,
+      "damage_type": "impact",
+      "icon": "__base__/graphics/achievement/steamrolled.png",
+      "icon_size": 128,
+      "in_vehicle": true,
+      "name": "steamrolled",
+      "order": "f[kill]-b[steamrolled]",
+      "personally": true,
+      "steam_stats_name": "spawners-killed-by-impact",
+      "type": "kill-achievement",
+      "type_to_kill": "unit-spawner"
     }
   },
   "lab": {
@@ -46354,6 +46671,28 @@
       }
     }
   },
+  "player-damaged-achievement": {
+    "golem": {
+      "icon": "__base__/graphics/achievement/golem.png",
+      "icon_size": 128,
+      "minimum_damage": 500,
+      "name": "golem",
+      "order": "b[exploration]-g[golem]",
+      "should_survive": true,
+      "steam_stats_name": "surived-damage-in-one-hit",
+      "type": "player-damaged-achievement"
+    },
+    "watch-your-step": {
+      "icon": "__base__/graphics/achievement/watch-your-step.png",
+      "icon_size": 128,
+      "minimum_damage": 0,
+      "name": "watch-your-step",
+      "order": "b[exploration]-f[watch-your-step]",
+      "should_survive": false,
+      "type": "player-damaged-achievement",
+      "type_of_dealer": "locomotive"
+    }
+  },
   "power-switch": {
     "power-switch": {
       "circuit_wire_connection_point": {
@@ -46612,6 +46951,163 @@
         ],
         "max_sounds_per_prototype": 2
       }
+    }
+  },
+  "produce-achievement": {
+    "crafting-with-efficiency": {
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/crafting-with-efficiency.png",
+      "icon_size": 128,
+      "item_product": "efficiency-module-3",
+      "limited_to_one_game": false,
+      "name": "crafting-with-efficiency",
+      "order": "a[progress]-h[crafting-tier-3-module]-b[efficiency]",
+      "type": "produce-achievement"
+    },
+    "crafting-with-productivity": {
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/crafting-with-productivity.png",
+      "icon_size": 128,
+      "item_product": "productivity-module-3",
+      "limited_to_one_game": false,
+      "name": "crafting-with-productivity",
+      "order": "a[progress]-h[crafting-tier-3-module]-c[productivity]",
+      "type": "produce-achievement"
+    },
+    "crafting-with-speed": {
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/crafting-with-speed.png",
+      "icon_size": 128,
+      "item_product": "speed-module-3",
+      "limited_to_one_game": false,
+      "name": "crafting-with-speed",
+      "order": "a[progress]-h[crafting-tier-3-module]-a[speed]",
+      "type": "produce-achievement"
+    },
+    "mass-production-1": {
+      "amount": 10000,
+      "icon": "__base__/graphics/achievement/mass-production-1.png",
+      "icon_size": 128,
+      "item_product": "electronic-circuit",
+      "limited_to_one_game": false,
+      "name": "mass-production-1",
+      "order": "d[production]-b[electronic-circuit-production]-a",
+      "steam_stats_name": "electronic-circuits-production-overall",
+      "type": "produce-achievement"
+    },
+    "mass-production-2": {
+      "amount": 1000000,
+      "icon": "__base__/graphics/achievement/mass-production-2.png",
+      "icon_size": 128,
+      "item_product": "electronic-circuit",
+      "limited_to_one_game": false,
+      "name": "mass-production-2",
+      "order": "d[production]-b[electronic-circuit-production]-b",
+      "steam_stats_name": "electronic-circuits-production-overall",
+      "type": "produce-achievement"
+    },
+    "mass-production-3": {
+      "amount": 20000000,
+      "icon": "__base__/graphics/achievement/mass-production-3.png",
+      "icon_size": 128,
+      "item_product": "electronic-circuit",
+      "limited_to_one_game": false,
+      "name": "mass-production-3",
+      "order": "d[production]-b[electronic-circuit-production]-c",
+      "steam_stats_name": "electronic-circuits-production-overall",
+      "type": "produce-achievement"
+    }
+  },
+  "produce-per-hour-achievement": {
+    "circuit-veteran-1": {
+      "amount": 1000,
+      "icon": "__base__/graphics/achievement/circuit-veteran-1.png",
+      "icon_size": 128,
+      "item_product": "advanced-circuit",
+      "name": "circuit-veteran-1",
+      "order": "d[production]-c[advanced-circuit-production]-a",
+      "steam_stats_name": "advanced-circuits-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "circuit-veteran-2": {
+      "amount": 10000,
+      "icon": "__base__/graphics/achievement/circuit-veteran-2.png",
+      "icon_size": 128,
+      "item_product": "advanced-circuit",
+      "name": "circuit-veteran-2",
+      "order": "d[production]-c[advanced-circuit-production]-b",
+      "steam_stats_name": "advanced-circuits-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "circuit-veteran-3": {
+      "amount": 25000,
+      "icon": "__base__/graphics/achievement/circuit-veteran-3.png",
+      "icon_size": 128,
+      "item_product": "advanced-circuit",
+      "name": "circuit-veteran-3",
+      "order": "d[production]-c[advanced-circuit-production]-c",
+      "steam_stats_name": "advanced-circuits-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "computer-age-1": {
+      "amount": 500,
+      "icon": "__base__/graphics/achievement/computer-age-1.png",
+      "icon_size": 128,
+      "item_product": "processing-unit",
+      "name": "computer-age-1",
+      "order": "d[production]-d[processing-unit-production]-a",
+      "steam_stats_name": "processing-units-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "computer-age-2": {
+      "amount": 1000,
+      "icon": "__base__/graphics/achievement/computer-age-2.png",
+      "icon_size": 128,
+      "item_product": "processing-unit",
+      "name": "computer-age-2",
+      "order": "d[production]-d[processing-unit-production]-b",
+      "steam_stats_name": "processing-units-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "computer-age-3": {
+      "amount": 5000,
+      "icon": "__base__/graphics/achievement/computer-age-3.png",
+      "icon_size": 128,
+      "item_product": "processing-unit",
+      "name": "computer-age-3",
+      "order": "d[production]-d[processing-unit-production]-c",
+      "steam_stats_name": "processing-units-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "iron-throne-1": {
+      "amount": 20000,
+      "icon": "__base__/graphics/achievement/iron-throne-1.png",
+      "icon_size": 128,
+      "item_product": "iron-plate",
+      "name": "iron-throne-1",
+      "order": "d[production]-e[iron-throne-1]",
+      "steam_stats_name": "iron-plates-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "iron-throne-2": {
+      "amount": 200000,
+      "icon": "__base__/graphics/achievement/iron-throne-2.png",
+      "icon_size": 128,
+      "item_product": "iron-plate",
+      "name": "iron-throne-2",
+      "order": "d[production]-e[iron-throne-2]",
+      "steam_stats_name": "iron-plates-per-hour",
+      "type": "produce-per-hour-achievement"
+    },
+    "iron-throne-3": {
+      "amount": 400000,
+      "icon": "__base__/graphics/achievement/iron-throne-3.png",
+      "icon_size": 128,
+      "item_product": "iron-plate",
+      "name": "iron-throne-3",
+      "order": "d[production]-e[iron-throne-3]",
+      "steam_stats_name": "iron-plates-per-hour",
+      "type": "produce-per-hour-achievement"
     }
   },
   "pump": {
@@ -55748,6 +56244,82 @@
       "type": "recipe"
     }
   },
+  "research-achievement": {
+    "eco-unfriendly": {
+      "icon": "__base__/graphics/achievement/eco-unfriendly.png",
+      "icon_size": 128,
+      "name": "eco-unfriendly",
+      "order": "a[progress]-d[eco-unfriendly]",
+      "technology": "oil-processing",
+      "type": "research-achievement"
+    },
+    "tech-maniac": {
+      "icon": "__base__/graphics/achievement/tech-maniac.png",
+      "icon_size": 128,
+      "name": "tech-maniac",
+      "order": "e[research]-b[tech-maniac]",
+      "research_all": true,
+      "type": "research-achievement"
+    }
+  },
+  "research-with-science-pack-achievement": {
+    "research-with-automation": {
+      "icon": "__base__/graphics/achievement/research-with-automation.png",
+      "icon_size": 128,
+      "name": "research-with-automation",
+      "order": "e[research]-a[research-with]-a[automation]",
+      "science_pack": "automation-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-chemicals": {
+      "icon": "__base__/graphics/achievement/research-with-chemicals.png",
+      "icon_size": 128,
+      "name": "research-with-chemicals",
+      "order": "e[research]-a[research-with]-d[chemicals]",
+      "science_pack": "chemical-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-logistics": {
+      "icon": "__base__/graphics/achievement/research-with-logistics.png",
+      "icon_size": 128,
+      "name": "research-with-logistics",
+      "order": "e[research]-a[research-with]-b[logistics]",
+      "science_pack": "logistic-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-military": {
+      "icon": "__base__/graphics/achievement/research-with-military.png",
+      "icon_size": 128,
+      "name": "research-with-military",
+      "order": "e[research]-a[research-with]-c[military]",
+      "science_pack": "military-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-production": {
+      "icon": "__base__/graphics/achievement/research-with-production.png",
+      "icon_size": 128,
+      "name": "research-with-production",
+      "order": "e[research]-a[research-with]-e[production]",
+      "science_pack": "production-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-space": {
+      "icon": "__base__/graphics/achievement/research-with-space.png",
+      "icon_size": 128,
+      "name": "research-with-space",
+      "order": "e[research]-a[research-with]-g[space]",
+      "science_pack": "space-science-pack",
+      "type": "research-with-science-pack-achievement"
+    },
+    "research-with-utility": {
+      "icon": "__base__/graphics/achievement/research-with-utility.png",
+      "icon_size": 128,
+      "name": "research-with-utility",
+      "order": "e[research]-a[research-with]-f[utility]",
+      "science_pack": "utility-science-pack",
+      "type": "research-with-science-pack-achievement"
+    }
+  },
   "resource": {
     "coal": {
       "autoplace": {
@@ -58172,6 +58744,17 @@
           }
         ]
       }
+    }
+  },
+  "shoot-achievement": {
+    "destroyer-of-worlds": {
+      "ammo_type": "atomic-bomb",
+      "amount": 1,
+      "icon": "__base__/graphics/achievement/destroyer-of-worlds.png",
+      "icon_size": 128,
+      "name": "destroyer-of-worlds",
+      "order": "f[kill]-f[destroyer-of-worlds]",
+      "type": "shoot-achievement"
     }
   },
   "splitter": {
@@ -72703,6 +73286,17 @@
       "walking_speed_modifier": 1.5
     }
   },
+  "train-path-achievement": {
+    "trans-factorio-express": {
+      "icon": "__base__/graphics/achievement/trans-factorio-express.png",
+      "icon_size": 128,
+      "minimum_distance": 1000,
+      "name": "trans-factorio-express",
+      "order": "b[exploration]-e[train-path]",
+      "steam_stats_name": "longest-train-path",
+      "type": "train-path-achievement"
+    }
+  },
   "transport-belt": {
     "express-transport-belt": {
       "animation_speed_coefficient": 32,
@@ -76213,6 +76807,35 @@
         },
         "use_doppler_shift": false
       }
+    }
+  },
+  "use-entity-in-energy-production-achievement": {
+    "nuclear-power": {
+      "consumed_condition": "uranium-fuel-cell",
+      "entity": "steam-turbine",
+      "icon": "__base__/graphics/achievement/nuclear-power.png",
+      "icon_size": 128,
+      "name": "nuclear-power",
+      "order": "a[progress]-e[energy-production]-c[nuclear]",
+      "produced_condition": "depleted-uranium-fuel-cell",
+      "required_to_build": "nuclear-reactor",
+      "type": "use-entity-in-energy-production-achievement"
+    },
+    "solar-power": {
+      "entity": "solar-panel",
+      "icon": "__base__/graphics/achievement/solar-power.png",
+      "icon_size": 128,
+      "name": "solar-power",
+      "order": "a[progress]-e[energy-production]-b[solar]",
+      "type": "use-entity-in-energy-production-achievement"
+    },
+    "steam-power": {
+      "entity": "steam-engine",
+      "icon": "__base__/graphics/achievement/steam-power.png",
+      "icon_size": 128,
+      "name": "steam-power",
+      "order": "a[progress]-e[energy-production]-a[steam]",
+      "type": "use-entity-in-energy-production-achievement"
     }
   },
   "utility-sprites": {

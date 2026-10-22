@@ -130,6 +130,18 @@ def main() -> int:
     techs = _filter_technologies(raw.get("technology", {}), packs)
     proto["technology"] = techs
 
+    # Keep all base-game achievement tables so achievement rules and limits
+    # are available hermetically in the fixture.
+    for key, table_data in raw.items():
+        if key.endswith("achievement") and isinstance(table_data, dict):
+            base_entries = {
+                name: entry
+                for name, entry in table_data.items()
+                if isinstance(entry, dict) and "__base__" in str(entry.get("icon", ""))
+            }
+            if base_entries:
+                proto[key] = base_entries
+
     Path(out).write_text(json.dumps(proto))
     print(
         f"fixture: {out} {Path(out).stat().st_size / BYTES_PER_KIB:.0f} KiB, "

@@ -399,6 +399,9 @@ py_test(
     name = "mp_proxy_test",
     size = "large",
     srcs = ["test_mp_proxy.py"],
+    data = [
+        "data/dump-fixture.json",
+    ],
     local = True,
     main = "test_mp_proxy.py",
     tags = [

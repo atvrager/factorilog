@@ -14,8 +14,10 @@ import struct
 import threading
 import zipfile
 import zlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 MSG_PING = 0
 MSG_PING_REPLY = 1
@@ -63,10 +65,15 @@ ACTION_CRAFT = 0x0056
 ACTION_SETUP_ASSEMBLING_MACHINE = 0x0059
 ACTION_SELECTED_ENTITY_CHANGED = 0x005A
 ACTION_PIPETTE = 0x005B
+ACTION_START_RESEARCH = 0x0064
 ACTION_SELECT_ENTITY_VERY_CLOSE = 0x010A
 ACTION_SELECT_ENTITY_VERY_CLOSE_PRECISE = 0x010B
 ACTION_SELECT_ENTITY_RELATIVE = 0x010C
 ACTION_SELECT_ENTITY_UNIT_NUMBER = 0x010D
+ACTION_FAST_ENTITY_TRANSFER = 0x0117
+ACTION_ROTATE_ENTITY = 0x0118
+ACTION_FLIP_ENTITY = 0x0119
+ACTION_FAST_ENTITY_SPLIT = 0x011A
 ACTION_ACHIEVEMENT_GAINED = 0x0159
 ACTION_CHECK_CRC_HEURISTIC = 0x015D
 
@@ -84,10 +91,15 @@ KNOWN_ACTION_PAYLOAD_SIZES: dict[int, int] = {
     ACTION_SETUP_ASSEMBLING_MACHINE: 3,
     ACTION_SELECTED_ENTITY_CHANGED: 8,
     ACTION_PIPETTE: 10,
+    ACTION_START_RESEARCH: 2,
     ACTION_SELECT_ENTITY_VERY_CLOSE: 1,
     ACTION_SELECT_ENTITY_VERY_CLOSE_PRECISE: 2,
     ACTION_SELECT_ENTITY_RELATIVE: 4,
     ACTION_SELECT_ENTITY_UNIT_NUMBER: 8,
+    ACTION_FAST_ENTITY_TRANSFER: 1,
+    ACTION_ROTATE_ENTITY: 1,
+    ACTION_FLIP_ENTITY: 1,
+    ACTION_FAST_ENTITY_SPLIT: 1,
     ACTION_ACHIEVEMENT_GAINED: 2,
     ACTION_CHECK_CRC_HEURISTIC: 12,
 }
@@ -329,6 +341,31 @@ def build_place_entity_action(
     )
 
 
+def build_fast_entity_transfer_action(into_entity: bool) -> tuple[int, bytes]:
+    """Build FastEntityTransfer (0x0117) InputAction to transfer a stack into or out of an entity."""
+    return ACTION_FAST_ENTITY_TRANSFER, struct.pack("<B", int(into_entity))
+
+
+def build_fast_entity_split_action(into_entity: bool) -> tuple[int, bytes]:
+    """Build FastEntitySplit (0x011a) InputAction to transfer half a stack into or out of an entity."""
+    return ACTION_FAST_ENTITY_SPLIT, struct.pack("<B", int(into_entity))
+
+
+def build_start_research_action(tech_id: int) -> tuple[int, bytes]:
+    """Build StartResearch (0x0064) InputAction for tech_id."""
+    return ACTION_START_RESEARCH, struct.pack("<H", tech_id & UINT16_MASK)
+
+
+def extract_lazy_bastard_limit(raw_data: Mapping[str, Any]) -> int:
+    """Extract the maximum hand-crafted item count for lazy-bastard from prototype data."""
+    table = raw_data.get("dont-craft-manually-achievement")
+    if isinstance(table, Mapping):
+        for entry in table.values():
+            if isinstance(entry, Mapping) and "amount" in entry:
+                return int(entry["amount"])
+    raise KeyError("dont-craft-manually-achievement amount not found in prototype data")
+
+
 def _try_parse_id_mapping_table(
     buf: bytes, start_pos: int
 ) -> tuple[dict[str, dict[str, int]], int] | None:
@@ -446,6 +483,9 @@ class PlayerWorldState:
     selected_y: float | None
     inventory: dict[str, int]
     nearest_resource: ResourcePatchTile | None
+    resources_by_name: dict[str, ResourcePatchTile] = field(default_factory=dict)
+    crafting_queue_size: int = 0
+    hand_crafted_count: int = 0
 
 
 def read_world_state(state_path: Path) -> PlayerWorldState | None:
@@ -491,6 +531,18 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
             amount=int(res_raw.get("amount", 0)),
         )
 
+    res_by_name_raw = payload.get("resources_by_name")
+    resources_by_name: dict[str, ResourcePatchTile] = {}
+    if isinstance(res_by_name_raw, dict):
+        for rname, rval in res_by_name_raw.items():
+            if isinstance(rname, str) and isinstance(rval, dict) and "x" in rval and "y" in rval:
+                resources_by_name[rname] = ResourcePatchTile(
+                    name=str(rval.get("name", rname)),
+                    x=float(rval["x"]),
+                    y=float(rval["y"]),
+                    amount=int(rval.get("amount", 0)),
+                )
+
     return PlayerWorldState(
         tick=int(payload.get("tick", 0)),
         player_x=float(player.get("x", 0.0)),
@@ -502,6 +554,9 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         selected_y=sel_y,
         inventory=inventory,
         nearest_resource=nearest,
+        resources_by_name=resources_by_name,
+        crafting_queue_size=int(player.get("crafting_queue_size", 0)),
+        hand_crafted_count=int(player.get("hand_crafted_count", 0)),
     )
 
 
@@ -539,8 +594,15 @@ def augment_save_freeplay_created_items(
         "  }\n"
         "})\n"
     )
+    telemetry_events = ""
     telemetry_block = ""
     if enable_telemetry:
+        telemetry_events = (
+            ",\n"
+            "    [defines.events.on_player_crafted_item] = function(e)\n"
+            "      storage.hand_crafted_count = (storage.hand_crafted_count or 0) + 1\n"
+            "    end\n"
+        )
         telemetry_block = (
             ",\n"
             "  on_nth_tick = {\n"
@@ -562,6 +624,8 @@ def augment_save_freeplay_created_items(
             "        })\n"
             "        local best = nil\n"
             "        local best_d2 = 1e18\n"
+            "        local by_name = {}\n"
+            "        local by_name_d2 = {}\n"
             "        for _, r in ipairs(resources) do\n"
             "          local mp = r.prototype.mineable_properties\n"
             "          if mp and mp.minable and not mp.required_fluid then\n"
@@ -572,8 +636,18 @@ def augment_save_freeplay_created_items(
             "              best_d2 = d2\n"
             "              best = r\n"
             "            end\n"
+            "            if not by_name_d2[r.name] or d2 < by_name_d2[r.name] then\n"
+            "              by_name_d2[r.name] = d2\n"
+            "              by_name[r.name] = {\n"
+            "                name = r.name,\n"
+            "                x = r.position.x,\n"
+            "                y = r.position.y,\n"
+            "                amount = r.amount\n"
+            "              }\n"
+            "            end\n"
             "          end\n"
             "        end\n"
+            "        storage.resources_by_name = by_name\n"
             "        if best then\n"
             "          storage.nearest_resource_entity = best\n"
             "          storage.nearest_resource = {\n"
@@ -604,9 +678,12 @@ def augment_save_freeplay_created_items(
             "          walking = p.walking_state.walking,\n"
             "          mining = p.mining_state.mining,\n"
             "          selected = sel,\n"
-            "          inventory = contents\n"
+            "          inventory = contents,\n"
+            "          crafting_queue_size = p.crafting_queue_size,\n"
+            "          hand_crafted_count = storage.hand_crafted_count or 0\n"
             "        },\n"
-            "        nearest_resource = storage.nearest_resource\n"
+            "        nearest_resource = storage.nearest_resource,\n"
+            "        resources_by_name = storage.resources_by_name or {}\n"
             "      }\n"
             "      helpers.write_file('factorilog_state.json', helpers.table_to_json(state) .. '\\n', false)\n"
             "    end\n"
@@ -629,7 +706,7 @@ def augment_save_freeplay_created_items(
         "          p.insert({name = k, count = v})\n"
         "        end\n"
         "      end\n"
-        "    end\n"
+        f"    end{telemetry_events}\n"
         f"  }}{telemetry_block}"
         "})\n"
     )
@@ -821,6 +898,69 @@ def scan_heartbeat_for_achievement(
     return detected
 
 
+def scan_heartbeat_for_crafts(
+    buf: bytes,
+    payload_offset: int,
+) -> list[tuple[int, int]]:
+    """Scan a heartbeat payload for Craft (0x0056) InputAction records as (recipe_id, count)."""
+    pos = payload_offset
+    if pos + 5 > len(buf):
+        return []
+    hb_flags = buf[pos]
+    pos += 5  # flags (1B) + sequence_number (4B)
+
+    if not (hb_flags & HB_HAS_TICK_CLOSURES):
+        return []
+    if hb_flags & HB_ALL_TICK_CLOSURES_EMPTY:
+        return []
+
+    if hb_flags & HB_HAS_SINGLE_TICK_CLOSURE:
+        closure_count = 1
+    else:
+        if pos >= len(buf):
+            return []
+        closure_count = buf[pos]
+        pos += 1
+
+    crafts: list[tuple[int, int]] = []
+    for _ in range(closure_count):
+        if pos + 8 > len(buf):
+            break
+        pos += 8  # update_tick (uint64)
+        try:
+            count_flagged, pos = decode_uint32v(buf, pos)
+        except ValueError:
+            break
+        action_count = count_flagged >> 1
+        has_segments = bool(count_flagged & 1)
+        if action_count == 0 and not has_segments:
+            continue
+        unknown_action = False
+        for _ in range(action_count):
+            try:
+                act_type, pos = decode_uint16v(buf, pos)
+                _delta, pos = decode_uint16v(buf, pos)
+            except ValueError:
+                unknown_action = True
+                break
+            if act_type == ACTION_CRAFT and pos + 6 <= len(buf):
+                recipe_id, count = struct.unpack_from("<HI", buf, pos)
+                crafts.append((recipe_id, count))
+                pos += 6
+            elif act_type in KNOWN_ACTION_PAYLOAD_SIZES:
+                p_size = KNOWN_ACTION_PAYLOAD_SIZES[act_type]
+                if pos + p_size > len(buf):
+                    unknown_action = True
+                    break
+                pos += p_size
+            else:
+                unknown_action = True
+                break
+        if unknown_action or has_segments:
+            break
+    return crafts
+
+
 def inject_action_into_empty_client_heartbeat(
     buf: bytes,
     action_type: int,
@@ -865,6 +1005,8 @@ class LockstepProxyStats:
     injected_actions: int = 0
     empty_client_heartbeats_seen: int = 0
     suppressed_client_packets: int = 0
+    hand_crafted_count: int = 0
+    blocked_hand_craft_actions: int = 0
 
 
 class FactorioLockstepProxy:
@@ -879,14 +1021,17 @@ class FactorioLockstepProxy:
         achievement_action_id: int = ACTION_ACHIEVEMENT_GAINED,
         suppress_client_cancellation: bool = True,
         suppressed_client_actions: frozenset[int] = DEFAULT_SUPPRESSED_CLIENT_ACTIONS,
+        max_hand_crafts: int | None = None,
     ) -> None:
         self.listen_addr = (listen_host, listen_port)
         self.server_addr = (server_host, server_port)
         self.achievement_action_id = achievement_action_id
         self.suppress_client_cancellation = suppress_client_cancellation
         self.suppressed_client_actions = suppressed_client_actions
+        self.max_hand_crafts = max_hand_crafts
         self.stats = LockstepProxyStats()
         self._pending_injections: list[tuple[int, int, bytes, int]] = []
+        self._queued_hand_crafts = 0
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sock: socket.socket | None = None
@@ -902,6 +1047,18 @@ class FactorioLockstepProxy:
     ) -> None:
         """Queue an InputAction for injection into an eligible client heartbeat."""
         with self._lock:
+            if action_type == ACTION_CRAFT:
+                if len(payload) < 6:
+                    raise ValueError("Craft payload must be 6 bytes (<HI)")
+                _recipe_id, count = struct.unpack_from("<HI", payload, 0)
+                projected = self.stats.hand_crafted_count + self._queued_hand_crafts + count
+                if self.max_hand_crafts is not None and projected > self.max_hand_crafts:
+                    self.stats.blocked_hand_craft_actions += 1
+                    raise ValueError(
+                        f"Craft count {count} exceeds max_hand_crafts limit {self.max_hand_crafts} "
+                        f"(current={self.stats.hand_crafted_count}, queued={self._queued_hand_crafts})"
+                    )
+                self._queued_hand_crafts += count
             self._pending_injections.append(
                 (action_type, player_index, payload, min_empty_heartbeats)
             )
@@ -967,6 +1124,20 @@ class FactorioLockstepProxy:
                         if ach_id not in self.stats.gained_achievement_ids:
                             self.stats.gained_achievement_ids.append(ach_id)
 
+                    client_crafts = scan_heartbeat_for_crafts(data, hdr.payload_offset)
+                    if client_crafts:
+                        craft_total = sum(count for _rid, count in client_crafts)
+                        projected = (
+                            self.stats.hand_crafted_count + self._queued_hand_crafts + craft_total
+                        )
+                        if self.max_hand_crafts is not None and projected > self.max_hand_crafts:
+                            data = strip_client_cancellation_actions(
+                                data, frozenset({ACTION_CRAFT})
+                            )
+                            self.stats.blocked_hand_craft_actions += len(client_crafts)
+                        else:
+                            self.stats.hand_crafted_count += craft_total
+
                     if self.suppress_client_cancellation:
                         stripped = strip_client_cancellation_actions(
                             data, self.suppressed_client_actions
@@ -993,6 +1164,12 @@ class FactorioLockstepProxy:
                                     data = modified
                                     self._pending_injections.pop(0)
                                     self.stats.injected_actions += 1
+                                    if act_type == ACTION_CRAFT and len(payload) >= 6:
+                                        _rid, c_count = struct.unpack_from("<HI", payload, 0)
+                                        self._queued_hand_crafts = max(
+                                            0, self._queued_hand_crafts - c_count
+                                        )
+                                        self.stats.hand_crafted_count += c_count
                                     injected_found = scan_heartbeat_for_achievement(
                                         data, hdr.payload_offset, self.achievement_action_id
                                     )
