@@ -270,11 +270,25 @@ class TestMpProtocolUnit(unittest.TestCase):
         self.assertEqual(mp_proxy.scan_heartbeat_for_achievement(stripped_mixed, 1), [7])
 
     def test_compute_walking_vector(self) -> None:
-        """Verify normalized 2D walking vector calculation."""
+        """Verify normalized 2D walking vector calculation and unit norm bound."""
         dx, dy = mp_proxy.compute_walking_vector(0.0, 0.0, 3.0, 4.0)
         self.assertAlmostEqual(dx, 0.6)
         self.assertAlmostEqual(dy, 0.8)
+        self.assertLessEqual(dx * dx + dy * dy, 1.0)
         self.assertEqual(mp_proxy.compute_walking_vector(5.0, 5.0, 5.0, 5.0), (0.0, 0.0))
+
+        # Verify that no angle or distance ever exceeds 1.0 in IEEE-754 float64
+        for step in range(360):
+            angle = math.radians(step * 1.0)
+            for radius in (0.3, 1.1, 3.605551275463989, 7.3, 19.7):
+                tx = radius * math.cos(angle)
+                ty = radius * math.sin(angle)
+                vx, vy = mp_proxy.compute_walking_vector(0.125, -0.375, tx, ty)
+                self.assertLessEqual(
+                    vx * vx + vy * vy,
+                    1.0,
+                    f"Vector squared norm exceeded 1.0 for angle={step}, radius={radius}",
+                )
 
 
 class TestPodmanMpProxyIntegration(unittest.TestCase):
@@ -450,7 +464,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     smelt_ore_name: 2,
                 },
                 enable_telemetry=True,
-                timelapse_interval_ticks=15,
+                timelapse_interval_ticks=4,
             )
 
             # Step 3: Start UDP Lockstep Proxy with lazy-bastard max_hand_crafts limit
@@ -592,6 +606,9 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
+                patrol_x = -12.0
+                patrol_y = -8.0
+                patrol_done = False
                 furnace_x = 0.0
                 furnace_y = 0.0
                 initial_ore = 0
@@ -605,10 +622,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 last_state: mp_proxy.PlayerWorldState | None = None
 
                 success = False
-                join_deadline = time.monotonic() + 50.0
+                join_deadline = time.monotonic() + 55.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
-                    if state is not None and proxy.stats.empty_client_heartbeats_seen >= 5:
+                    if state is not None and proxy.stats.empty_client_heartbeats_seen >= 90:
                         last_state = state
                         if res_name is None and state.nearest_resource is not None:
                             res_name = state.nearest_resource.name
@@ -619,9 +636,26 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         if res_name is not None:
                             mined_ore = state.inventory.get(res_name, 0) - initial_ore
                             dist = math.hypot(res_x - state.player_x, res_y - state.player_y)
+                            patrol_dist = math.hypot(
+                                patrol_x - state.player_x, patrol_y - state.player_y
+                            )
                             now = time.monotonic()
 
-                            if mined_ore < 1:
+                            if not patrol_done:
+                                if patrol_dist > 1.5:
+                                    if (
+                                        proxy.pending_action_count() == 0
+                                        and (now - last_cmd_time) >= 0.25
+                                    ):
+                                        dx, dy = mp_proxy.compute_walking_vector(
+                                            state.player_x, state.player_y, patrol_x, patrol_y
+                                        )
+                                        act_w, pay_w = mp_proxy.build_start_walking_action(dx, dy)
+                                        proxy.queue_action(act_w, player_index=0, payload=pay_w)
+                                        last_cmd_time = now
+                                else:
+                                    patrol_done = True
+                            elif mined_ore < 1:
                                 if not mining_phase and dist > 1.75:
                                     if (
                                         proxy.pending_action_count() == 0
@@ -768,7 +802,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
 
                     frames_dir = client_dir / "script-output" / "timelapse"
                     if frames_dir.is_dir() and any(frames_dir.glob("frame_*.jpg")):
-                        mp_proxy.encode_timelapse_mp4(frames_dir, timelapse_mp4, fps=10)
+                        mp_proxy.encode_timelapse_mp4(frames_dir, timelapse_mp4, fps=15)
                         self.assertTrue(timelapse_mp4.is_file(), "Timelapse MP4 was not created")
                         self.assertGreater(
                             timelapse_mp4.stat().st_size, 1024, "Timelapse MP4 is empty"

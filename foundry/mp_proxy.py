@@ -577,7 +577,12 @@ def compute_walking_vector(
     dist = math.hypot(vx, vy)
     if dist <= 1e-6:
         return 0.0, 0.0
-    return vx / dist, vy / dist
+    dx = vx / dist
+    dy = vy / dist
+    while dx * dx + dy * dy > 1.0:
+        dx = math.nextafter(dx, 0.0)
+        dy = math.nextafter(dy, 0.0)
+    return dx, dy
 
 
 def augment_save_freeplay_created_items(
