@@ -394,3 +394,20 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "mp_proxy_test",
+    size = "large",
+    srcs = ["test_mp_proxy.py"],
+    local = True,
+    main = "test_mp_proxy.py",
+    tags = [
+        "local",
+        "manual",
+        "requires-game-data",
+    ],
+    deps = [
+        "//flow:check_blueprint_lib",
+        "//foundry:pdk_lib",
+    ],
+)

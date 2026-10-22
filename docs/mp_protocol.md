@@ -145,7 +145,7 @@ Each `TickClosure` represents all deterministic inputs scheduled for a specific 
      2. `player_index_delta: uint16v`:
         - Compute `player_index = (last_player_index + player_index_delta) & 0xffff`.
         - Update `last_player_index = player_index`.
-        - For `player_index = 1` on the first action, `player_index_delta` is `2` because `(0xffff + 2) & 0xffff == 1`. Subsequent actions for the same player use `player_index_delta == 0`.
+        - For the first player (`player_index = 0` on the C++ wire, which corresponds to `1` in Lua) on the first action, `player_index_delta` is `1` because `(0xffff + 1) & 0xffff == 0`. Subsequent actions for the same player use `player_index_delta == 0`.
      3. `action_payload`: bytes specific to `action_type`.
    - If `has_segments` is true:
      - `segment_count: uint8`, followed by segmented large actions (such as large blueprint imports).

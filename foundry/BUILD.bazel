@@ -64,6 +64,7 @@ py_library(
         "lef.py",
         "liberty.py",
         "macro_floorplan.py",
+        "mp_proxy.py",
         "native_engine/__init__.py",
         "native_engine/engine.py",
         "native_engine/symbol_finder.py",
