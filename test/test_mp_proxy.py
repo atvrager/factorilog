@@ -111,12 +111,41 @@ class TestMpProtocolUnit(unittest.TestCase):
         detected = mp_proxy.scan_heartbeat_for_achievement(injected, 1)
         self.assertEqual(detected, [1])
 
+    def test_physical_action_builders(self) -> None:
+        """Verify binary encoding of physical character InputAction builders."""
+        act_stop_w, pay_stop_w = mp_proxy.build_stop_walking_action()
+        self.assertEqual(act_stop_w, mp_proxy.ACTION_STOP_WALKING)
+        self.assertEqual(pay_stop_w, b"")
+
+        act_walk, pay_walk = mp_proxy.build_start_walking_action(1.0, -0.5)
+        self.assertEqual(act_walk, mp_proxy.ACTION_START_WALKING)
+        self.assertEqual(len(pay_walk), 16)
+        self.assertEqual(struct.unpack("<dd", pay_walk), (1.0, -0.5))
+
+        act_sel, pay_sel = mp_proxy.build_selected_entity_action(2.5, -1.25)
+        self.assertEqual(act_sel, mp_proxy.ACTION_SELECTED_ENTITY_CHANGED)
+        self.assertEqual(struct.unpack("<ii", pay_sel), (640, -320))
+
+        act_craft, pay_craft = mp_proxy.build_craft_action(42, 3)
+        self.assertEqual(act_craft, mp_proxy.ACTION_CRAFT)
+        self.assertEqual(struct.unpack("<HI", pay_craft), (42, 3))
+
+        act_pip, pay_pip = mp_proxy.build_pipette_item_action(99)
+        self.assertEqual(act_pip, mp_proxy.ACTION_PIPETTE)
+        self.assertEqual(len(pay_pip), 10)
+        self.assertEqual(struct.unpack("<BHHHBBB", pay_pip), (0, 99, 0, 0, 0, 0, 0))
+
+        act_bld, pay_bld = mp_proxy.build_place_entity_action(3.0, 4.0, direction=2)
+        self.assertEqual(act_bld, mp_proxy.ACTION_BUILD)
+        self.assertEqual(len(pay_bld), 12)
+        self.assertEqual(struct.unpack("<iiBBBB", pay_bld), (768, 1024, 2, 0, 0, 0))
+
 
 class TestPodmanMpProxyIntegration(unittest.TestCase):
     """Integration test for Podman MP server, displayless offscreen client, and UDP proxy."""
 
     def test_podman_server_proxy_and_achievement_detection(self) -> None:
-        """Start a vanilla MP server in Podman, connect via UDP proxy, and detect an achievement."""
+        """Start a vanilla MP server in Podman, play out an achievement via physical InputActions, and detect it."""
         if not shutil.which("podman"):
             self.skipTest("podman not installed")
 
@@ -137,9 +166,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             work_dir = Path(tmp)
             server_dir = work_dir / "server"
             client_dir = work_dir / "client"
+            client_home = work_dir / "client_home"
             mods_dir = work_dir / "mods"
             server_dir.mkdir(parents=True, exist_ok=True)
             client_dir.mkdir(parents=True, exist_ok=True)
+            client_home.mkdir(parents=True, exist_ok=True)
             mods_dir.mkdir(parents=True, exist_ok=True)
 
             # Disable Space Age and expansion mods so only vanilla base is active
@@ -155,25 +186,28 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             (mods_dir / "mod-list.json").write_text(json.dumps(mod_list, indent=2))
 
             server_cfg = server_dir / "config.ini"
-            server_cfg.write_text(f"[path]\nread-data=/factorio/data\nwrite-data=/work/server\n")
+            server_cfg.write_text("[path]\nread-data=/factorio/data\nwrite-data=/work/server\n")
 
             # Use 50x50 map dimensions so vanilla freeplay skips the crash-site cutscene
             map_gen = {"width": 50, "height": 50, "seed": 42}
             map_gen_file = work_dir / "map-gen-settings.json"
             map_gen_file.write_text(json.dumps(map_gen, indent=2))
 
+            # Enable auto_pause so map->ticksPlayed stays 0 until the client joins,
+            # satisfying player->onlineTime > map->ticksPlayed / 2 in AchievementStats::allowed.
             server_settings = {
                 "name": "factorilog-test-server",
                 "description": "Autonomous achievement test server",
                 "max_players": 4,
                 "visibility": {"public": False, "lan": False},
                 "require_user_verification": False,
-                "auto_pause": False,
+                "auto_pause": True,
             }
             settings_file = work_dir / "server-settings.json"
             settings_file.write_text(json.dumps(server_settings, indent=2))
 
             # Step 1: Create clean base/freeplay save inside Podman container
+            save_zip = server_dir / "saves" / "mp_test.zip"
             cmd_create = [
                 "podman",
                 "run",
@@ -209,28 +243,59 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 0,
                 f"Map creation in Podman failed:\n{res_create.stdout}\n{res_create.stderr}",
             )
-            self.assertTrue((server_dir / "saves" / "mp_test.zip").is_file())
+            self.assertTrue(save_zip.is_file())
 
-            # Step 2: Start UDP Lockstep Proxy
+            # Step 2: Dynamically extract runtime prototype IDs from level.dat0 in mp_test.zip
+            id_mappings = mp_proxy.extract_save_id_mappings(save_zip)
+            build_ach_map = id_mappings.get("build-entity-achievement", {})
+            item_map = id_mappings.get("item", {})
+            self.assertTrue(
+                build_ach_map,
+                f"Failed to extract build-entity-achievement mappings from save: {list(id_mappings)}",
+            )
+            self.assertTrue(
+                item_map,
+                f"Failed to extract item mappings from save: {list(id_mappings)}",
+            )
+
+            # Dynamically resolve the target achievement ID and placeable entity item ID
+            target_ach_name = next(
+                (name for name in build_ach_map if "automate" in name),
+                next(iter(build_ach_map)),
+            )
+            target_ach_id = build_ach_map[target_ach_name]
+
+            target_item_name = next(
+                (name for name in item_map if "assembling-machine" in name),
+                next(iter(item_map)),
+            )
+            target_item_id = item_map[target_item_name]
+
+            # Add target_item_name to freeplay created_items inside mp_test.zip
+            mp_proxy.augment_save_freeplay_created_items(save_zip, {target_item_name: 1})
+
+            # Step 3: Start UDP Lockstep Proxy and queue physical Pipette + Build actions
             proxy = mp_proxy.FactorioLockstepProxy(
                 listen_host="127.0.0.1",
                 listen_port=proxy_port,
                 server_host="127.0.0.1",
                 server_port=server_port,
             )
-            # Queue an AchievementGained (0x0159) action for achievement ID 1 (automate-this)
-            # with C++ 0-based playerIndex=0 once the client enters InGame.
-            proxy.queue_action(
-                action_type=mp_proxy.ACTION_ACHIEVEMENT_GAINED,
-                player_index=0,
-                payload=struct.pack("<H", 1),
-            )
+            act_pip, pay_pip = mp_proxy.build_pipette_item_action(target_item_id)
+            act_bld, pay_bld = mp_proxy.build_place_entity_action(2.5, 2.5, direction=0)
+            act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+
+            # Wait 10 empty heartbeats after joining so the player character spawns.
+            # Then pipette the item into the cursor and build it at (2.5, 2.5).
+            proxy.queue_action(act_pip, player_index=0, payload=pay_pip, min_empty_heartbeats=10)
+            proxy.queue_action(act_bld, player_index=0, payload=pay_bld, min_empty_heartbeats=15)
+            proxy.queue_action(act_clr, player_index=0, payload=pay_clr, min_empty_heartbeats=20)
             proxy.start()
 
             server_proc: subprocess.Popen[str] | None = None
             client_proc: subprocess.Popen[str] | None = None
             try:
-                # Step 3: Launch headless MP server inside Podman with host networking
+                # Step 4: Launch headless MP server inside Podman with host networking
                 cmd_server = [
                     "podman",
                     "run",
@@ -289,24 +354,21 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         f"STDOUT:\n{srv_out}\nLOG:\n{log_txt}"
                     )
 
-                # Step 4: Launch displayless client (SDL_VIDEODRIVER=offscreen) connected to Proxy
+                # Step 5: Launch displayless client (SDL_VIDEODRIVER=offscreen) connected to Proxy
                 client_cfg = client_dir / "config.ini"
                 client_cfg.write_text(
                     f"[path]\nread-data={factorio_root}/data\nwrite-data={client_dir}\n"
                     f"[other]\ncheck_updates=false\n"
                 )
-                # Copy cached player-data.json if present for username setting
-                host_player_data = Path(real_home) / ".factorio" / "player-data.json"
-                if host_player_data.is_file():
-                    shutil.copy(host_player_data, client_dir / "player-data.json")
-                else:
-                    (client_dir / "player-data.json").write_text(
-                        json.dumps({"service-username": "factorilog-bot"}, indent=2)
-                    )
+                (client_dir / "player-data.json").write_text(
+                    json.dumps({"service-username": "factorilog-bot"}, indent=2)
+                )
 
+                # Run client with isolated HOME so SteamUserStats does not pre-populate
+                # achievements from the host user's personal Steam session.
                 client_env = {
                     **os.environ,
-                    "HOME": real_home,
+                    "HOME": str(client_home),
                     "SteamAppId": "427520",
                     "SteamGameId": "427520",
                     "DISPLAY": "",
@@ -336,14 +398,16 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     text=True,
                 )
 
-                # Wait for handshake, map download, InGame lockstep, and achievement injection/broadcast
+                # Wait for the proxy to inject the physical actions and for the client binary
+                # to evaluate AchievementStats::onPlayerBuiltEntity -> Achievement::onGainedLocal
+                # and emit AchievementGained (0x0159) onto the UDP wire!
                 success = False
                 join_deadline = time.monotonic() + 25.0
                 while time.monotonic() < join_deadline:
                     if (
-                        proxy.stats.injected_actions >= 1
-                        and 1 in proxy.stats.gained_achievement_ids
-                        and proxy.stats.server_to_client_packets >= 290
+                        proxy.stats.injected_actions >= 2
+                        and target_ach_id in proxy.stats.client_emitted_achievement_ids
+                        and target_ach_id in proxy.stats.server_broadcast_achievement_ids
                     ):
                         success = True
                         break
@@ -368,7 +432,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
                 self.assertTrue(
                     success,
-                    f"Did not complete lockstep injection/detection. "
+                    f"Client did not naturally emit AchievementGained ({target_ach_name}={target_ach_id}) "
+                    f"after physical Pipette+Build actions.\n"
                     f"Stats: {proxy.stats}\nClient log:\n{client_log}\nServer log:\n{server_log}",
                 )
             finally:

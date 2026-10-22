@@ -154,19 +154,48 @@ Each `TickClosure` represents all deterministic inputs scheduled for a specific 
 
 Action enum indices shift between Factorio builds when new actions enter the table. Tools must resolve action indices dynamically from the binary or dissector table (in Factorio `2.1.23`, `AchievementGained` is `0x0159`).
 
-| Action Name | Payload Layout | Purpose |
-| :--- | :--- | :--- |
-| `StopWalking` | *(0 bytes)* | Stops character movement. |
-| `BeginMining` | *(0 bytes)* | Starts mining the currently selected entity or resource. |
-| `StopMining` | *(0 bytes)* | Stops mining. |
-| `StartWalking` | `direction_x: double`, `direction_y: double` (16 bytes) or fixed direction | Moves the character along the specified vector. |
-| `BeginMiningTerrain` | `position: MapPosition` (8 bytes: `x: int32`, `y: int32`) | Mines resource tiles at `position`. |
-| `Build` | `position: MapPosition`, direction, flags | Places the item currently held in the cursor. |
-| `Craft` | `recipe_id: uint16`, `count: uint32v` | Queues hand-crafting of `recipe_id`. |
-| `StartResearch` | `tech_id: uint16` | Adds or starts research on `tech_id`. |
-| `CheckCRCHeuristic` | `crc: uint32`, `tick_of_crc: uint64` (12 bytes) | Deterministic lockstep state verification. |
-| `WriteToConsole` | `message: String` | Sends chat or console text. |
-| `AchievementGained` | `achievement_id: uint16` (2 bytes) | Emitted by the client when local achievement evaluation succeeds and recorded by `InputActionHandler::achievementGained`. |
+| Action ID (`2.1.23`) | Action Name | Payload Layout | Purpose |
+| :--- | :--- | :--- | :--- |
+| `0x0001` | `StopWalking` | *(0 bytes)* | Stops character movement. |
+| `0x0002` | `BeginMining` | *(0 bytes)* | Starts mining the currently selected entity or resource. |
+| `0x0003` | `StopMining` | *(0 bytes)* | Stops mining. |
+| `0x000b` | `ClearCursor` | *(0 bytes)* | Returns the item in the player cursor to the inventory. |
+| `0x0045` | `Build` | `x: int32`, `y: int32`, `direction: uint8`, `created_by_moving: uint8`, `build_mode: uint8`, `flags: uint8` (12 bytes when `created_by_moving == 0` and `flags < 0x80`) | Places the item currently held in the cursor at fixed-point coordinates `(x, y)`. |
+| `0x0046` | `StartWalking` | `direction_x: float64`, `direction_y: float64` (16 bytes) | Moves the character along the specified 2D vector. |
+| `0x0047` | `BeginMiningTerrain` | `x: int32`, `y: int32` (8 bytes) | Mines resource tiles at fixed-point coordinates `(x, y)`. |
+| `0x0056` | `Craft` | `recipe_id: uint16`, `count: uint32` (6 bytes) | Queues hand-crafting of `recipe_id`. |
+| `0x0059` | `SetupAssemblingMachine` | `recipe_id: uint16`, `quality_id: uint8` (3 bytes) | Configures the recipe on the currently opened assembling machine. |
+| `0x005a` | `SelectedEntityChanged` | `x: int32`, `y: int32` (8 bytes) | Updates the player entity selection at fixed-point coordinates `(x, y)`. |
+| `0x005b` | `Pipette` | `signal_type: uint8 (0=Item)`, `item_id: uint16`, `tile_id: uint16`, `equip_id: uint16`, `quality_id: uint8`, `allow_ghost: uint8`, `exact_quality: uint8` (10 bytes) | Moves `item_id` from the player inventory into the player cursor (`hand`). |
+| `0x010d` | `SelectedEntityChangedBasedOnUnitNumber` | `unit_number: uint64` (8 bytes) | Selects the entity with the specified `unit_number`. |
+| `0x0159` | `AchievementGained` | `achievement_id: uint16` (2 bytes) | Emitted by the client when local achievement evaluation succeeds and recorded by `InputActionHandler::achievementGained`. |
+| `0x015d` | `CheckCRCHeuristic` | `crc: uint32`, `tick_of_crc: uint64` (12 bytes) | Deterministic lockstep state verification. |
+| `0x012b` | `WriteToConsole` | `message: String` | Sends chat or console text. |
+
+### 6.4 Dynamic Prototype ID Extraction from `level.dat0` (`savedIDMapping`)
+
+Every `InputAction` that references an achievement, item, recipe, entity, or technology uses a 16-bit runtime prototype ID (`ID<T, uint16>`). Factorio assigns these IDs in `PrototypeList<T>::assignPrototypeIDs` and writes the `savedIDMapping` tables into `level.dat0` inside the `.zip` save archive.
+
+Each `savedIDMapping` table in the zlib-decompressed `level.dat0` stream has the following binary structure:
+
+1. `num_types: uint16` (`<H`).
+2. Repeated `num_types` times:
+   - `type_name: String` (`length: uint32v`, followed by `length` ASCII bytes, such as `"build-entity-achievement"`, `"item"`, `"recipe"`, or `"assembling-machine"`).
+   - `num_prototypes: uint16` (`<H`).
+   - Repeated `num_prototypes` times:
+     - `prototype_name: String` (`length: uint32v`, followed by `length` UTF-8 bytes, such as `"automate-this"` or `"assembling-machine-1"`).
+     - `prototype_id: uint16` (`<H`).
+
+The function [`extract_save_id_mappings`](file:///home/atv/src/factorilog/foundry/mp_proxy.py) parses these tables from a Factorio save `.zip` archive. This lets [`factorilog`](file:///home/atv/src/factorilog) resolve all wire IDs dynamically at runtime without hardcoded constants.
+
+### 6.5 Native Achievement Unlock Conditions (`AchievementStats::allowed` and `Achievement::onGainedLocal`)
+
+Decompilation of `AchievementStats::allowed` (`0x18cab00`) and `Achievement::onGainedLocal` (`0x18cad00`) establishes four runtime requirements for the client binary to emit `AchievementGained` (`0x0159`) onto the UDP wire:
+
+1. **Vanilla Base Mod Only**: Enable only the `base` mod in `mod-list.json` (disable `elevated-rails`, `quality`, `recycler`, and `space-age`).
+2. **Scenario Identity and Zero Commands**: The save must originate from `base/freeplay` with `commandsUsed == 0` (`map + 0x246`) and `editorUsed == 0` (`map + 0x247`).
+3. **Multiplayer Online Time Fraction**: In multiplayer, `AchievementStats::allowed` requires `player->onlineTime > map->ticksPlayed / 2`. Setting `"auto_pause": true` in `server-settings.json` holds `map->ticksPlayed` at `0` until the client connects, which guarantees `player->onlineTime > map->ticksPlayed / 2`.
+4. **Clean Local Achievement State**: In `Achievement::onGainedLocal`, the client suppresses `Player::sendToListeners(InputAction 0x0159)` when `global->localAchievementStats` already marks the achievement as unlocked. An isolated `HOME` directory prevents `steamclient.so` from loading host Steam stats and guarantees a clean local achievement table.
 
 ---
 
