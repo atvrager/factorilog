@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
+import signal
 import socket
 import struct
+import subprocess
 import threading
+import time
 import zipfile
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 MSG_PING = 0
@@ -579,6 +584,9 @@ def augment_save_freeplay_created_items(
     save_zip_path: Path,
     extra_items: dict[str, int],
     enable_telemetry: bool = True,
+    timelapse_interval_ticks: int | None = None,
+    timelapse_resolution: tuple[int, int] = (1280, 720),
+    timelapse_zoom: float = 0.85,
 ) -> None:
     """Augment control.lua inside save_zip_path to skip cutscene, add items, and emit telemetry."""
     lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in extra_items.items())
@@ -595,7 +603,7 @@ def augment_save_freeplay_created_items(
         "})\n"
     )
     telemetry_events = ""
-    telemetry_block = ""
+    nth_tick_entries: list[str] = []
     if enable_telemetry:
         telemetry_events = (
             ",\n"
@@ -603,9 +611,7 @@ def augment_save_freeplay_created_items(
             "      storage.hand_crafted_count = (storage.hand_crafted_count or 0) + 1\n"
             "    end\n"
         )
-        telemetry_block = (
-            ",\n"
-            "  on_nth_tick = {\n"
+        nth_tick_entries.append(
             "    [5] = function(e)\n"
             "      local p = game.get_player(1)\n"
             "      if not p then return end\n"
@@ -686,9 +692,36 @@ def augment_save_freeplay_created_items(
             "        resources_by_name = storage.resources_by_name or {}\n"
             "      }\n"
             "      helpers.write_file('factorilog_state.json', helpers.table_to_json(state) .. '\\n', false)\n"
-            "    end\n"
-            "  }\n"
+            "    end"
         )
+    if timelapse_interval_ticks is not None and timelapse_interval_ticks > 0:
+        res_w, res_h = int(timelapse_resolution[0]), int(timelapse_resolution[1])
+        zoom_val = float(timelapse_zoom)
+        interval = int(timelapse_interval_ticks)
+        timelapse_body = (
+            "      local p = game.get_player(1)\n"
+            "      if not p then return end\n"
+            "      storage.timelapse_seq = (storage.timelapse_seq or 0) + 1\n"
+            "      game.take_screenshot({\n"
+            "        player = p,\n"
+            "        by_player = p,\n"
+            "        position = p.position,\n"
+            f"        resolution = {{{res_w}, {res_h}}},\n"
+            f"        zoom = {zoom_val},\n"
+            "        show_gui = true,\n"
+            "        show_entity_info = true,\n"
+            "        path = string.format('timelapse/frame_%08d.jpg', storage.timelapse_seq)\n"
+            "      })\n"
+        )
+        if interval == 5 and nth_tick_entries:
+            nth_tick_entries[0] = nth_tick_entries[0][:-7] + timelapse_body + "    end"
+        else:
+            nth_tick_entries.append(f"    [{interval}] = function(e)\n{timelapse_body}    end")
+
+    telemetry_block = ""
+    if nth_tick_entries:
+        joined_entries = ",\n".join(nth_tick_entries)
+        telemetry_block = f",\n  on_nth_tick = {{\n{joined_entries}\n  }}\n"
     post_hook = (
         "\nlocal handler = require('event_handler')\n"
         "handler.add_lib({\n"
@@ -1201,3 +1234,174 @@ class FactorioLockstepProxy:
                 pass
         if self._client_addr is not None:
             sock.sendto(data, self._client_addr)
+
+
+def _find_free_x11_display(start_display: int = 99, max_display: int = 199) -> int:
+    """Return an unused X11 display number that has no lock or socket file in /tmp."""
+    for disp in range(start_display, max_display + 1):
+        lock_file = Path(f"/tmp/.X{disp}-lock")
+        sock_file = Path(f"/tmp/.X11-unix/X{disp}")
+        if not lock_file.exists() and not sock_file.exists():
+            return disp
+    raise RuntimeError("No free X11 display number found")
+
+
+class XvfbVideoRecorder:
+    """Record a headless Factorio client window to an MP4 file through Xvfb and ffmpeg."""
+
+    def __init__(
+        self,
+        output_mp4: Path,
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+        display_num: int | None = None,
+    ) -> None:
+        self.output_mp4 = output_mp4
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.display_num = _find_free_x11_display() if display_num is None else display_num
+        self._xvfb_proc: subprocess.Popen[str] | None = None
+        self._ffmpeg_proc: subprocess.Popen[str] | None = None
+
+    @property
+    def display(self) -> str:
+        """Return the X11 DISPLAY string (for example ':99')."""
+        return f":{self.display_num}"
+
+    def start_display(self) -> str:
+        """Start the Xvfb virtual X11 framebuffer and wait until its socket is ready."""
+        if not shutil.which("Xvfb"):
+            raise FileNotFoundError("Xvfb executable not found")
+        cmd = [
+            "Xvfb",
+            self.display,
+            "-screen",
+            "0",
+            f"{self.width}x{self.height}x24",
+            "-nolisten",
+            "tcp",
+            "-ac",
+        ]
+        self._xvfb_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        sock_file = Path(f"/tmp/.X11-unix/X{self.display_num}")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if sock_file.exists():
+                break
+            if self._xvfb_proc.poll() is not None:
+                raise RuntimeError("Xvfb exited before creating X11 socket")
+            time.sleep(0.05)
+        return self.display
+
+    def start_recording(self) -> None:
+        """Start ffmpeg x11grab capture from the Xvfb display into output_mp4."""
+        if not shutil.which("ffmpeg"):
+            raise FileNotFoundError("ffmpeg executable not found")
+        if self._xvfb_proc is None:
+            self.start_display()
+        self.output_mp4.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "x11grab",
+            "-framerate",
+            str(self.fps),
+            "-video_size",
+            f"{self.width}x{self.height}",
+            "-draw_mouse",
+            "0",
+            "-i",
+            f"{self.display}.0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            str(self.output_mp4),
+        ]
+        self._ffmpeg_proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+    def stop(self) -> None:
+        """Finalize the MP4 file and terminate ffmpeg and Xvfb."""
+        if self._ffmpeg_proc is not None:
+            if self._ffmpeg_proc.poll() is None:
+                self._ffmpeg_proc.send_signal(signal.SIGINT)
+                try:
+                    self._ffmpeg_proc.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    self._ffmpeg_proc.kill()
+            self._ffmpeg_proc = None
+
+        if self._xvfb_proc is not None:
+            if self._xvfb_proc.poll() is None:
+                self._xvfb_proc.terminate()
+                try:
+                    self._xvfb_proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self._xvfb_proc.kill()
+            self._xvfb_proc = None
+
+    def __enter__(self) -> XvfbVideoRecorder:
+        self.start_display()
+        self.start_recording()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.stop()
+
+
+def encode_timelapse_mp4(
+    frames_dir: Path,
+    output_mp4: Path,
+    fps: int = 12,
+    frame_pattern: str = "frame_%08d.jpg",
+) -> Path:
+    """Encode sequential screenshot frames in frames_dir into an H.264 MP4 video."""
+    if not shutil.which("ffmpeg"):
+        raise FileNotFoundError("ffmpeg executable not found")
+    if not frames_dir.is_dir():
+        raise FileNotFoundError(f"Timelapse directory does not exist: {frames_dir}")
+    output_mp4.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(fps),
+        "-i",
+        str(frames_dir / frame_pattern),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_mp4),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg timelapse encode failed:\n{res.stderr}")
+    return output_mp4

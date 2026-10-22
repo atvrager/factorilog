@@ -440,7 +440,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             )
             craft_recipe_id = recipe_map[craft_recipe_name]
 
-            # Add starter items and scenario telemetry hook to control.lua inside mp_test.zip
+            # Add starter items, scenario telemetry hook, and timelapse screenshot hook to control.lua
             mp_proxy.augment_save_freeplay_created_items(
                 save_zip,
                 {
@@ -450,6 +450,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     smelt_ore_name: 2,
                 },
                 enable_telemetry=True,
+                timelapse_interval_ticks=15,
             )
 
             # Step 3: Start UDP Lockstep Proxy with lazy-bastard max_hand_crafts limit
@@ -461,6 +462,14 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 max_hand_crafts=max_hand_crafts,
             )
             proxy.start()
+
+            live_mp4 = work_dir / "videos" / "bot_live_hud.mp4"
+            timelapse_mp4 = work_dir / "videos" / "bot_timelapse.mp4"
+            recorder = mp_proxy.XvfbVideoRecorder(live_mp4, width=1280, height=720, fps=30)
+            has_xvfb_ffmpeg = bool(shutil.which("Xvfb") and shutil.which("ffmpeg"))
+            if has_xvfb_ffmpeg:
+                recorder.start_display()
+                recorder.start_recording()
 
             server_proc: subprocess.Popen[str] | None = None
             client_proc: subprocess.Popen[str] | None = None
@@ -524,11 +533,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         f"STDOUT:\n{srv_out}\nLOG:\n{log_txt}"
                     )
 
-                # Step 5: Launch displayless client (SDL_VIDEODRIVER=offscreen) connected to Proxy
+                # Step 5: Launch client connected to Proxy (on Xvfb display when available)
                 client_cfg = client_dir / "config.ini"
                 client_cfg.write_text(
                     f"[path]\nread-data={factorio_root}/data\nwrite-data={client_dir}\n"
                     f"[other]\ncheck_updates=false\n"
+                    f"[graphics]\nfull-screen=false\npreferred-screen-index=0\n"
                 )
                 (client_dir / "player-data.json").write_text(
                     json.dumps({"service-username": "factorilog-bot"}, indent=2)
@@ -541,9 +551,9 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     "HOME": str(client_home),
                     "SteamAppId": "427520",
                     "SteamGameId": "427520",
-                    "DISPLAY": "",
+                    "DISPLAY": recorder.display if has_xvfb_ffmpeg else "",
                     "WAYLAND_DISPLAY": "",
-                    "SDL_VIDEODRIVER": "offscreen",
+                    "SDL_VIDEODRIVER": "x11" if has_xvfb_ffmpeg else "offscreen",
                 }
                 cmd_client = [
                     str(elf_bin),
@@ -557,6 +567,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     "--video-memory-usage",
                     "low",
                     "--low-vram",
+                    "--window-size",
+                    "1280x720",
                     "--mp-connect",
                     f"127.0.0.1:{proxy_port}",
                 ]
@@ -743,9 +755,33 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
                     ):
+                        # Allow a brief pause so the achievement toast and final frames render
+                        time.sleep(0.5)
                         success = True
                         break
                     time.sleep(0.05)
+
+                if has_xvfb_ffmpeg:
+                    recorder.stop()
+                    self.assertTrue(live_mp4.is_file(), "Live HUD MP4 was not created")
+                    self.assertGreater(live_mp4.stat().st_size, 1024, "Live HUD MP4 is empty")
+
+                    frames_dir = client_dir / "script-output" / "timelapse"
+                    if frames_dir.is_dir() and any(frames_dir.glob("frame_*.jpg")):
+                        mp_proxy.encode_timelapse_mp4(frames_dir, timelapse_mp4, fps=10)
+                        self.assertTrue(timelapse_mp4.is_file(), "Timelapse MP4 was not created")
+                        self.assertGreater(
+                            timelapse_mp4.stat().st_size, 1024, "Timelapse MP4 is empty"
+                        )
+
+                    export_dir = os.environ.get("FACTORILOG_VIDEO_EXPORT_DIR")
+                    if export_dir:
+                        exp_path = Path(export_dir)
+                        exp_path.mkdir(parents=True, exist_ok=True)
+                        if live_mp4.is_file():
+                            shutil.copy2(live_mp4, exp_path / "bot_live_hud.mp4")
+                        if timelapse_mp4.is_file():
+                            shutil.copy2(timelapse_mp4, exp_path / "bot_timelapse.mp4")
 
                 client_log = ""
                 if (client_dir / "factorio-current.log").is_file():
@@ -803,6 +839,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )
             finally:
+                recorder.stop()
                 proxy.stop()
                 for proc in (client_proc, server_proc):
                     if proc is not None:
