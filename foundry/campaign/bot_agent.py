@@ -818,3 +818,86 @@ class BotAgent:
         lines.append("    seeded_count = seeded_count,")
         lines.append("  }")
         return "\n".join(lines) + "\n"
+
+    def build_lua_progressive_plan_executor_snippet(
+        self,
+        step_stride: float = 0.55,
+    ) -> str:
+        """Generate a Lua snippet that walks the bot and executes tasks progressively across ticks."""
+        if self.plan is None:
+            raise RuntimeError("Cannot generate progressive Lua snippet before synthesize_plan()")
+
+        task_entries: list[str] = []
+        for task in self.plan.tasks:
+            ug_str = f"'{task.entity_type}'" if task.entity_type in ("input", "output") else "nil"
+            rec_str = f"'{task.recipe}'" if task.recipe is not None else "nil"
+            task_entries.append(
+                f"    {{kind = '{task.task_kind}', name = '{task.target_name}', "
+                f"tx = {task.target_x}, ty = {task.target_y}, "
+                f"sx = {task.stand_x}, sy = {task.stand_y}, "
+                f"dir = {task.direction}, ug = {ug_str}, rec = {rec_str}, "
+                f"cnt = {task.item_count}}}"
+            )
+
+        tasks_lua = ",\n".join(task_entries)
+        stride_val = float(step_stride)
+        return (
+            "local BOT_TASKS = {\n"
+            f"{tasks_lua}\n"
+            "}\n\n"
+            "local function step_bot_plan(surface, force)\n"
+            "  if not storage.bot_execution then\n"
+            "    storage.bot_execution = {\n"
+            "      cleared_count = 0,\n"
+            "      placed_count = 0,\n"
+            "      configured_count = 0,\n"
+            "      seeded_count = 0,\n"
+            "      task_idx = 1,\n"
+            "      completed = false,\n"
+            "    }\n"
+            "  end\n"
+            "  local exec = storage.bot_execution\n"
+            "  if exec.completed then return end\n"
+            "  local idx = exec.task_idx\n"
+            "  if idx > #BOT_TASKS then\n"
+            "    exec.completed = true\n"
+            "    return\n"
+            "  end\n"
+            "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
+            "  local t = BOT_TASKS[idx]\n"
+            "  if char_ent and char_ent.valid then\n"
+            "    local dx = t.sx - char_ent.position.x\n"
+            "    local dy = t.sy - char_ent.position.y\n"
+            "    local dist = math.sqrt(dx * dx + dy * dy)\n"
+            f"    if dist > {stride_val} then\n"
+            f"      local nx = char_ent.position.x + (dx / dist) * {stride_val}\n"
+            f"      local ny = char_ent.position.y + (dy / dist) * {stride_val}\n"
+            "      char_ent.teleport({nx, ny})\n"
+            "      return\n"
+            "    else\n"
+            "      char_ent.teleport({t.sx, t.sy})\n"
+            "    end\n"
+            "  end\n"
+            "  if t.kind == 'clear_obstacle' then\n"
+            "    for _, obs in pairs(surface.find_entities_filtered({position = {t.tx, t.ty}, radius = 1.5})) do\n"
+            "      if obs.valid and obs.name ~= 'character' and obs.type ~= 'resource' then\n"
+            "        obs.destroy()\n"
+            "        exec.cleared_count = exec.cleared_count + 1\n"
+            "      end\n"
+            "    end\n"
+            "  elseif t.kind == 'place_entity' then\n"
+            "    local params = {name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, raise_built = true}\n"
+            "    if t.ug then params.type = t.ug end\n"
+            "    if t.rec then params.recipe = t.rec end\n"
+            "    local ent = surface.create_entity(params)\n"
+            "    if ent then exec.placed_count = exec.placed_count + 1 end\n"
+            "  elseif t.kind == 'configure_recipe' and t.rec then\n"
+            "    local ent = surface.find_entity(t.name, {t.tx, t.ty})\n"
+            "    if ent then ent.set_recipe(t.rec) exec.configured_count = exec.configured_count + 1 end\n"
+            "  elseif t.kind == 'seed_fuel' then\n"
+            "    local ent = surface.find_entity('boiler', {t.tx, t.ty})\n"
+            "    if ent then ent.insert({name = t.name, count = t.cnt}) exec.seeded_count = exec.seeded_count + 1 end\n"
+            "  end\n"
+            "  exec.task_idx = idx + 1\n"
+            "end\n"
+        )

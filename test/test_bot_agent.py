@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -40,6 +43,8 @@ from foundry.mp_proxy import (
     ACTION_SETUP_ASSEMBLING_MACHINE,
     FactorioLockstepProxy,
     PlayerWorldState,
+    XvfbVideoRecorder,
+    encode_timelapse_mp4,
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "data" / "dump-fixture.json"
@@ -410,9 +415,9 @@ class BotAgentTest(unittest.TestCase):
                 verify=False,
             )
             self.assertGreaterEqual(len(plan.obstacles_to_clear), 2)
-            executor_lua = bot.build_lua_plan_executor_snippet()
+            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.75)
 
-            # Stage 3: Execute the bot plan on the same map surface and run 7,200 ticks
+            # Stage 3: Execute the progressive bot plan across ticks and verify full production
             build_scenario = "bot_starter_base_exec"
             build_dir = tmp_path / "scenarios" / build_scenario
             build_dir.mkdir(parents=True, exist_ok=True)
@@ -421,7 +426,10 @@ class BotAgentTest(unittest.TestCase):
             )
 
             build_control_lua = (
-                "script.on_init(function()\n"
+                progressive_lua
+                + "\nlocal function ensure_world_initialized()\n"
+                + "  if storage.world_initialized then return end\n"
+                + "  storage.world_initialized = true\n"
                 + surface_setup_lua
                 + "  local force = game.forces['player']\n"
                 + "  for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
@@ -432,8 +440,63 @@ class BotAgentTest(unittest.TestCase):
                 + "  if force.technologies['steel-processing'] then\n"
                 + "    force.add_research('steel-processing')\n"
                 + "  end\n"
-                + "  surface.create_entity({name = 'character', position = {10.5, 10.5}, force = force})\n"
-                + executor_lua
+                + "  surface.daytime = 0.0\n"
+                + "  surface.freeze_daytime = true\n"
+                + "  if #surface.find_entities_filtered({name = 'character'}) == 0 then\n"
+                + "    surface.create_entity({name = 'character', position = {24.5, 18.5}, force = force})\n"
+                + "  end\n"
+                + "end\n\n"
+                + "script.on_init(ensure_world_initialized)\n\n"
+                + "script.on_event(defines.events.on_tick, function(event)\n"
+                + "  ensure_world_initialized()\n"
+                + "  if game.is_multiplayer() and #game.connected_players == 0 then return end\n"
+                + "  local surface = game.surfaces[1]\n"
+                + "  local force = game.forces['player']\n"
+                + "  local p = game.get_player(1)\n"
+                + "  if p and p.valid then\n"
+                + "    p.game_view_settings.show_entity_info = true\n"
+                + "    if not storage.mp_speed_set then\n"
+                + "      storage.mp_speed_set = true\n"
+                + "      game.speed = 4\n"
+                + "      for _, c in pairs(surface.find_entities_filtered({name = 'character'})) do\n"
+                + "        if p.character and c.unit_number ~= p.character.unit_number then c.destroy() end\n"
+                + "      end\n"
+                + "      if p.character then p.character.teleport({24.5, 18.5}) end\n"
+                + "    end\n"
+                + "  end\n"
+                + "  storage.active_ticks = (storage.active_ticks or 0) + 1\n"
+                + "  if not game.is_multiplayer() or storage.active_ticks > 60 then\n"
+                + "    step_bot_plan(surface, force)\n"
+                + "  end\n"
+                + "  local building = not (storage.bot_execution and storage.bot_execution.completed)\n"
+                + "  local snap_stride = building and 6 or 24\n"
+                + "  if p and p.valid and storage.active_ticks >= 36 and storage.active_ticks % snap_stride == 0 and (storage.frame_seq or 0) < 280 then\n"
+                + "    storage.frame_seq = (storage.frame_seq or 0) + 1\n"
+                + "    local char_ent = p.character or surface.find_entities_filtered({name = 'character'})[1]\n"
+                + "    local follow_pos = (char_ent and char_ent.valid and building) and char_ent.position or {x = 30, y = 21}\n"
+                + "    game.take_screenshot({\n"
+                + "      player = p,\n"
+                + "      by_player = p,\n"
+                + "      position = {x = 23, y = 22},\n"
+                + "      resolution = {1280, 800},\n"
+                + "      zoom = 0.55,\n"
+                + "      daytime = 0.0,\n"
+                + "      show_gui = false,\n"
+                + "      show_entity_info = true,\n"
+                + "      path = string.format('timelapse_overview/frame_%08d.jpg', storage.frame_seq)\n"
+                + "    })\n"
+                + "    game.take_screenshot({\n"
+                + "      player = p,\n"
+                + "      by_player = p,\n"
+                + "      position = follow_pos,\n"
+                + "      resolution = {1280, 800},\n"
+                + "      zoom = 0.95,\n"
+                + "      daytime = 0.0,\n"
+                + "      show_gui = false,\n"
+                + "      show_entity_info = true,\n"
+                + "      path = string.format('timelapse_follow/frame_%08d.jpg', storage.frame_seq)\n"
+                + "    })\n"
+                + "  end\n"
                 + "end)\n\n"
                 + "script.on_nth_tick(500, function(event)\n"
                 + "  if event.tick == 0 then return end\n"
@@ -487,6 +550,10 @@ class BotAgentTest(unittest.TestCase):
             )
 
             save_zip = tmp_path / "saves" / f"{build_scenario}.zip"
+            export_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ""))
+            if export_dir.is_dir():
+                shutil.copy2(save_zip, export_dir / "starter_base_bot_save.zip")
+
             proc_sim = subprocess.run(
                 [
                     str(factorio_bin),
@@ -497,7 +564,7 @@ class BotAgentTest(unittest.TestCase):
                     "--benchmark",
                     str(save_zip),
                     "--benchmark-ticks",
-                    "8000",
+                    "8500",
                 ],
                 capture_output=True,
                 text=True,
@@ -513,6 +580,7 @@ class BotAgentTest(unittest.TestCase):
             sim_stats = json.loads(stats_file.read_text())
 
             exec_info = sim_stats["bot_execution"]
+            self.assertTrue(exec_info["completed"], msg=f"Exec info: {exec_info}")
             self.assertGreaterEqual(exec_info["cleared_count"], 2)
             self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
             self.assertGreaterEqual(exec_info["seeded_count"], 1)
@@ -529,6 +597,184 @@ class BotAgentTest(unittest.TestCase):
                 sim_stats["asm_made"].get("automation-science-pack", 0),
                 0,
                 msg=f"Stats: {sim_stats}",
+            )
+
+            if export_dir.is_dir() and shutil.which("Xvfb") and shutil.which("ffmpeg"):
+                self._record_bot_videos(
+                    factorio_bin=Path(factorio_bin),
+                    tmp_path=tmp_path,
+                    mods_dir=mods_dir,
+                    save_zip=save_zip,
+                    export_dir=export_dir,
+                )
+
+    def _record_bot_videos(
+        self,
+        factorio_bin: Path,
+        tmp_path: Path,
+        mods_dir: Path,
+        save_zip: Path,
+        export_dir: Path,
+    ) -> None:
+        """Record live HUD, overview, and follow-cam MP4 videos of the bot starter base build."""
+        import socket
+
+        elf_bin = factorio_bin.resolve().parent.parent / "x64_" / "factorio"
+        if not elf_bin.is_file():
+            elf_bin = factorio_bin.resolve()
+
+        srv_dir = tmp_path / "vid_server"
+        cli_dir = tmp_path / "vid_client"
+        srv_home = tmp_path / "srv_home"
+        cli_home = tmp_path / "cli_home"
+        for d in (srv_dir, cli_dir, srv_home, cli_home):
+            d.mkdir(parents=True, exist_ok=True)
+
+        srv_cfg = srv_dir / "config.ini"
+        srv_cfg.write_text(
+            f"[path]\nread-data=__PATH__executable__/../../data\nwrite-data={srv_dir}\n"
+        )
+        cli_cfg = cli_dir / "config.ini"
+        cli_cfg.write_text(
+            f"[path]\nread-data=__PATH__executable__/../../data\nwrite-data={cli_dir}\n"
+            f"[other]\ncheck_updates=false\n"
+            f"[graphics]\nfull-screen=false\npreferred-screen-index=0\n"
+        )
+        (cli_dir / "player-data.json").write_text(
+            json.dumps({"service-username": "factorilog-bot"}, indent=2)
+        )
+
+        vid_save = srv_dir / "saves" / "vid_sim.zip"
+        vid_save.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(save_zip, vid_save)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        srv_settings = srv_dir / "server-settings.json"
+        srv_settings.write_text(
+            json.dumps(
+                {
+                    "name": "bot-vid-srv",
+                    "description": "Autonomous starter base bot video server",
+                    "max_players": 2,
+                    "visibility": {"public": False, "lan": False},
+                    "require_user_verification": False,
+                    "auto_pause": True,
+                }
+            )
+        )
+
+        live_mp4 = export_dir / "starter_base_bot_live.mp4"
+        with XvfbVideoRecorder(live_mp4, width=1280, height=800, fps=30) as recorder:
+            srv_proc = subprocess.Popen(
+                [
+                    str(elf_bin),
+                    "-c",
+                    str(srv_cfg),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--bind",
+                    f"127.0.0.1:{port}",
+                    "--start-server",
+                    str(vid_save),
+                    "--server-settings",
+                    str(srv_settings),
+                ],
+                env={
+                    **os.environ,
+                    "HOME": str(srv_home),
+                    "SteamAppId": "427520",
+                    "SteamGameId": "427520",
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            cli_proc: subprocess.Popen[str] | None = None
+            try:
+                srv_log = srv_dir / "factorio-current.log"
+                deadline = time.monotonic() + 20.0
+                while time.monotonic() < deadline:
+                    if (
+                        srv_log.is_file()
+                        and "changing state from(CreatingGame) to(InGame)"
+                        in srv_log.read_text(errors="replace")
+                    ):
+                        break
+                    time.sleep(0.1)
+
+                cli_proc = subprocess.Popen(
+                    [
+                        str(elf_bin),
+                        "-c",
+                        str(cli_cfg),
+                        "--mod-directory",
+                        str(mods_dir),
+                        "--disable-audio",
+                        "--force-graphics-preset",
+                        "very-low",
+                        "--video-memory-usage",
+                        "low",
+                        "--low-vram",
+                        "--window-size",
+                        "1280x800",
+                        "--mp-connect",
+                        f"127.0.0.1:{port}",
+                    ],
+                    env={
+                        **os.environ,
+                        "HOME": str(cli_home),
+                        "SteamAppId": "427520",
+                        "SteamGameId": "427520",
+                        "DISPLAY": recorder.display,
+                        "WAYLAND_DISPLAY": "",
+                        "SDL_VIDEODRIVER": "x11",
+                    },
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+
+                target_frame = (
+                    cli_dir / "script-output" / "timelapse_overview" / "frame_00000240.jpg"
+                )
+                wait_deadline = time.monotonic() + 90.0
+                while time.monotonic() < wait_deadline:
+                    if target_frame.is_file():
+                        break
+                    if cli_proc.poll() is not None or srv_proc.poll() is not None:
+                        break
+                    time.sleep(0.25)
+            finally:
+                for p in (cli_proc, srv_proc):
+                    if p is not None and p.poll() is None:
+                        p.terminate()
+                        try:
+                            p.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            p.kill()
+
+        overview_dir = cli_dir / "script-output" / "timelapse_overview"
+        follow_dir = cli_dir / "script-output" / "timelapse_follow"
+        if overview_dir.is_dir() and list(overview_dir.glob("frame_*.jpg")):
+            encode_timelapse_mp4(
+                overview_dir,
+                export_dir / "starter_base_bot_overview.mp4",
+                fps=20,
+            )
+        else:
+            srv_txt = srv_proc.stdout.read() if srv_proc.stdout else ""
+            cli_txt = cli_proc.stdout.read() if cli_proc and cli_proc.stdout else ""
+            (export_dir / "vid_debug.log").write_text(
+                f"=== SRV ===\n{srv_txt}\n=== CLI ===\n{cli_txt}\n"
+            )
+        if follow_dir.is_dir() and list(follow_dir.glob("frame_*.jpg")):
+            encode_timelapse_mp4(
+                follow_dir,
+                export_dir / "starter_base_bot_follow.mp4",
+                fps=20,
             )
 
 
