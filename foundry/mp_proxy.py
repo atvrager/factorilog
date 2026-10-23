@@ -550,6 +550,7 @@ class PlayerWorldState:
     hand_crafted_count: int = 0
     machine_crafted_count: int = 0
     steam_energy_generated: float = 0.0
+    steam_power_researched: bool = False
     electronics_researched: bool = False
     science_pack_researched: bool = False
     automation_researched: bool = False
@@ -656,6 +657,7 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         hand_crafted_count=int(player.get("hand_crafted_count", 0)),
         machine_crafted_count=int(player.get("machine_crafted_count", 0)),
         steam_energy_generated=float(player.get("steam_energy_generated", 0.0)),
+        steam_power_researched=bool(player.get("steam_power_researched", False)),
         electronics_researched=bool(player.get("electronics_researched", False)),
         science_pack_researched=bool(player.get("science_pack_researched", False)),
         automation_researched=bool(player.get("automation_researched", False)),
@@ -684,14 +686,17 @@ def compute_walking_vector(
 
 def augment_save_freeplay_created_items(
     save_zip_path: Path,
-    extra_items: dict[str, int],
+    extra_items: dict[str, int] | None = None,
     enable_telemetry: bool = True,
     timelapse_interval_ticks: int | None = None,
     timelapse_resolution: tuple[int, int] = (1280, 720),
     timelapse_zoom: float = 0.85,
+    stationary_game_speed: float = 1.0,
+    walking_game_speed: float = 1.0,
 ) -> None:
-    """Augment control.lua inside save_zip_path to skip cutscene, add items, and emit telemetry."""
-    lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in extra_items.items())
+    """Augment control.lua inside save_zip_path to skip cutscene and emit telemetry."""
+    items_dict = extra_items or {}
+    lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in items_dict.items())
     pre_hook = (
         "local handler = require('event_handler')\n"
         "handler.add_lib({\n"
@@ -700,17 +705,72 @@ def augment_save_freeplay_created_items(
         "      storage.disable_crashsite = true\n"
         "      storage.skip_intro = true\n"
         "      storage.chart_distance = 64\n"
-        "      local p = game.get_player(e.player_index)\n"
-        "      if p and p.force then\n"
-        "        if p.force.technologies['steam-power'] then\n"
-        "          p.force.technologies['steam-power'].researched = true\n"
-        "        end\n"
-        "        p.force.laboratory_speed_modifier = 4.0\n"
-        "      end\n"
         "    end\n"
         "  }\n"
         "})\n"
     )
+    speed_hook = ""
+    if stationary_game_speed != 1.0 or walking_game_speed != 1.0:
+        speed_hook = (
+            "      if e.tick >= 1220 then\n"
+            "        local fast_want = false\n"
+            "        if not p.walking_state.walking then\n"
+            "          local m_goals = {['iron-ore'] = 152, ['stone'] = 25, ['coal'] = 48, ['copper-ore'] = 38}\n"
+            "          if p.mining_state.mining and p.selected and p.selected.valid then\n"
+            "            local g = m_goals[p.selected.name]\n"
+            "            if g and (contents[p.selected.name] or 0) < g then\n"
+            "              fast_want = true\n"
+            "            end\n"
+            "          end\n"
+            "          if p.crafting_queue_size > 0 then\n"
+            "            fast_want = true\n"
+            "          end\n"
+            "          if (contents['copper-ore'] or 0) == 0 and not (spwr_res and elec_res) then\n"
+            "            for _, f in ipairs(p.surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
+            "              if f.valid and f.is_crafting() then\n"
+            "                fast_want = true\n"
+            "                break\n"
+            "              end\n"
+            "            end\n"
+            "          end\n"
+            "          if (contents['small-electric-pole'] or 0) == 1 and (contents['iron-plate'] or 0) < 70 then\n"
+            "            for _, f in ipairs(p.surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
+            "              if f.valid and f.is_crafting() then\n"
+            "                fast_want = true\n"
+            "                break\n"
+            "              end\n"
+            "            end\n"
+            "          end\n"
+            "          if p.force.current_research and p.crafting_queue_size == 0 and (contents['automation-science-pack'] or 0) == 0 and not auto_res then\n"
+            "            fast_want = true\n"
+            "          end\n"
+            "          local asm_targets = {\n"
+            "            ['iron-gear-wheel'] = 9,\n"
+            "            ['copper-cable'] = 16,\n"
+            "            ['electronic-circuit'] = 21,\n"
+            "            ['transport-belt'] = 23,\n"
+            "            ['inserter'] = 25,\n"
+            "            ['assembling-machine-1'] = 26\n"
+            "          }\n"
+            "          for _, am in ipairs(asms) do\n"
+            "            if am.valid and am.is_crafting() then\n"
+            "              local rec = am.get_recipe()\n"
+            "              if rec and asm_targets[rec.name] and mc_count < asm_targets[rec.name] then\n"
+            "                fast_want = true\n"
+            "                break\n"
+            "              end\n"
+            "            end\n"
+            "          end\n"
+            "        end\n"
+            "        if fast_want then\n"
+            "          storage.fast_ready_ticks = (storage.fast_ready_ticks or 0) + 2\n"
+            "        else\n"
+            "          storage.fast_ready_ticks = 0\n"
+            "        end\n"
+            f"        local target_spd = (storage.fast_ready_ticks >= 48) and {float(stationary_game_speed)} or {float(walking_game_speed)}\n"
+            "        if game.speed ~= target_spd then game.speed = target_spd end\n"
+            "      end\n"
+        )
     telemetry_events = ""
     nth_tick_entries: list[str] = []
     if enable_telemetry:
@@ -741,9 +801,10 @@ def augment_save_freeplay_created_items(
             "        local best_d2 = 1e18\n"
             "        local by_name = {}\n"
             "        local by_name_d2 = {}\n"
+            "        local by_name_ents = {}\n"
             "        for _, r in ipairs(resources) do\n"
             "          local mp = r.prototype.mineable_properties\n"
-            "          if mp and mp.minable and not mp.required_fluid then\n"
+            "          if mp and mp.minable and not mp.required_fluid and r.amount >= 300 then\n"
             "            local dx = r.position.x - p.position.x\n"
             "            local dy = r.position.y - p.position.y\n"
             "            local d2 = dx * dx + dy * dy\n"
@@ -753,6 +814,7 @@ def augment_save_freeplay_created_items(
             "            end\n"
             "            if not by_name_d2[r.name] or d2 < by_name_d2[r.name] then\n"
             "              by_name_d2[r.name] = d2\n"
+            "              by_name_ents[r.name] = r\n"
             "              by_name[r.name] = {\n"
             "                name = r.name,\n"
             "                x = r.position.x,\n"
@@ -763,6 +825,7 @@ def augment_save_freeplay_created_items(
             "          end\n"
             "        end\n"
             "        storage.resources_by_name = by_name\n"
+            "        storage.resources_by_name_ents = by_name_ents\n"
             "        if best then\n"
             "          storage.nearest_resource_entity = best\n"
             "          storage.nearest_resource = {\n"
@@ -776,6 +839,13 @@ def augment_save_freeplay_created_items(
             "        end\n"
             "      else\n"
             "        storage.nearest_resource.amount = storage.nearest_resource_entity.amount\n"
+            "        if storage.resources_by_name_ents then\n"
+            "          for rname, rent in pairs(storage.resources_by_name_ents) do\n"
+            "            if rent and rent.valid and storage.resources_by_name[rname] then\n"
+            "              storage.resources_by_name[rname].amount = rent.amount\n"
+            "            end\n"
+            "          end\n"
+            "        end\n"
             "      end\n"
             "      if storage.nearest_resource and not storage.shoreline_site then\n"
             "        local ref_x = storage.nearest_resource.x\n"
@@ -812,9 +882,10 @@ def augment_save_freeplay_created_items(
             "                  local po_dx, po_dy = rot(2.0, 4.0, d)\n"
             "                  local a_dx, a_dy = rot(2.0, 6.0, d)\n"
             "                  local l_dx, l_dy = rot(5.0, 5.5, d)\n"
-            "                  local f_dx, f_dy = rot(-2.5, 6.0, d)\n"
-            "                  local f2_dx, f2_dy = rot(-2.5, 4.0, d)\n"
-            "                  local f3_dx, f3_dy = rot(-2.5, 2.0, d)\n"
+            "                  local f_dx, f_dy = rot(-4.5, 6.0, d)\n"
+            "                  local f2_dx, f2_dy = rot(-4.5, 4.0, d)\n"
+            "                  local f3_dx, f3_dy = rot(-4.5, 2.0, d)\n"
+            "                  local f4_dx, f4_dy = rot(-4.5, 8.0, d)\n"
             "                  local s_dx, s_dy = rot(-0.5, 4.5, d)\n"
             "                  local bx, by = px + b_dx, py + b_dy\n"
             "                  local ex, ey = px + e_dx, py + e_dy\n"
@@ -824,6 +895,7 @@ def augment_save_freeplay_created_items(
             "                  local fx, fy = px + f_dx, py + f_dy\n"
             "                  local f2x, f2y = px + f2_dx, py + f2_dy\n"
             "                  local f3x, f3y = px + f3_dx, py + f3_dy\n"
+            "                  local f4x, f4y = px + f4_dx, py + f4_dy\n"
             "                  local sx, sy = px + s_dx, py + s_dy\n"
             "                  if p.surface.can_place_entity({name = 'boiler', position = {bx, by}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'steam-engine', position = {ex, ey}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
@@ -833,6 +905,7 @@ def augment_save_freeplay_created_items(
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {fx, fy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f2x, f2y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f3x, f3y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f4x, f4y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'character', position = {sx, sy}, force = p.force}) then\n"
             "                    local clear_path = true\n"
             "                    local steps_x = math.max(1, math.ceil(math.abs(sx - ref_x)))\n"
@@ -873,10 +946,20 @@ def augment_save_freeplay_created_items(
             "        end\n"
             "        if best_site then\n"
             "          storage.shoreline_site = best_site\n"
-            "          local min_x = math.min(ref_x, best_site.stand_x) - 10\n"
-            "          local max_x = math.max(ref_x, best_site.stand_x) + 10\n"
-            "          local min_y = math.min(ref_y, best_site.stand_y) - 10\n"
-            "          local max_y = math.max(ref_y, best_site.stand_y) + 10\n"
+            "          local min_x = math.min(ref_x, best_site.stand_x)\n"
+            "          local max_x = math.max(ref_x, best_site.stand_x)\n"
+            "          local min_y = math.min(ref_y, best_site.stand_y)\n"
+            "          local max_y = math.max(ref_y, best_site.stand_y)\n"
+            "          for _, rinfo in pairs(storage.resources_by_name or {}) do\n"
+            "            if rinfo.x < min_x then min_x = rinfo.x end\n"
+            "            if rinfo.x > max_x then max_x = rinfo.x end\n"
+            "            if rinfo.y < min_y then min_y = rinfo.y end\n"
+            "            if rinfo.y > max_y then max_y = rinfo.y end\n"
+            "          end\n"
+            "          min_x = min_x - 14\n"
+            "          max_x = max_x + 14\n"
+            "          min_y = min_y - 14\n"
+            "          max_y = max_y + 24\n"
             "          local obs = p.surface.find_entities_filtered({type = {'tree', 'simple-entity'}, area = {{min_x, min_y}, {max_x, max_y}}})\n"
             "          for _, o in ipairs(obs) do o.destroy() end\n"
             "        end\n"
@@ -943,9 +1026,11 @@ def augment_save_freeplay_created_items(
             "        }\n"
             "      end\n"
             "      local techs = p.force.technologies\n"
+            "      local spwr_res = techs['steam-power'] and techs['steam-power'].researched or false\n"
             "      local elec_res = techs['electronics'] and techs['electronics'].researched or false\n"
             "      local sp_res = techs['automation-science-pack'] and techs['automation-science-pack'].researched or false\n"
             "      local auto_res = techs['automation'] and techs['automation'].researched or false\n"
+            f"{speed_hook}"
             "      local state = {\n"
             "        tick = e.tick,\n"
             "        player = {\n"
@@ -959,6 +1044,7 @@ def augment_save_freeplay_created_items(
             "          hand_crafted_count = storage.hand_crafted_count or 0,\n"
             "          machine_crafted_count = mc_count,\n"
             "          steam_energy_generated = steam_energy,\n"
+            "          steam_power_researched = spwr_res,\n"
             "          electronics_researched = elec_res,\n"
             "          science_pack_researched = sp_res,\n"
             "          automation_researched = auto_res\n"
@@ -1277,7 +1363,7 @@ def inject_action_into_empty_client_heartbeat(
     player_index: int,
     action_payload: bytes,
 ) -> bytes | None:
-    """Inject an InputAction into an unfragmented ClientToServerHeartbeat with one empty TickClosure."""
+    """Inject an InputAction into an unfragmented ClientToServerHeartbeat with empty TickClosures."""
     hdr = parse_network_header(buf)
     if hdr.msg_type != MSG_CLIENT_TO_SERVER_HEARTBEAT or hdr.fragmented:
         return None
@@ -1285,21 +1371,38 @@ def inject_action_into_empty_client_heartbeat(
     if pos + 5 > len(buf):
         return None
     hb_flags = buf[pos]
-    required = HB_HAS_TICK_CLOSURES | HB_HAS_SINGLE_TICK_CLOSURE | HB_ALL_TICK_CLOSURES_EMPTY
+    required = HB_HAS_TICK_CLOSURES | HB_ALL_TICK_CLOSURES_EMPTY
     if (hb_flags & required) != required:
         return None
-    if pos + 13 > len(buf):
+    if hb_flags & HB_HAS_SINGLE_TICK_CLOSURE:
+        closure_count = 1
+        closures_start = pos + 5
+    else:
+        if pos + 6 > len(buf):
+            return None
+        closure_count = buf[pos + 5]
+        if closure_count == 0:
+            return None
+        closures_start = pos + 6
+    if closures_start + closure_count * 8 > len(buf):
         return None
 
     new_hb_flags = hb_flags & ~HB_ALL_TICK_CLOSURES_EMPTY
-    seq_and_tick = buf[pos + 1 : pos + 13]  # 4B seq + 8B update_tick
-    rest = buf[pos + 13 :]
+    prefix = buf[:pos] + bytes([new_hb_flags]) + buf[pos + 1 : closures_start]
+    tick0 = buf[closures_start : closures_start + 8]
+    rest = buf[closures_start + closure_count * 8 :]
 
     count_flagged = encode_uint32v(1 << 1)
     delta = (player_index - PLAYER_INDEX_INIT) & PLAYER_INDEX_MASK
     encoded_action = encode_uint16v(action_type) + encode_uint16v(delta) + action_payload
 
-    return buf[:pos] + bytes([new_hb_flags]) + seq_and_tick + count_flagged + encoded_action + rest
+    trailing = bytearray()
+    for i in range(1, closure_count):
+        t_off = closures_start + i * 8
+        trailing.extend(buf[t_off : t_off + 8])
+        trailing.append(0)
+
+    return prefix + tick0 + count_flagged + encoded_action + bytes(trailing) + rest
 
 
 @dataclass
@@ -1457,11 +1560,7 @@ class FactorioLockstepProxy:
                             self.stats.suppressed_client_packets += 1
 
                     pos = hdr.payload_offset
-                    required = (
-                        HB_HAS_TICK_CLOSURES
-                        | HB_HAS_SINGLE_TICK_CLOSURE
-                        | HB_ALL_TICK_CLOSURES_EMPTY
-                    )
+                    required = HB_HAS_TICK_CLOSURES | HB_ALL_TICK_CLOSURES_EMPTY
                     if pos < len(data) and (data[pos] & required) == required:
                         self.stats.empty_client_heartbeats_seen += 1
                         if self._pending_injections:
@@ -1533,12 +1632,14 @@ class XvfbVideoRecorder:
         height: int = 720,
         fps: int = 30,
         display_num: int | None = None,
+        playback_slowdown: float = 1.0,
     ) -> None:
         self.output_mp4 = output_mp4
         self.width = width
         self.height = height
         self.fps = fps
         self.display_num = _find_free_x11_display() if display_num is None else display_num
+        self.playback_slowdown = playback_slowdown
         self._xvfb_proc: subprocess.Popen[str] | None = None
         self._ffmpeg_proc: subprocess.Popen[str] | None = None
 
@@ -1597,16 +1698,22 @@ class XvfbVideoRecorder:
             "0",
             "-i",
             f"{self.display}.0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            str(self.output_mp4),
         ]
+        if self.playback_slowdown != 1.0:
+            cmd.extend(["-vf", f"setpts={self.playback_slowdown}*PTS", "-r", str(self.fps)])
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+                str(self.output_mp4),
+            ]
+        )
         self._ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,

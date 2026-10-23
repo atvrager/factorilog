@@ -934,12 +934,34 @@ class BotAgent:
             if task.task_kind == TASK_CLEAR_OBSTACLE:
                 self.cartographer.remove_obstacle_at(task.target_x, task.target_y)
 
-    def reanchor_uncompleted_tasks(self, reference_pos: tuple[float, float]) -> None:
+    def reanchor_uncompleted_tasks(
+        self,
+        reference_pos: tuple[float, float],
+        extra_blocked_tiles: set[TileCoord] | None = None,
+    ) -> None:
         """Recompute standing positions for uncompleted tasks starting from reference_pos."""
         if self.plan is None:
             return
         cur_pos = reference_pos
         blocked = set(self.plan.surface.obstacles)
+        if extra_blocked_tiles is not None:
+            blocked.update(extra_blocked_tiles)
+        for task in self.plan.tasks:
+            if task.task_index in self.completed_task_indices:
+                continue
+            if task.task_kind == TASK_PLACE_ENTITY:
+                fp = _entity_footprint_tiles(
+                    {
+                        "name": task.target_name,
+                        "position": {"x": task.target_x, "y": task.target_y},
+                        "direction": task.direction,
+                    },
+                    self.data,
+                )
+                for fx, fy in fp:
+                    for dx in range(-2, 3):
+                        for dy in range(-2, 3):
+                            blocked.add((fx + dx, fy + dy))
         for idx, task in enumerate(self.plan.tasks):
             if task.task_index in self.completed_task_indices:
                 continue
