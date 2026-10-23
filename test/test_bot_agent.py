@@ -28,6 +28,7 @@ from foundry.campaign.bot_agent import (
     TASK_SEED_FUEL,
     BotAgent,
     compute_8way_walk_vector,
+    encode_assembler_batch_actions,
     encode_task_input_actions,
     extract_character_reach,
 )
@@ -289,9 +290,108 @@ class BotAgentTest(unittest.TestCase):
         self.assertEqual(status3, f"cleared_obstacle_{first_task.task_index}")
         self.assertIn(first_task.task_index, bot.completed_task_indices)
 
+        # Verify inventory gating and bootstrap mall collection when an item is missing
+        while True:
+            cur_t = bot.current_task()
+            assert cur_t is not None
+            if cur_t.task_kind == TASK_PLACE_ENTITY:
+                break
+            bot.mark_task_complete(cur_t.task_index)
+
+        place_task = bot.current_task()
+        assert place_task is not None
+        proxy._pending_injections.clear()
+        empty_inv_state = PlayerWorldState(
+            tick=50,
+            player_x=place_task.stand_x,
+            player_y=place_task.stand_y,
+            walking=False,
+            mining=False,
+            selected_name=None,
+            selected_x=None,
+            selected_y=None,
+            inventory={},
+            nearest_resource=None,
+        )
+        status_wait = bot.step_lockstep_proxy(proxy, empty_inv_state, id_mappings)
+        self.assertEqual(status_wait, f"waiting_for_inventory_{place_task.target_name}")
+        self.assertNotIn(place_task.task_index, bot.completed_task_indices)
+
+        # If a mall assembler producing transport-belt is already placed, missing transport-belt
+        # triggers walking to and collecting from the mall assembler
+        mall_asm_task = next(
+            t
+            for t in plan.tasks
+            if t.task_kind == TASK_PLACE_ENTITY and t.recipe == "transport-belt"
+        )
+        bot.mark_task_complete(mall_asm_task.task_index)
+        belt_place_task = next(
+            t
+            for t in plan.tasks
+            if t.task_kind == TASK_PLACE_ENTITY
+            and t.target_name == "transport-belt"
+            and t.task_index not in bot.completed_task_indices
+        )
+        for t in plan.tasks:
+            if t.task_index < belt_place_task.task_index:
+                bot.mark_task_complete(t.task_index)
+
+        proxy._pending_injections.clear()
+        at_mall_state = PlayerWorldState(
+            tick=60,
+            player_x=mall_asm_task.stand_x,
+            player_y=mall_asm_task.stand_y,
+            walking=False,
+            mining=False,
+            selected_name=None,
+            selected_x=None,
+            selected_y=None,
+            inventory={},
+            nearest_resource=None,
+        )
+        status_collect = bot.step_lockstep_proxy(proxy, at_mall_state, id_mappings)
+        self.assertEqual(status_collect, "collecting_mall_transport-belt")
+        self.assertGreater(proxy.pending_action_count(), 0)
+
         # Verify 8-way walk vector helper
         self.assertIsNone(compute_8way_walk_vector(10.0, 10.0, 10.2, 10.2))
         self.assertEqual(compute_8way_walk_vector(10.0, 10.0, 15.0, 10.0), (1.0, 0.0))
+
+        # Verify dynamic BOM fabrication plan calculation from prototype recipes
+        fab_plan = bot.compute_bom_fabrication(
+            starting_inventory={
+                "offshore-pump": 1,
+                "boiler": 1,
+                "steam-engine": 1,
+                "small-electric-pole": 1,
+                "assembling-machine-1": 1,
+                "stone-furnace": 3,
+                "lab": 1,
+            }
+        )
+        self.assertGreater(fab_plan.missing_bom.get("transport-belt", 0), 50)
+        self.assertGreater(fab_plan.raw_materials_needed.get("iron-ore", 0), 100)
+        self.assertGreater(fab_plan.raw_materials_needed.get("copper-ore", 0), 20)
+        self.assertGreater(fab_plan.raw_materials_needed.get("wood", 0), 5)
+        self.assertGreater(len(fab_plan.smelting_steps), 0)
+        self.assertGreater(len(fab_plan.assembler_steps), 0)
+
+        # Verify UDP InputAction batch encoding for lakeside assembler BOM fabrication
+        batch_id_mappings = {
+            "item": {"wood": 1, "copper-cable": 2},
+            "recipe": {"small-electric-pole": 10},
+        }
+        batch_actions = encode_assembler_batch_actions(
+            asm_x=12.0,
+            asm_y=14.0,
+            recipe_name="small-electric-pole",
+            ingredients=("wood", "copper-cable"),
+            id_mappings=batch_id_mappings,
+        )
+        batch_types = [act_type for act_type, _payload in batch_actions]
+        self.assertIn(ACTION_SETUP_ASSEMBLING_MACHINE, batch_types)
+        self.assertIn(ACTION_PIPETTE, batch_types)
+        self.assertIn(ACTION_FAST_ENTITY_TRANSFER, batch_types)
 
     def test_headless_factorio_cartographer_to_bot_starter_base_e2e(self) -> None:
         """Verify live Factorio cartography scan, bot plan synthesis, obstacle clearing, and base production."""
@@ -743,60 +843,157 @@ class BotAgentTest(unittest.TestCase):
 
             exec_save = tmp_path / "saves" / "freeplay_42_exec.zip"
             shutil.copy2(base_save, exec_save)
-            executor_lua = bot.build_lua_plan_executor_snippet()
+            bootstrap_kit = {
+                "offshore-pump": 1,
+                "boiler": 1,
+                "steam-engine": 1,
+                "small-electric-pole": 1,
+                "assembling-machine-1": 1,
+                "stone-furnace": 3,
+                "lab": 1,
+            }
+            fab_plan = bot.compute_bom_fabrication(starting_inventory=bootstrap_kit)
+            self.assertEqual(fab_plan.missing_bom["transport-belt"], 377)
+            self.assertGreater(fab_plan.raw_materials_needed.get("iron-ore", 0), 500)
+            self.assertGreater(fab_plan.raw_materials_needed.get("copper-ore", 0), 40)
+            self.assertGreater(fab_plan.raw_materials_needed.get("stone", 0), 4)
+            self.assertGreater(fab_plan.raw_materials_needed.get("wood", 0), 20)
+            self.assertGreater(fab_plan.raw_materials_needed.get("coal", 0), 50)
+
+            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.15)
             ox, oy = plan.layout.base_core.bounds[0], plan.layout.base_core.bounds[1]
+            bx0, by0, bx1, by1 = plan.layout.base_core.bounds
+            park_x = round((bx0 + bx1) / 2.0 - 1.5, 1)
+            park_y = round((by0 + by1) / 2.0 + 0.5, 1)
+            all_xs = [float(e["position"]["x"]) for e in plan.layout.entities]
+            all_ys = [float(e["position"]["y"]) for e in plan.layout.entities]
+            ov_cx = round((min(all_xs) + max(all_xs)) / 2.0, 1)
+            ov_cy = round((min(all_ys) + max(all_ys)) / 2.0, 1)
+
             exec_hook = (
-                "\nlocal handler = require('event_handler')\n"
-                "handler.add_lib({\n"
-                "  on_nth_tick = {\n"
-                "    [1] = function(e)\n"
-                "      if storage.fp_exec_done then return end\n"
-                "      storage.fp_exec_done = true\n"
-                "      local surface = game.surfaces[1]\n"
-                "      surface.request_to_generate_chunks({0, 0}, 4)\n"
-                "      surface.force_generate_chunk_requests()\n"
-                "      local force = game.forces['player']\n"
-                "      for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
-                "        if force.technologies[t_name] then\n"
-                "          force.technologies[t_name].researched = true\n"
-                "        end\n"
-                "      end\n"
-                "      if force.technologies['steel-processing'] then\n"
-                "        force.add_research('steel-processing')\n"
-                "      end\n"
-                f"      surface.create_entity({{name = 'character', position = {{{ox}, {oy}}}, force = force}})\n"
-                + executor_lua
+                "\n"
+                + progressive_lua
+                + "\nlocal function ensure_fp_world()\n"
+                + "  if storage.fp_exec_done then return end\n"
+                + "  storage.fp_exec_done = true\n"
+                + "  if remote.interfaces['freeplay'] then\n"
+                + "    pcall(remote.call, 'freeplay', 'set_skip_intro', true)\n"
+                + "    pcall(remote.call, 'freeplay', 'set_disable_crashsite', true)\n"
+                + "  end\n"
+                + "  local surface = game.surfaces[1]\n"
+                + "  surface.request_to_generate_chunks({0, 0}, 5)\n"
+                + "  surface.force_generate_chunk_requests()\n"
+                + "  surface.daytime = 0.0\n"
+                + "  surface.freeze_daytime = true\n"
+                + "  local force = game.forces['player']\n"
+                + "  force.chart(surface, {{-140, -140}, {140, 140}})\n"
+                + "  for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
+                + "    if force.technologies[t_name] then\n"
+                + "      force.technologies[t_name].researched = true\n"
+                + "    end\n"
+                + "  end\n"
+                + "  if force.technologies['steel-processing'] then\n"
+                + "    force.add_research('steel-processing')\n"
+                + "  end\n"
+                + "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
+                + "  if not char_ent then\n"
+                + f"    surface.create_entity({{name = 'character', position = {{{ox}, {oy}}}, force = force}})\n"
+                + "  else\n"
+                + f"    char_ent.teleport({{{ox}, {oy}}})\n"
+                + "  end\n"
+                + "end\n\n"
+                + "local handler = require('event_handler')\n"
+                + "handler.add_lib({\n"
+                + "  on_nth_tick = {\n"
+                + "    [1] = function(e)\n"
+                + "      ensure_fp_world()\n"
+                + "      local surface = game.surfaces[1]\n"
+                + "      local force = game.forces['player']\n"
+                + "      local p = game.get_player(1)\n"
+                + "      if #game.players > 0 and (not p or not p.connected) then\n"
+                + "        return\n"
+                + "      end\n"
+                + "      storage.active_ticks = (storage.active_ticks or 0) + 1\n"
+                + "      if p and p.valid then\n"
+                + "        if p.controller_type == defines.controllers.cutscene then\n"
+                + "          p.exit_cutscene()\n"
+                + "        end\n"
+                + "        if not storage.player_attached and p.character and p.character.valid then\n"
+                + "          storage.player_attached = true\n"
+                + "          p.game_view_settings.show_entity_info = true\n"
+                + "          for _, c in pairs(surface.find_entities_filtered({name = 'character'})) do\n"
+                + "            if c ~= p.character then c.destroy() end\n"
+                + "          end\n"
+                + "        end\n"
+                + "      end\n"
+                + "      step_bot_plan(surface, force)\n"
+                + "      if not force.current_research and force.technologies['steel-processing'] then\n"
+                + "        force.add_research('steel-processing')\n"
+                + "      end\n"
+                + "      local building = not (storage.bot_execution and storage.bot_execution.completed)\n"
+                + "      if p and p.valid and storage.active_ticks % 3 == 0 and (storage.frame_seq or 0) < 3800 then\n"
+                + "        storage.frame_seq = (storage.frame_seq or 0) + 1\n"
+                + "        local char_ent = p.character or surface.find_entities_filtered({name = 'character'})[1]\n"
+                + f"        local tx = (char_ent and char_ent.valid and building) and char_ent.position.x or {park_x}\n"
+                + f"        local ty = (char_ent and char_ent.valid and building) and char_ent.position.y or {park_y}\n"
+                + "        storage.cam_x = storage.cam_x and (storage.cam_x + (tx - storage.cam_x) * 0.14) or tx\n"
+                + "        storage.cam_y = storage.cam_y and (storage.cam_y + (ty - storage.cam_y) * 0.14) or ty\n"
+                + "        game.take_screenshot({\n"
+                + "          player = p,\n"
+                + "          by_player = p,\n"
+                + f"          position = {{x = {ov_cx}, y = {ov_cy}}},\n"
+                + "          resolution = {1280, 800},\n"
+                + "          zoom = 0.25,\n"
+                + "          quality = 80,\n"
+                + "          daytime = 0.0,\n"
+                + "          show_gui = false,\n"
+                + "          show_entity_info = true,\n"
+                + "          path = string.format('timelapse_overview/frame_%08d.jpg', storage.frame_seq)\n"
+                + "        })\n"
+                + "        game.take_screenshot({\n"
+                + "          player = p,\n"
+                + "          by_player = p,\n"
+                + "          position = {x = storage.cam_x, y = storage.cam_y},\n"
+                + "          resolution = {1280, 800},\n"
+                + "          zoom = 0.78,\n"
+                + "          quality = 80,\n"
+                + "          daytime = 0.0,\n"
+                + "          show_gui = false,\n"
+                + "          show_entity_info = true,\n"
+                + "          path = string.format('timelapse_follow/frame_%08d.jpg', storage.frame_seq)\n"
+                + "        })\n"
+                + "      end\n"
                 + "    end,\n"
-                "    [500] = function(e)\n"
-                "      if e.tick == 0 then return end\n"
-                "      local surface = game.surfaces[1]\n"
-                "      local drills_active = 0\n"
-                "      for _, d in pairs(surface.find_entities_filtered({name = 'electric-mining-drill'})) do\n"
-                "        if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
-                "          drills_active = drills_active + 1\n"
-                "        end\n"
-                "      end\n"
-                "      local plates_made = 0\n"
-                "      for _, f in pairs(surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
-                "        plates_made = plates_made + (f.products_finished or 0)\n"
-                "      end\n"
-                "      local asm_made = {}\n"
-                "      for _, a in pairs(surface.find_entities_filtered({name = 'assembling-machine-1'})) do\n"
-                "        local rec = a.get_recipe()\n"
-                "        if rec then\n"
-                "          asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
-                "        end\n"
-                "      end\n"
-                "      helpers.write_file('freeplay_sim_stats.json', helpers.table_to_json({\n"
-                "        tick = e.tick,\n"
-                "        bot_execution = storage.bot_execution,\n"
-                "        drills_active = drills_active,\n"
-                "        plates_made = plates_made,\n"
-                "        asm_made = asm_made,\n"
-                "      }) .. '\\n', false)\n"
-                "    end\n"
-                "  }\n"
-                "})\n"
+                + "    [500] = function(e)\n"
+                + "      if e.tick == 0 then return end\n"
+                + "      local surface = game.surfaces[1]\n"
+                + "      local drills_active = 0\n"
+                + "      for _, d in pairs(surface.find_entities_filtered({name = 'electric-mining-drill'})) do\n"
+                + "        if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
+                + "          drills_active = drills_active + 1\n"
+                + "        end\n"
+                + "      end\n"
+                + "      local plates_made = 0\n"
+                + "      for _, f in pairs(surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
+                + "        plates_made = plates_made + (f.products_finished or 0)\n"
+                + "      end\n"
+                + "      local asm_made = {}\n"
+                + "      for _, a in pairs(surface.find_entities_filtered({name = 'assembling-machine-1'})) do\n"
+                + "        local rec = a.get_recipe()\n"
+                + "        if rec then\n"
+                + "          asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
+                + "        end\n"
+                + "      end\n"
+                + "      helpers.write_file('freeplay_sim_stats.json', helpers.table_to_json({\n"
+                + "        tick = e.tick,\n"
+                + "        bot_execution = storage.bot_execution,\n"
+                + "        drills_active = drills_active,\n"
+                + "        plates_made = plates_made,\n"
+                + "        asm_made = asm_made,\n"
+                + "      }) .. '\\n', false)\n"
+                + "    end\n"
+                + "  }\n"
+                + "})\n"
             )
             self._append_lua_to_save(exec_save, exec_hook)
 
@@ -814,7 +1011,7 @@ class BotAgentTest(unittest.TestCase):
                     "--benchmark",
                     str(exec_save),
                     "--benchmark-ticks",
-                    "7200",
+                    "20000",
                 ],
                 capture_output=True,
                 text=True,
@@ -829,6 +1026,7 @@ class BotAgentTest(unittest.TestCase):
             self.assertTrue(stats_file.is_file())
             sim_stats = json.loads(stats_file.read_text())
             exec_info = sim_stats["bot_execution"]
+            self.assertTrue(exec_info["completed"], msg=f"Exec info: {exec_info}")
             self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
             self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
             self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
@@ -843,6 +1041,22 @@ class BotAgentTest(unittest.TestCase):
                 0,
                 msg=f"Stats: {sim_stats}",
             )
+
+            if (
+                os.environ.get("RECORD_FREEPLAY_VIDEOS") == "1"
+                and export_dir.is_dir()
+                and shutil.which("Xvfb")
+                and shutil.which("ffmpeg")
+            ):
+                self._record_bot_videos(
+                    factorio_bin=Path(factorio_bin),
+                    tmp_path=tmp_path,
+                    mods_dir=mods_dir,
+                    save_zip=exec_save,
+                    export_dir=export_dir,
+                    prefix="freeplay_42_bot",
+                    target_frame_count=3800,
+                )
 
     @staticmethod
     def _append_lua_to_save(save_zip_path: Path, lua_hook: str) -> None:
@@ -868,6 +1082,8 @@ class BotAgentTest(unittest.TestCase):
         mods_dir: Path,
         save_zip: Path,
         export_dir: Path,
+        prefix: str = "starter_base_bot",
+        target_frame_count: int = 1360,
     ) -> None:
         """Record live HUD, overview, and follow-cam MP4 videos of the bot starter base build."""
         import socket
@@ -876,10 +1092,10 @@ class BotAgentTest(unittest.TestCase):
         if not elf_bin.is_file():
             elf_bin = factorio_bin.resolve()
 
-        srv_dir = tmp_path / "vid_server"
-        cli_dir = tmp_path / "vid_client"
-        srv_home = tmp_path / "srv_home"
-        cli_home = tmp_path / "cli_home"
+        srv_dir = tmp_path / f"vid_server_{prefix}"
+        cli_dir = tmp_path / f"vid_client_{prefix}"
+        srv_home = tmp_path / f"srv_home_{prefix}"
+        cli_home = tmp_path / f"cli_home_{prefix}"
         for d in (srv_dir, cli_dir, srv_home, cli_home):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -919,7 +1135,7 @@ class BotAgentTest(unittest.TestCase):
             )
         )
 
-        live_mp4 = export_dir / "starter_base_bot_live.mp4"
+        live_mp4 = export_dir / f"{prefix}_live.mp4"
         recorder = XvfbVideoRecorder(live_mp4, width=1280, height=800, fps=30)
         recorder.start_display()
         srv_proc: subprocess.Popen[str] | None = None
@@ -1003,8 +1219,13 @@ class BotAgentTest(unittest.TestCase):
 
             recorder.start_recording()
 
-            target_frame = cli_dir / "script-output" / "timelapse_overview" / "frame_00001360.jpg"
-            wait_deadline = time.monotonic() + 160.0
+            target_frame = (
+                cli_dir
+                / "script-output"
+                / "timelapse_overview"
+                / f"frame_{target_frame_count:08d}.jpg"
+            )
+            wait_deadline = time.monotonic() + 240.0
             while time.monotonic() < wait_deadline:
                 if target_frame.is_file():
                     break
@@ -1026,21 +1247,23 @@ class BotAgentTest(unittest.TestCase):
         if overview_dir.is_dir() and list(overview_dir.glob("frame_*.jpg")):
             encode_timelapse_mp4(
                 overview_dir,
-                export_dir / "starter_base_bot_overview.mp4",
+                export_dir / f"{prefix}_overview.mp4",
                 fps=20,
             )
+            shutil.rmtree(overview_dir, ignore_errors=True)
         else:
             srv_txt = srv_proc.stdout.read() if srv_proc.stdout else ""
             cli_txt = cli_proc.stdout.read() if cli_proc and cli_proc.stdout else ""
-            (export_dir / "vid_debug.log").write_text(
+            (export_dir / f"vid_debug_{prefix}.log").write_text(
                 f"=== SRV ===\n{srv_txt}\n=== CLI ===\n{cli_txt}\n"
             )
         if follow_dir.is_dir() and list(follow_dir.glob("frame_*.jpg")):
             encode_timelapse_mp4(
                 follow_dir,
-                export_dir / "starter_base_bot_follow.mp4",
+                export_dir / f"{prefix}_follow.mp4",
                 fps=20,
             )
+            shutil.rmtree(follow_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

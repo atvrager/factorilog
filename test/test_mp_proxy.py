@@ -35,6 +35,8 @@ sys.path.insert(0, str(REPO_ROOT / "flow"))
 
 import check_blueprint
 import mp_proxy
+import solve
+from foundry.campaign.bot_agent import BotAgent, encode_assembler_batch_actions
 
 PODMAN_IMAGE = "docker.io/openroad/orfs:latest"
 
@@ -581,7 +583,13 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             science_item_id = item_map[science_item_name]
             science_recipe_id = recipe_map[science_item_name]
 
+            inserter_item_name = next(
+                (name for name in item_map if name == "inserter"),
+                next(iter(item_map)),
+            )
+
             normal_quality_id = quality_map.get("normal", 1)
+            game_data = solve.Data(str(fixture_path))
 
             # Add starter items, scenario telemetry hook, and timelapse screenshot hook to control.lua
             mp_proxy.augment_save_freeplay_created_items(
@@ -592,10 +600,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     pump_item_name: 1,
                     boiler_item_name: 1,
                     engine_item_name: 1,
-                    pole_item_name: 1,
+                    pole_item_name: 2,
                     stone_item_name: 10,
                     fuel_item_name: 40,
-                    smelt_ore_name: 6,
+                    smelt_ore_name: 10,
                     copper_ore_name: 12,
                     plate_item_name: 40,
                     copper_plate_name: 15,
@@ -739,6 +747,23 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 # 5. Extract smelted iron-plate and hand-craft 1 iron-gear-wheel within the limit
                 # 6. Build assembling-machine-1, set its recipe, feed iron-plate, and extract output
                 state_file = server_dir / "script-output" / "factorilog_state.json"
+                cartography_file = server_dir / "script-output" / "factorilog_cartography.json"
+                bot_agent = BotAgent(
+                    data=game_data,
+                    researched_techs={"automation", "logistics"},
+                )
+                phase1_planned = False
+                phase1_gears_queued = False
+                phase1_belts_queued = False
+                phase1_collected_queued = False
+                phase1_target_task_indices: set[int] = set()
+                belts_mc_target = 17
+                cables_mc_target = 32
+                circuits_mc_target = 42
+                lab_mc_target = 43
+                science_mc_target = 45
+                phase1_gears_mc_target = 46
+                phase1_belts_mc_target = 47
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
@@ -789,7 +814,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
 
                 success = False
-                join_deadline = time.monotonic() + 180.0
+                join_deadline = time.monotonic() + 240.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
                     if state is not None and proxy.stats.empty_client_heartbeats_seen >= 90:
@@ -901,13 +926,17 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     and proxy.pending_action_count() == 0
                                     and (now - last_cmd_time) >= 0.8
                                 ):
-                                    act_sel, pay_sel = mp_proxy.build_selected_entity_action(
-                                        res_x, res_y
-                                    )
-                                    act_bm, pay_bm = mp_proxy.build_begin_mining_action()
-                                    proxy.queue_action(act_sel, player_index=0, payload=pay_sel)
-                                    proxy.queue_action(act_bm, player_index=0, payload=pay_bm)
-                                    last_cmd_time = now
+                                    if dist > 2.55:
+                                        mining_phase = False
+                                        walk_stage = 0
+                                    else:
+                                        act_sel, pay_sel = mp_proxy.build_selected_entity_action(
+                                            res_x, res_y
+                                        )
+                                        act_bm, pay_bm = mp_proxy.build_begin_mining_action()
+                                        proxy.queue_action(act_sel, player_index=0, payload=pay_sel)
+                                        proxy.queue_action(act_bm, player_index=0, payload=pay_bm)
+                                        last_cmd_time = now
                             elif not shore_arrived:
                                 s_dx = site.stand_x - state.player_x
                                 s_dy = site.stand_y - state.player_y
@@ -1247,8 +1276,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 and not belts_queued
                                 and proxy.pending_action_count() == 0
                                 and state.machine_crafted_count >= 15
+                                and state.electronics_researched
                             ):
                                 belts_queued = True
+                                belts_mc_target = state.machine_crafted_count + 2
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
@@ -1293,10 +1324,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 belts_queued
                                 and not cables_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 17
+                                and state.machine_crafted_count >= belts_mc_target
                                 and state.electronics_researched
                             ):
                                 cables_queued = True
+                                cables_mc_target = state.machine_crafted_count + 15
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
                                     site.furnace_x, site.furnace_y
@@ -1349,9 +1381,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 cables_queued
                                 and not circuits_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 32
+                                and state.machine_crafted_count >= cables_mc_target
                             ):
                                 circuits_queued = True
+                                circuits_mc_target = state.machine_crafted_count + 10
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
@@ -1400,9 +1433,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 circuits_queued
                                 and not lab_craft_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 42
+                                and state.machine_crafted_count >= circuits_mc_target
                             ):
                                 lab_craft_queued = True
+                                lab_mc_target = state.machine_crafted_count + 1
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
@@ -1454,10 +1488,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 lab_craft_queued
                                 and not lab_place_and_science_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 43
+                                and state.machine_crafted_count >= lab_mc_target
                                 and state.science_pack_researched
                             ):
                                 lab_place_and_science_queued = True
+                                science_mc_target = state.machine_crafted_count + 2
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
@@ -1526,7 +1561,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 lab_place_and_science_queued
                                 and not final_science_load_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 45
+                                and state.machine_crafted_count >= science_mc_target
                             ):
                                 final_science_load_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
@@ -1555,17 +1590,144 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     (act_clr, pay_clr),
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                final_science_load_queued
+                                and state.automation_researched
+                                and not phase1_planned
+                                and cartography_file.is_file()
+                            ):
+                                phase1_planned = True
+                                self.assertTrue(bot_agent.ingest_cartography(cartography_file))
+                                bot_plan = bot_agent.synthesize_plan(
+                                    reference_pos=(state.player_x, state.player_y),
+                                    bounds=None,
+                                    base_origin=None,
+                                    verify=False,
+                                )
+                                # Select the nearest planned starter-base tasks for real UDP execution
+                                candidate_tasks = [
+                                    t
+                                    for t in bot_plan.tasks
+                                    if t.task_kind == "place_entity"
+                                    and t.target_name
+                                    in (
+                                        pole_item_name,
+                                        belt_item_name,
+                                    )
+                                ]
+                                candidate_tasks.sort(
+                                    key=lambda t: (
+                                        math.hypot(
+                                            t.target_x - state.player_x,
+                                            t.target_y - state.player_y,
+                                        ),
+                                        t.task_index,
+                                    )
+                                )
+                                chosen_by_name: dict[str, int] = {}
+                                for cand in candidate_tasks:
+                                    if cand.target_name not in chosen_by_name:
+                                        chosen_by_name[cand.target_name] = cand.task_index
+                                phase1_target_task_indices = set(chosen_by_name.values())
+                                for t in bot_plan.tasks:
+                                    if t.task_index not in phase1_target_task_indices:
+                                        bot_agent.mark_task_complete(t.task_index)
+                                bot_agent.reanchor_uncompleted_tasks(
+                                    (state.player_x, state.player_y)
+                                )
+                            elif (
+                                phase1_planned
+                                and not phase1_gears_queued
+                                and proxy.pending_action_count() == 0
+                            ):
+                                phase1_gears_queued = True
+                                phase1_gears_mc_target = state.machine_crafted_count + 1
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
+                                    site.furnace_x, site.furnace_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_f, pay_sel_f),
+                                    (act_ft_out, pay_ft_out),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                                for act, pay in encode_assembler_batch_actions(
+                                    site.asm_x,
+                                    site.asm_y,
+                                    craft_recipe_name,
+                                    (plate_item_name,),
+                                    id_mappings,
+                                    extract_first=True,
+                                    quality_id=normal_quality_id,
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                phase1_gears_queued
+                                and not phase1_belts_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= phase1_gears_mc_target
+                            ):
+                                phase1_belts_queued = True
+                                phase1_belts_mc_target = state.machine_crafted_count + 1
+                                for act, pay in encode_assembler_batch_actions(
+                                    site.asm_x,
+                                    site.asm_y,
+                                    belt_item_name,
+                                    (plate_item_name, craft_recipe_name),
+                                    id_mappings,
+                                    extract_first=True,
+                                    quality_id=normal_quality_id,
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                phase1_belts_queued
+                                and not phase1_collected_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= phase1_belts_mc_target
+                            ):
+                                phase1_collected_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                phase1_collected_queued
+                                and proxy.pending_action_count() == 0
+                                and state.inventory.get(belt_item_name, 0) >= 1
+                                and bot_agent.current_task() is not None
+                            ):
+                                bot_agent.step_lockstep_proxy(
+                                    proxy,
+                                    state,
+                                    id_mappings,
+                                    player_index=0,
+                                )
 
                     if (
                         mined_ore >= 1
                         and last_state is not None
                         and last_state.hand_crafted_count == 1
-                        and last_state.machine_crafted_count >= 45
+                        and last_state.machine_crafted_count >= 47
                         and last_state.steam_energy_generated > 0.0
                         and last_state.electronics_researched
                         and last_state.science_pack_researched
                         and last_state.automation_researched
                         and final_science_load_queued
+                        and phase1_collected_queued
+                        and bot_agent.current_task() is None
                         and proxy.pending_action_count() == 0
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
@@ -1644,8 +1806,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
                 self.assertGreaterEqual(
                     last_state.machine_crafted_count,
-                    45,
-                    f"Steam-powered assembling-machine-1 did not finish all 45 crafts.\n"
+                    47,
+                    f"Steam-powered assembling-machine-1 did not finish all 47 crafts.\n"
                     f"Stages: walk_stage={walk_stage}, mining_phase={mining_phase}, "
                     f"shore_stage={shore_stage}, shore_arrived={shore_arrived}, "
                     f"smelt_queued={smelt_queued}, extract_and_craft={extract_and_craft_queued}, "
@@ -1654,9 +1816,20 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"belts={belts_queued}, cables={cables_queued}, "
                     f"circuits={circuits_queued}, lab_craft={lab_craft_queued}, "
                     f"lab_place_and_science={lab_place_and_science_queued}, "
-                    f"final_science_load={final_science_load_queued}\n"
+                    f"final_science_load={final_science_load_queued}, "
+                    f"phase1_planned={phase1_planned}, phase1_gears={phase1_gears_queued}, "
+                    f"phase1_belts={phase1_belts_queued}, "
+                    f"phase1_collected={phase1_collected_queued}, "
+                    f"current_task={bot_agent.current_task()}\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Server log:\n{server_log[-3000:]}\nClient log:\n{client_log[-3000:]}",
+                )
+                self.assertTrue(
+                    phase1_planned and phase1_collected_queued and bot_agent.current_task() is None,
+                    f"Phase 1 BotAgent starter base synthesis and UDP placement did not finish.\n"
+                    f"phase1_planned={phase1_planned}, phase1_collected={phase1_collected_queued}, "
+                    f"current_task={bot_agent.current_task()}, target_tasks={phase1_target_task_indices}\n"
+                    f"Last state: {last_state}",
                 )
                 self.assertGreater(
                     last_state.steam_energy_generated,

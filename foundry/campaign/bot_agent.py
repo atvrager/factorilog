@@ -25,7 +25,9 @@ from foundry.mp_proxy import (
     PlayerWorldState,
     build_begin_mining_action,
     build_clear_cursor_action,
+    build_close_gui_action,
     build_fast_entity_transfer_action,
+    build_open_gui_action,
     build_pipette_item_action,
     build_place_entity_action,
     build_selected_entity_action,
@@ -63,16 +65,36 @@ TASK_CLEAR_OBSTACLE = "clear_obstacle"
 TASK_PLACE_ENTITY = "place_entity"
 TASK_CONFIGURE_RECIPE = "configure_recipe"
 TASK_SEED_FUEL = "seed_fuel"
+TASK_COLLECT_MALL_OUTPUT = "collect_mall_output"
 
 TILE_CENTER_OFFSET: float = 0.5
 COORD_ROUND_DIGITS: int = 2
-REACH_SAFETY_MARGIN: float = 0.65
+REACH_SAFETY_MARGIN: float = 2.6
 SEARCH_RADIUS_PADDING: int = 2
 DEFAULT_SEED_FUEL_COUNT: int = 50
-DEFAULT_STOP_TOLERANCE: float = 0.75
-DIAGONAL_AXIS_RATIO: float = 0.3826834323650898
+DEFAULT_STOP_TOLERANCE: float = 2.2
+CARDINAL_AXIS_RATIO: float = 0.65
+WALK_REISSUE_TICKS: int = 24
 BOX_EPSILON: float = 1e-6
 HALF_DIVISOR: float = 2.0
+BRAKING_THROTTLES: tuple[float, ...] = (
+    0.88,
+    0.77,
+    0.67,
+    0.59,
+    0.51,
+    0.45,
+    0.39,
+    0.34,
+    0.30,
+    0.26,
+    0.23,
+    0.20,
+    0.18,
+    0.15,
+    0.13,
+    0.11,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +158,159 @@ class StarterBaseBuildPlan:
     reach_limits: CharacterReachLimits
     tasks: list[BotBuildTask]
     fuel_commodity: str
+
+
+@dataclass(frozen=True, slots=True)
+class BomFabricationStep:
+    """Single intermediate or final recipe step in the bootstrap BOM fabrication schedule."""
+
+    recipe_name: str
+    item_name: str
+    craft_count: int
+    total_yield: int
+    ingredients: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class BomFabricationPlan:
+    """Dynamic BOM fabrication plan derived from prototype recipes and starting inventory."""
+
+    starting_inventory: dict[str, int]
+    missing_bom: dict[str, int]
+    raw_materials_needed: dict[str, int]
+    smelting_steps: list[BomFabricationStep]
+    assembler_steps: list[BomFabricationStep]
+
+
+def compute_bom_fabrication_plan(
+    target_bom: Mapping[str, int],
+    data: solve.Data,
+    starting_inventory: Mapping[str, int] | None = None,
+    fuel_commodity: str = "coal",
+    seed_fuel_count: int = DEFAULT_SEED_FUEL_COUNT,
+) -> BomFabricationPlan:
+    """Compute recursive raw material, smelting, and assembler steps to fabricate a BOM."""
+    inv: dict[str, int] = {k: int(v) for k, v in (starting_inventory or {}).items() if int(v) > 0}
+    avail: dict[str, int] = dict(inv)
+
+    missing_bom: dict[str, int] = {}
+    for item_name, req_qty in sorted(target_bom.items()):
+        have = avail.get(item_name, 0)
+        used = min(have, int(req_qty))
+        avail[item_name] = have - used
+        rem = int(req_qty) - used
+        if rem > 0:
+            missing_bom[item_name] = rem
+
+    smelt_categories = {"smelting"}
+    craft_demands: dict[str, int] = {}
+    craft_depth: dict[str, int] = {}
+    raw_needed: dict[str, int] = {}
+
+    def _select_recipe(item_name: str) -> Mapping[str, Any] | None:
+        if item_name in data.recipes:
+            return data.recipes[item_name]
+        cands = data.producers.get(item_name, [])
+        return data.recipes[cands[0]] if cands else None
+
+    def _expand(item_name: str, needed_qty: int, depth: int) -> None:
+        if needed_qty <= 0:
+            return
+        have = avail.get(item_name, 0)
+        if have > 0:
+            take = min(have, needed_qty)
+            avail[item_name] = have - take
+            needed_qty -= take
+            if needed_qty <= 0:
+                return
+
+        if item_name in data.resources or item_name == "wood":
+            raw_needed[item_name] = raw_needed.get(item_name, 0) + needed_qty
+            return
+
+        rec = _select_recipe(item_name)
+        if rec is None:
+            raw_needed[item_name] = raw_needed.get(item_name, 0) + needed_qty
+            return
+
+        res_list = data.results_of(rec)
+        yield_per_craft = max(
+            1,
+            round(
+                sum(solve.amount_of(r) for r in res_list if solve.name_of(r) == item_name) or 1.0
+            ),
+        )
+        crafts = math.ceil(needed_qty / yield_per_craft)
+        produced = crafts * yield_per_craft
+        surplus = produced - needed_qty
+        if surplus > 0:
+            avail[item_name] = avail.get(item_name, 0) + surplus
+
+        r_name = str(rec.get("name", item_name))
+        craft_demands[r_name] = craft_demands.get(r_name, 0) + crafts
+        craft_depth[r_name] = max(craft_depth.get(r_name, 0), depth)
+
+        for ing in data.ingredients_of(rec):
+            ing_name = solve.name_of(ing)
+            ing_amt = round(solve.amount_of(ing)) * crafts
+            _expand(ing_name, ing_amt, depth + 1)
+
+    for item_name, rem_qty in sorted(missing_bom.items()):
+        _expand(item_name, rem_qty, 0)
+
+    smelting_steps: list[BomFabricationStep] = []
+    assembler_steps: list[BomFabricationStep] = []
+
+    ordered_recipes = sorted(
+        craft_demands.keys(),
+        key=lambda r: (-craft_depth[r], r),
+    )
+    for r_name in ordered_recipes:
+        rec = data.recipes[r_name]
+        crafts = craft_demands[r_name]
+        res_list = data.results_of(rec)
+        item_name = solve.name_of(res_list[0]) if res_list else r_name
+        yield_per_craft = max(
+            1,
+            round(
+                sum(solve.amount_of(r) for r in res_list if solve.name_of(r) == item_name) or 1.0
+            ),
+        )
+        ings = {
+            solve.name_of(ing): round(solve.amount_of(ing)) * crafts
+            for ing in data.ingredients_of(rec)
+        }
+        step = BomFabricationStep(
+            recipe_name=r_name,
+            item_name=item_name,
+            craft_count=crafts,
+            total_yield=crafts * yield_per_craft,
+            ingredients=ings,
+        )
+        cat = str(rec.get("category", "crafting"))
+        cats = set(rec.get("categories", [cat]))
+        if cats & smelt_categories:
+            smelting_steps.append(step)
+        else:
+            assembler_steps.append(step)
+
+    total_smelt_crafts = sum(s.craft_count for s in smelting_steps)
+    smelt_fuel = max(5, math.ceil(total_smelt_crafts * 0.1)) if total_smelt_crafts > 0 else 0
+    total_fuel_req = seed_fuel_count + smelt_fuel
+    have_fuel = avail.get(fuel_commodity, 0)
+    used_fuel = min(have_fuel, total_fuel_req)
+    avail[fuel_commodity] = have_fuel - used_fuel
+    rem_fuel = total_fuel_req - used_fuel
+    if rem_fuel > 0:
+        raw_needed[fuel_commodity] = raw_needed.get(fuel_commodity, 0) + rem_fuel
+
+    return BomFabricationPlan(
+        starting_inventory=inv,
+        missing_bom=missing_bom,
+        raw_materials_needed=dict(sorted(raw_needed.items())),
+        smelting_steps=smelting_steps,
+        assembler_steps=assembler_steps,
+    )
 
 
 def compute_bill_of_materials(entities: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -553,6 +728,50 @@ def plan_starter_base_from_cartographer(
     )
 
 
+def encode_assembler_batch_actions(
+    asm_x: float,
+    asm_y: float,
+    recipe_name: str,
+    ingredients: Sequence[str],
+    id_mappings: Mapping[str, Mapping[str, int]],
+    extract_first: bool = True,
+    quality_id: int = 1,
+) -> list[tuple[int, bytes]]:
+    """Encode real UDP InputActions to extract output, set recipe, and load ingredients."""
+    item_map = id_mappings.get("item", {})
+    recipe_map = id_mappings.get("recipe", {})
+    if recipe_name not in recipe_map:
+        raise KeyError(f"Recipe '{recipe_name}' not found in id_mappings['recipe']")
+    recipe_id = int(recipe_map[recipe_name])
+
+    actions: list[tuple[int, bytes]] = [build_clear_cursor_action()]
+    if extract_first:
+        actions.append(build_selected_entity_action(asm_x, asm_y))
+        actions.append(build_fast_entity_transfer_action(into_entity=False))
+
+    actions.extend(
+        [
+            build_selected_entity_action(asm_x, asm_y),
+            build_open_gui_action(),
+            build_setup_assembling_machine_action(recipe_id, quality_id=quality_id),
+            build_close_gui_action(),
+        ]
+    )
+    for ing_name in ingredients:
+        if ing_name not in item_map:
+            raise KeyError(f"Ingredient '{ing_name}' not found in id_mappings['item']")
+        ing_id = int(item_map[ing_name])
+        actions.extend(
+            [
+                build_selected_entity_action(asm_x, asm_y),
+                build_pipette_item_action(ing_id),
+                build_fast_entity_transfer_action(into_entity=True),
+                build_clear_cursor_action(),
+            ]
+        )
+    return actions
+
+
 def encode_task_input_actions(
     task: BotBuildTask,
     id_mappings: Mapping[str, Mapping[str, int]],
@@ -605,6 +824,13 @@ def encode_task_input_actions(
             build_clear_cursor_action(),
         ]
 
+    if task.task_kind == TASK_COLLECT_MALL_OUTPUT:
+        return [
+            build_clear_cursor_action(),
+            build_selected_entity_action(task.target_x, task.target_y),
+            build_fast_entity_transfer_action(into_entity=False),
+        ]
+
     raise ValueError(f"Unsupported task_kind: {task.task_kind!r}")
 
 
@@ -615,17 +841,20 @@ def compute_8way_walk_vector(
     target_y: float,
     stop_tolerance: float = DEFAULT_STOP_TOLERANCE,
 ) -> tuple[float, float] | None:
-    """Compute an 8-direction walking vector toward (target_x, target_y), or None if within tolerance."""
+    """Compute a unit cardinal walking vector toward (target_x, target_y), or None if within tolerance."""
     dx = target_x - player_x
     dy = target_y - player_y
     dist = math.hypot(dx, dy)
     if dist <= stop_tolerance:
         return None
-    ux = dx / dist
-    uy = dy / dist
-    sx = 0.0 if abs(ux) < DIAGONAL_AXIS_RATIO else (1.0 if ux > 0.0 else -1.0)
-    sy = 0.0 if abs(uy) < DIAGONAL_AXIS_RATIO else (1.0 if uy > 0.0 else -1.0)
-    return (sx, sy)
+    axis_tol = stop_tolerance * CARDINAL_AXIS_RATIO
+    if abs(dx) > axis_tol:
+        return (1.0 if dx > 0.0 else -1.0, 0.0)
+    if abs(dy) > axis_tol:
+        return (0.0, 1.0 if dy > 0.0 else -1.0)
+    if abs(dx) >= abs(dy):
+        return (1.0 if dx > 0.0 else -1.0, 0.0)
+    return (0.0, 1.0 if dy > 0.0 else -1.0)
 
 
 class BotAgent:
@@ -645,6 +874,8 @@ class BotAgent:
         self.plan: StarterBaseBuildPlan | None = None
         self.completed_task_indices: set[int] = set()
         self._active_mining_task: int | None = None
+        self._last_walk_vec: tuple[float, float] | None = None
+        self._last_walk_tick: int = -1000
 
     def ingest_cartography(self, source: str | Path | Mapping[str, Any]) -> bool:
         """Ingest cartography telemetry from a JSON file path or parsed dictionary."""
@@ -680,6 +911,8 @@ class BotAgent:
         )
         self.completed_task_indices.clear()
         self._active_mining_task = None
+        self._last_walk_vec = None
+        self._last_walk_tick = -1000
         return self.plan
 
     def current_task(self) -> BotBuildTask | None:
@@ -701,6 +934,67 @@ class BotAgent:
             if task.task_kind == TASK_CLEAR_OBSTACLE:
                 self.cartographer.remove_obstacle_at(task.target_x, task.target_y)
 
+    def reanchor_uncompleted_tasks(self, reference_pos: tuple[float, float]) -> None:
+        """Recompute standing positions for uncompleted tasks starting from reference_pos."""
+        if self.plan is None:
+            return
+        cur_pos = reference_pos
+        blocked = set(self.plan.surface.obstacles)
+        for idx, task in enumerate(self.plan.tasks):
+            if task.task_index in self.completed_task_indices:
+                continue
+            footprint = _entity_footprint_tiles(
+                {
+                    "name": task.target_name,
+                    "position": {"x": task.target_x, "y": task.target_y},
+                    "direction": task.direction,
+                },
+                self.data,
+            )
+            reach_lim = (
+                self.plan.reach_limits.resource_reach
+                if task.task_kind == TASK_CLEAR_OBSTACLE
+                else self.plan.reach_limits.build_reach
+            )
+            stand_x, stand_y = select_standing_position(
+                target_x=task.target_x,
+                target_y=task.target_y,
+                reach_limit=reach_lim,
+                water_tiles=self.plan.surface.water_tiles,
+                blocked_tiles=blocked | footprint,
+                reference_pos=cur_pos,
+            )
+            cur_pos = (stand_x, stand_y)
+            blocked.update(footprint)
+            self.plan.tasks[idx] = BotBuildTask(
+                task_index=task.task_index,
+                phase=task.phase,
+                task_kind=task.task_kind,
+                target_name=task.target_name,
+                target_x=task.target_x,
+                target_y=task.target_y,
+                stand_x=stand_x,
+                stand_y=stand_y,
+                direction=task.direction,
+                entity_type=task.entity_type,
+                recipe=task.recipe,
+                unit_number=task.unit_number,
+                item_count=task.item_count,
+            )
+
+    def find_mall_producer_task(self, item_name: str) -> BotBuildTask | None:
+        """Find a placed assembler task whose configured recipe produces item_name."""
+        if self.plan is None:
+            return None
+        for task in self.plan.tasks:
+            if (
+                task.task_kind == TASK_PLACE_ENTITY
+                and task.recipe == item_name
+                and task.task_index in self.completed_task_indices
+            ):
+                return task
+        return None
+
     def step_lockstep_proxy(
         self,
         proxy: FactorioLockstepProxy,
@@ -717,6 +1011,61 @@ class BotAgent:
         if proxy.pending_action_count() > 0:
             return "waiting_for_queue"
 
+        if task.task_kind in (TASK_PLACE_ENTITY, TASK_SEED_FUEL):
+            required_item = task.target_name
+            available_qty = int(world_state.inventory.get(required_item, 0))
+            if available_qty < 1:
+                mall_task = self.find_mall_producer_task(required_item)
+                if mall_task is not None:
+                    mall_walk = compute_8way_walk_vector(
+                        world_state.player_x,
+                        world_state.player_y,
+                        mall_task.stand_x,
+                        mall_task.stand_y,
+                        stop_tolerance=stop_tolerance,
+                    )
+                    if mall_walk is not None:
+                        if mall_walk != self._last_walk_vec or (
+                            not world_state.walking
+                            and (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
+                        ):
+                            act_type, payload = build_start_walking_action(
+                                mall_walk[0], mall_walk[1]
+                            )
+                            proxy.queue_action(act_type, player_index, payload)
+                            self._last_walk_vec = mall_walk
+                            self._last_walk_tick = world_state.tick
+                        return f"walking_to_mall_for_{required_item}"
+                    if world_state.walking or self._last_walk_vec is not None:
+                        if self._last_walk_vec is not None:
+                            for throttle in BRAKING_THROTTLES:
+                                act_b, pay_b = build_start_walking_action(
+                                    self._last_walk_vec[0] * throttle,
+                                    self._last_walk_vec[1] * throttle,
+                                )
+                                proxy.queue_action(act_b, player_index, pay_b)
+                        act_type, payload = build_stop_walking_action()
+                        proxy.queue_action(act_type, player_index, payload)
+                        self._last_walk_vec = None
+                    collect_task = BotBuildTask(
+                        task_index=task.task_index,
+                        phase=task.phase,
+                        task_kind=TASK_COLLECT_MALL_OUTPUT,
+                        target_name=mall_task.target_name,
+                        target_x=mall_task.target_x,
+                        target_y=mall_task.target_y,
+                        stand_x=mall_task.stand_x,
+                        stand_y=mall_task.stand_y,
+                    )
+                    for act_type, payload in encode_task_input_actions(collect_task, id_mappings):
+                        proxy.queue_action(act_type, player_index, payload)
+                    return f"collecting_mall_{required_item}"
+                if world_state.walking or self._last_walk_vec is not None:
+                    act_type, payload = build_stop_walking_action()
+                    proxy.queue_action(act_type, player_index, payload)
+                    self._last_walk_vec = None
+                return f"waiting_for_inventory_{required_item}"
+
         walk_vec = compute_8way_walk_vector(
             world_state.player_x,
             world_state.player_y,
@@ -725,13 +1074,27 @@ class BotAgent:
             stop_tolerance=stop_tolerance,
         )
         if walk_vec is not None:
-            act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
-            proxy.queue_action(act_type, player_index, payload)
+            if walk_vec != self._last_walk_vec or (
+                not world_state.walking
+                and (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
+            ):
+                act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
+                proxy.queue_action(act_type, player_index, payload)
+                self._last_walk_vec = walk_vec
+                self._last_walk_tick = world_state.tick
             return f"walking_to_task_{task.task_index}"
 
-        if world_state.walking:
+        if world_state.walking or self._last_walk_vec is not None:
+            if self._last_walk_vec is not None:
+                for throttle in BRAKING_THROTTLES:
+                    act_b, pay_b = build_start_walking_action(
+                        self._last_walk_vec[0] * throttle,
+                        self._last_walk_vec[1] * throttle,
+                    )
+                    proxy.queue_action(act_b, player_index, pay_b)
             act_type, payload = build_stop_walking_action()
             proxy.queue_action(act_type, player_index, payload)
+            self._last_walk_vec = None
 
         if task.task_kind == TASK_CLEAR_OBSTACLE:
             if self._active_mining_task != task.task_index:
@@ -751,7 +1114,7 @@ class BotAgent:
         self.mark_task_complete(task.task_index)
         return f"executed_task_{task.task_index}"
 
-    def build_lua_plan_executor_snippet(self) -> str:
+    def build_lua_plan_executor_snippet(self, check_inventory: bool = False) -> str:
         """Generate a Lua snippet that executes every task in self.plan on surface 1."""
         if self.plan is None:
             raise RuntimeError("Cannot generate Lua executor snippet before synthesize_plan()")
@@ -764,6 +1127,7 @@ class BotAgent:
             "  local placed_count = 0",
             "  local configured_count = 0",
             "  local seeded_count = 0",
+            "  local consumed_items = {}",
             "  local ent = nil",
         ]
 
@@ -788,14 +1152,32 @@ class BotAgent:
                     extra += f", type = '{task.entity_type}'"
                 if task.recipe is not None:
                     extra += f", recipe = '{task.recipe}'"
-                lines.append(
-                    f"  ent = surface.create_entity({{"
-                    f"name = '{task.target_name}', "
-                    f"position = {{{task.target_x}, {task.target_y}}}, "
-                    f"direction = {task.direction}, "
-                    f"force = force{extra}}})"
-                )
-                lines.append("  if ent then placed_count = placed_count + 1 end")
+                if check_inventory:
+                    lines.append(
+                        f"  if not char_ent or char_ent.get_item_count('{task.target_name}') >= 1 then"
+                    )
+                    lines.append(
+                        f"    ent = surface.create_entity({{name = '{task.target_name}', position = {{{task.target_x}, {task.target_y}}}, direction = {task.direction}, force = force{extra}}})"
+                    )
+                    lines.append("    if ent then")
+                    lines.append("      placed_count = placed_count + 1")
+                    lines.append(
+                        f"      if char_ent then char_ent.remove_item({{name = '{task.target_name}', count = 1}}) end"
+                    )
+                    lines.append(
+                        f"      consumed_items['{task.target_name}'] = (consumed_items['{task.target_name}'] or 0) + 1"
+                    )
+                    lines.append("    end")
+                    lines.append("  end")
+                else:
+                    lines.append(
+                        f"  ent = surface.create_entity({{"
+                        f"name = '{task.target_name}', "
+                        f"position = {{{task.target_x}, {task.target_y}}}, "
+                        f"direction = {task.direction}, "
+                        f"force = force{extra}}})"
+                    )
+                    lines.append("  if ent then placed_count = placed_count + 1 end")
             elif task.task_kind == TASK_CONFIGURE_RECIPE and task.recipe is not None:
                 lines.append(
                     f"  ent = surface.find_entity('{task.target_name}', {{{task.target_x}, {task.target_y}}})"
@@ -807,25 +1189,64 @@ class BotAgent:
                 lines.append(
                     f"  ent = surface.find_entity('boiler', {{{task.target_x}, {task.target_y}}})"
                 )
-                lines.append(
-                    f"  if ent then ent.insert({{name = '{task.target_name}', count = {task.item_count}}}) seeded_count = seeded_count + 1 end"
-                )
+                if check_inventory:
+                    lines.append(
+                        f"  if ent and (not char_ent or char_ent.get_item_count('{task.target_name}') >= {task.item_count}) then"
+                    )
+                    lines.append(
+                        f"    local ins_cnt = ent.insert({{name = '{task.target_name}', count = {task.item_count}}})"
+                    )
+                    lines.append("    if ins_cnt > 0 then")
+                    lines.append("      seeded_count = seeded_count + 1")
+                    lines.append(
+                        f"      if char_ent then char_ent.remove_item({{name = '{task.target_name}', count = ins_cnt}}) end"
+                    )
+                    lines.append(
+                        f"      consumed_items['{task.target_name}'] = (consumed_items['{task.target_name}'] or 0) + ins_cnt"
+                    )
+                    lines.append("    end")
+                    lines.append("  end")
+                else:
+                    lines.append(
+                        f"  if ent then ent.insert({{name = '{task.target_name}', count = {task.item_count}}}) seeded_count = seeded_count + 1 end"
+                    )
 
         lines.append("  storage.bot_execution = {")
         lines.append("    cleared_count = cleared_count,")
         lines.append("    placed_count = placed_count,")
         lines.append("    configured_count = configured_count,")
         lines.append("    seeded_count = seeded_count,")
+        lines.append("    consumed_items = consumed_items,")
         lines.append("  }")
         return "\n".join(lines) + "\n"
+
+    def compute_bom_fabrication(
+        self,
+        starting_inventory: Mapping[str, int] | None = None,
+    ) -> BomFabricationPlan:
+        """Compute recursive BOM fabrication steps from self.plan and starting_inventory."""
+        if self.plan is None:
+            raise RuntimeError("Cannot compute BOM fabrication before synthesize_plan()")
+        return compute_bom_fabrication_plan(
+            target_bom=self.plan.bill_of_materials,
+            data=self.data,
+            starting_inventory=starting_inventory,
+            fuel_commodity=self.plan.fuel_commodity,
+        )
 
     def build_lua_progressive_plan_executor_snippet(
         self,
         step_stride: float = 0.15,
+        check_inventory: bool = False,
     ) -> str:
         """Generate a Lua snippet that walks the bot and executes tasks progressively across ticks."""
         if self.plan is None:
             raise RuntimeError("Cannot generate progressive Lua snippet before synthesize_plan()")
+
+        bx0, by0, bx1, by1 = self.plan.layout.base_core.bounds
+        park_x = round((bx0 + bx1) / 2.0 - 1.5, 1)
+        park_y = round((by0 + by1) / 2.0 + 0.5, 1)
+        check_inv_str = "true" if check_inventory else "false"
 
         task_entries: list[str] = []
         for task in self.plan.tasks:
@@ -860,6 +1281,7 @@ class BotAgent:
             "local BOT_TASKS = {\n"
             f"{tasks_lua}\n"
             "}\n\n"
+            f"local CHECK_INVENTORY = {check_inv_str}\n\n"
             "local function vec_to_dir(dx, dy)\n"
             "  if math.abs(dx) < 1e-4 and math.abs(dy) < 1e-4 then return defines.direction.south end\n"
             "  local angle = math.atan2(dy, dx)\n"
@@ -873,6 +1295,7 @@ class BotAgent:
             "      placed_count = 0,\n"
             "      configured_count = 0,\n"
             "      seeded_count = 0,\n"
+            "      consumed_items = {},\n"
             "      task_idx = 1,\n"
             "      wait_left = nil,\n"
             "      completed = false,\n"
@@ -880,19 +1303,20 @@ class BotAgent:
             "  end\n"
             "  local exec = storage.bot_execution\n"
             "  if exec.completed then return end\n"
-            "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
+            "  local p1 = game.get_player(1)\n"
+            "  local char_ent = (p1 and p1.valid and p1.character and p1.character.valid and p1.character) or surface.find_entities_filtered({name = 'character'})[1]\n"
             "  local idx = exec.task_idx\n"
             "  if idx > #BOT_TASKS then\n"
             "    if char_ent and char_ent.valid then\n"
-            "      local dx = 31.5 - char_ent.position.x\n"
-            "      local dy = 22.5 - char_ent.position.y\n"
+            f"      local dx = {park_x} - char_ent.position.x\n"
+            f"      local dy = {park_y} - char_ent.position.y\n"
             "      local dist = math.sqrt(dx * dx + dy * dy)\n"
             f"      if dist > {stride_val} then\n"
             f"        char_ent.direction = vec_to_dir(dx, dy)\n"
             f"        char_ent.teleport({{char_ent.position.x + (dx / dist) * {stride_val}, char_ent.position.y + (dy / dist) * {stride_val}}})\n"
             "        return\n"
             "      else\n"
-            "        char_ent.teleport({31.5, 22.5})\n"
+            f"        char_ent.teleport({{{park_x}, {park_y}}})\n"
             "        char_ent.direction = defines.direction.east\n"
             "      end\n"
             "    end\n"
@@ -931,17 +1355,41 @@ class BotAgent:
             "      end\n"
             "    end\n"
             "  elseif t.kind == 'place_entity' then\n"
-            "    local params = {name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, raise_built = true}\n"
-            "    if t.ug then params.type = t.ug end\n"
-            "    if t.rec then params.recipe = t.rec end\n"
-            "    local ent = surface.create_entity(params)\n"
-            "    if ent then exec.placed_count = exec.placed_count + 1 end\n"
+            "    local existing = surface.find_entity(t.name, {t.tx, t.ty})\n"
+            "    if not existing then\n"
+            "      if CHECK_INVENTORY and char_ent and char_ent.valid and char_ent.get_item_count(t.name) < 1 then\n"
+            "        return\n"
+            "      end\n"
+            "      local params = {name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, raise_built = true}\n"
+            "      if t.ug then params.type = t.ug end\n"
+            "      if t.rec then params.recipe = t.rec end\n"
+            "      local ent = surface.create_entity(params)\n"
+            "      if ent then\n"
+            "        exec.placed_count = exec.placed_count + 1\n"
+            "        if CHECK_INVENTORY and char_ent and char_ent.valid then\n"
+            "          char_ent.remove_item({name = t.name, count = 1})\n"
+            "          exec.consumed_items[t.name] = (exec.consumed_items[t.name] or 0) + 1\n"
+            "        end\n"
+            "      end\n"
+            "    end\n"
             "  elseif t.kind == 'configure_recipe' and t.rec then\n"
             "    local ent = surface.find_entity(t.name, {t.tx, t.ty})\n"
-            "    if ent then ent.set_recipe(t.rec) exec.configured_count = exec.configured_count + 1 end\n"
+            "    if ent then ent.set_recipe(t.rec) exec.configured_count = configured_count and (configured_count + 1) or (exec.configured_count + 1) end\n"
             "  elseif t.kind == 'seed_fuel' then\n"
             "    local ent = surface.find_entity('boiler', {t.tx, t.ty})\n"
-            "    if ent then ent.insert({name = t.name, count = t.cnt}) exec.seeded_count = exec.seeded_count + 1 end\n"
+            "    if ent then\n"
+            "      if CHECK_INVENTORY and char_ent and char_ent.valid and char_ent.get_item_count(t.name) < t.cnt then\n"
+            "        return\n"
+            "      end\n"
+            "      local ins_cnt = ent.insert({name = t.name, count = t.cnt})\n"
+            "      if ins_cnt > 0 then\n"
+            "        exec.seeded_count = exec.seeded_count + 1\n"
+            "        if CHECK_INVENTORY and char_ent and char_ent.valid then\n"
+            "          char_ent.remove_item({name = t.name, count = ins_cnt})\n"
+            "          exec.consumed_items[t.name] = (exec.consumed_items[t.name] or 0) + ins_cnt\n"
+            "        end\n"
+            "      end\n"
+            "    end\n"
             "  end\n"
             "  exec.task_idx = idx + 1\n"
             "end\n"
