@@ -37,7 +37,9 @@ from foundry.mp_proxy import (
     ACTION_BEGIN_MINING,
     ACTION_BUILD,
     ACTION_CLEAR_CURSOR,
+    ACTION_CLOSE_GUI,
     ACTION_FAST_ENTITY_TRANSFER,
+    ACTION_OPEN_GUI,
     ACTION_PIPETTE,
     ACTION_ROTATE_ENTITY,
     ACTION_SELECTED_ENTITY_CHANGED,
@@ -222,14 +224,20 @@ class BotAgentTest(unittest.TestCase):
             elif task.task_kind == TASK_CONFIGURE_RECIPE:
                 self.assertEqual(
                     action_types,
-                    [ACTION_SELECTED_ENTITY_CHANGED, ACTION_SETUP_ASSEMBLING_MACHINE],
+                    [
+                        ACTION_SELECTED_ENTITY_CHANGED,
+                        ACTION_OPEN_GUI,
+                        ACTION_SETUP_ASSEMBLING_MACHINE,
+                        ACTION_CLOSE_GUI,
+                    ],
                 )
             elif task.task_kind == TASK_SEED_FUEL:
                 self.assertEqual(
                     action_types,
                     [
-                        ACTION_PIPETTE,
+                        ACTION_CLEAR_CURSOR,
                         ACTION_SELECTED_ENTITY_CHANGED,
+                        ACTION_PIPETTE,
                         ACTION_FAST_ENTITY_TRANSFER,
                         ACTION_CLEAR_CURSOR,
                     ],
@@ -378,7 +386,7 @@ class BotAgentTest(unittest.TestCase):
 
         # Verify UDP InputAction batch encoding for lakeside assembler BOM fabrication
         batch_id_mappings = {
-            "item": {"wood": 1, "copper-cable": 2},
+            "item": {"wood": 1, "copper-cable": 2, "iron-plate": 3, "copper-plate": 4},
             "recipe": {"small-electric-pole": 10},
         }
         batch_actions = encode_assembler_batch_actions(
@@ -392,6 +400,32 @@ class BotAgentTest(unittest.TestCase):
         self.assertIn(ACTION_SETUP_ASSEMBLING_MACHINE, batch_types)
         self.assertIn(ACTION_PIPETTE, batch_types)
         self.assertIn(ACTION_FAST_ENTITY_TRANSFER, batch_types)
+
+        # Verify lakeside expansion task synthesis and reach constraints
+        from types import SimpleNamespace
+
+        mock_site = SimpleNamespace(
+            pump_x=54.5,
+            pump_y=-0.5,
+            pump_dir=4,
+            asm_x=48.5,
+            asm_y=1.5,
+            stand_x=50.5,
+            stand_y=-1.0,
+        )
+        expansion_tasks = bot.synthesize_lakeside_expansion_tasks(site=mock_site)
+        self.assertEqual(len(expansion_tasks), 12)
+        for task in expansion_tasks:
+            dist = math.hypot(task.target_x - task.stand_x, task.target_y - task.stand_y)
+            self.assertLessEqual(dist, plan.reach_limits.build_reach)
+        seed_tasks = [t for t in expansion_tasks if t.task_kind == TASK_SEED_FUEL]
+        self.assertEqual(len(seed_tasks), 1)
+        for seed_task in seed_tasks:
+            seed_acts = [
+                act_type
+                for act_type, _payload in encode_task_input_actions(seed_task, batch_id_mappings)
+            ]
+            self.assertIn(ACTION_FAST_ENTITY_TRANSFER, seed_acts)
 
     def test_headless_factorio_cartographer_to_bot_starter_base_e2e(self) -> None:
         """Verify live Factorio cartography scan, bot plan synthesis, obstacle clearing, and base production."""

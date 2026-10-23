@@ -554,6 +554,9 @@ class PlayerWorldState:
     electronics_researched: bool = False
     science_pack_researched: bool = False
     automation_researched: bool = False
+    logistics_researched: bool = False
+    automated_belts_crafted: int = 0
+    automated_science_crafted: int = 0
 
 
 def read_world_state(state_path: Path) -> PlayerWorldState | None:
@@ -661,6 +664,9 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         electronics_researched=bool(player.get("electronics_researched", False)),
         science_pack_researched=bool(player.get("science_pack_researched", False)),
         automation_researched=bool(player.get("automation_researched", False)),
+        logistics_researched=bool(player.get("logistics_researched", False)),
+        automated_belts_crafted=int(player.get("automated_belts_crafted", 0)),
+        automated_science_crafted=int(player.get("automated_science_crafted", 0)),
     )
 
 
@@ -715,7 +721,7 @@ def augment_save_freeplay_created_items(
             "      if e.tick >= 1220 then\n"
             "        local fast_want = false\n"
             "        if not p.walking_state.walking then\n"
-            "          local m_goals = {['iron-ore'] = 152, ['stone'] = 25, ['coal'] = 48, ['copper-ore'] = 38}\n"
+            "          local m_goals = {['iron-ore'] = 156, ['stone'] = 25, ['coal'] = 64, ['copper-ore'] = 42}\n"
             "          if p.mining_state.mining and p.selected and p.selected.valid then\n"
             "            local g = m_goals[p.selected.name]\n"
             "            if g and (contents[p.selected.name] or 0) < g then\n"
@@ -756,6 +762,14 @@ def augment_save_freeplay_created_items(
             "            if am.valid and am.is_crafting() then\n"
             "              local rec = am.get_recipe()\n"
             "              if rec and asm_targets[rec.name] and mc_count < asm_targets[rec.name] then\n"
+            "                fast_want = true\n"
+            "                break\n"
+            "              end\n"
+            "            end\n"
+            "          end\n"
+            "          if #asms >= 2 and (auto_belts < 1 or auto_sci < 1) then\n"
+            "            for _, am in ipairs(asms) do\n"
+            "              if am.valid and am.is_crafting() then\n"
             "                fast_want = true\n"
             "                break\n"
             "              end\n"
@@ -886,6 +900,9 @@ def augment_save_freeplay_created_items(
             "                  local f2_dx, f2_dy = rot(-4.5, 4.0, d)\n"
             "                  local f3_dx, f3_dy = rot(-4.5, 2.0, d)\n"
             "                  local f4_dx, f4_dy = rot(-4.5, 8.0, d)\n"
+            "                  local a2_dx, a2_dy = rot(2.0, 9.0, d)\n"
+            "                  local f5_dx, f5_dy = rot(-2.5, 2.0, d)\n"
+            "                  local b4_dx, b4_dy = rot(-1.0, 9.0, d)\n"
             "                  local s_dx, s_dy = rot(-0.5, 4.5, d)\n"
             "                  local bx, by = px + b_dx, py + b_dy\n"
             "                  local ex, ey = px + e_dx, py + e_dy\n"
@@ -896,16 +913,22 @@ def augment_save_freeplay_created_items(
             "                  local f2x, f2y = px + f2_dx, py + f2_dy\n"
             "                  local f3x, f3y = px + f3_dx, py + f3_dy\n"
             "                  local f4x, f4y = px + f4_dx, py + f4_dy\n"
+            "                  local a2x, a2y = px + a2_dx, py + a2_dy\n"
+            "                  local f5x, f5y = px + f5_dx, py + f5_dy\n"
+            "                  local b4x, b4y = px + b4_dx, py + b4_dy\n"
             "                  local sx, sy = px + s_dx, py + s_dy\n"
             "                  if p.surface.can_place_entity({name = 'boiler', position = {bx, by}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'steam-engine', position = {ex, ey}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'small-electric-pole', position = {pox, poy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'assembling-machine-1', position = {ax, ay}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'assembling-machine-1', position = {a2x, a2y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'lab', position = {lx, ly}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {fx, fy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f2x, f2y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f3x, f3y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f4x, f4y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f5x, f5y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'transport-belt', position = {b4x, b4y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'character', position = {sx, sy}, force = p.force}) then\n"
             "                    local clear_path = true\n"
             "                    local steps_x = math.max(1, math.ceil(math.abs(sx - ref_x)))\n"
@@ -1004,9 +1027,20 @@ def augment_save_freeplay_created_items(
             "        storage.cartography_written = true\n"
             "      end\n"
             "      local mc_count = 0\n"
+            "      local auto_belts = 0\n"
+            "      local auto_sci = 0\n"
             "      local asms = p.surface.find_entities_filtered({name = 'assembling-machine-1', force = p.force})\n"
             "      for _, am in ipairs(asms) do\n"
-            "        mc_count = mc_count + (am.products_finished or 0)\n"
+            "        local pf = am.products_finished or 0\n"
+            "        mc_count = mc_count + pf\n"
+            "        if #asms >= 2 then\n"
+            "          local rec = am.get_recipe()\n"
+            "          if rec and rec.name == 'iron-gear-wheel' then\n"
+            "            if not storage.gear_asm_base then storage.gear_asm_base = pf end\n"
+            "            auto_belts = auto_belts + math.max(0, pf - storage.gear_asm_base)\n"
+            "          end\n"
+            "          if rec and rec.name == 'automation-science-pack' then auto_sci = auto_sci + pf end\n"
+            "        end\n"
             "      end\n"
             "      local steam_energy = 0\n"
             "      local poles = p.surface.find_entities_filtered({type = 'electric-pole', force = p.force})\n"
@@ -1030,6 +1064,7 @@ def augment_save_freeplay_created_items(
             "      local elec_res = techs['electronics'] and techs['electronics'].researched or false\n"
             "      local sp_res = techs['automation-science-pack'] and techs['automation-science-pack'].researched or false\n"
             "      local auto_res = techs['automation'] and techs['automation'].researched or false\n"
+            "      local logi_res = techs['logistics'] and techs['logistics'].researched or false\n"
             f"{speed_hook}"
             "      local state = {\n"
             "        tick = e.tick,\n"
@@ -1047,7 +1082,10 @@ def augment_save_freeplay_created_items(
             "          steam_power_researched = spwr_res,\n"
             "          electronics_researched = elec_res,\n"
             "          science_pack_researched = sp_res,\n"
-            "          automation_researched = auto_res\n"
+            "          automation_researched = auto_res,\n"
+            "          logistics_researched = logi_res,\n"
+            "          automated_belts_crafted = auto_belts,\n"
+            "          automated_science_crafted = auto_sci\n"
             "        },\n"
             "        nearest_resource = storage.nearest_resource,\n"
             "        resources_by_name = storage.resources_by_name or {},\n"

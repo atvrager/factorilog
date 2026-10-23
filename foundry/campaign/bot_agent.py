@@ -26,6 +26,7 @@ from foundry.mp_proxy import (
     build_begin_mining_action,
     build_clear_cursor_action,
     build_close_gui_action,
+    build_fast_entity_split_action,
     build_fast_entity_transfer_action,
     build_open_gui_action,
     build_pipette_item_action,
@@ -808,19 +809,28 @@ def encode_task_input_actions(
         if task.recipe is None or task.recipe not in recipe_map:
             raise KeyError(f"Recipe '{task.recipe}' not found in id_mappings['recipe']")
         recipe_id = int(recipe_map[task.recipe])
+        quality_id = int(id_mappings.get("quality", {}).get("normal", 1))
         return [
             build_selected_entity_action(task.target_x, task.target_y),
-            build_setup_assembling_machine_action(recipe_id),
+            build_open_gui_action(),
+            build_setup_assembling_machine_action(recipe_id, quality_id=quality_id),
+            build_close_gui_action(),
         ]
 
     if task.task_kind == TASK_SEED_FUEL:
         if task.target_name not in item_map:
             raise KeyError(f"Fuel item '{task.target_name}' not found in id_mappings['item']")
         fuel_id = int(item_map[task.target_name])
+        transfer_action = (
+            build_fast_entity_split_action(into_entity=True)
+            if task.item_count == 0
+            else build_fast_entity_transfer_action(into_entity=True)
+        )
         return [
-            build_pipette_item_action(fuel_id),
+            build_clear_cursor_action(),
             build_selected_entity_action(task.target_x, task.target_y),
-            build_fast_entity_transfer_action(into_entity=True),
+            build_pipette_item_action(fuel_id),
+            transfer_action,
             build_clear_cursor_action(),
         ]
 
@@ -876,6 +886,7 @@ class BotAgent:
         self._active_mining_task: int | None = None
         self._last_walk_vec: tuple[float, float] | None = None
         self._last_walk_tick: int = -1000
+        self._last_action_tick: int = -1000
 
     def ingest_cartography(self, source: str | Path | Mapping[str, Any]) -> bool:
         """Ingest cartography telemetry from a JSON file path or parsed dictionary."""
@@ -913,6 +924,7 @@ class BotAgent:
         self._active_mining_task = None
         self._last_walk_vec = None
         self._last_walk_tick = -1000
+        self._last_action_tick = -1000
         return self.plan
 
     def current_task(self) -> BotBuildTask | None:
@@ -934,75 +946,99 @@ class BotAgent:
             if task.task_kind == TASK_CLEAR_OBSTACLE:
                 self.cartographer.remove_obstacle_at(task.target_x, task.target_y)
 
-    def reanchor_uncompleted_tasks(
+    def synthesize_lakeside_expansion_tasks(
         self,
-        reference_pos: tuple[float, float],
-        extra_blocked_tiles: set[TileCoord] | None = None,
-    ) -> None:
-        """Recompute standing positions for uncompleted tasks starting from reference_pos."""
+        site: Any,
+        belt_recipe: str = "transport-belt",
+        science_recipe: str = "automation-science-pack",
+        gear_item: str = "iron-gear-wheel",
+        iron_plate_item: str = "iron-plate",
+        copper_plate_item: str = "copper-plate",
+    ) -> list[BotBuildTask]:
+        """Synthesize a connected, powered lakeside automated expansion schedule from site."""
         if self.plan is None:
-            return
-        cur_pos = reference_pos
-        blocked = set(self.plan.surface.obstacles)
-        if extra_blocked_tiles is not None:
-            blocked.update(extra_blocked_tiles)
-        for task in self.plan.tasks:
-            if task.task_index in self.completed_task_indices:
-                continue
-            if task.task_kind == TASK_PLACE_ENTITY:
-                fp = _entity_footprint_tiles(
-                    {
-                        "name": task.target_name,
-                        "position": {"x": task.target_x, "y": task.target_y},
-                        "direction": task.direction,
-                    },
-                    self.data,
+            raise RuntimeError(
+                "Cannot synthesize lakeside expansion tasks before synthesize_plan()"
+            )
+        tier = resolve_tech_tier(self.data, unlocked_by="logistics")
+        _ = iron_plate_item
+        d = (int(site.pump_dir) // 4) % 4
+
+        def _rot(dx: float, dy: float) -> tuple[float, float]:
+            if d == 0:
+                return dx, dy
+            if d == 1:
+                return -dy, dx
+            if d == 2:
+                return -dx, -dy
+            return dy, -dx
+
+        def _dir(north_rel_dir: int) -> int:
+            return (north_rel_dir + d * 4) % 16
+
+        px = float(site.pump_x)
+        py = float(site.pump_y)
+        sx = round(float(site.stand_x), COORD_ROUND_DIGITS)
+        sy = round(float(site.stand_y), COORD_ROUND_DIGITS)
+
+        asm2_dx, asm2_dy = _rot(2.0, 9.0)
+        asm2_x = round(px + asm2_dx, COORD_ROUND_DIGITS)
+        asm2_y = round(py + asm2_dy, COORD_ROUND_DIGITS)
+        asm1_x = round(float(site.asm_x), COORD_ROUND_DIGITS)
+        asm1_y = round(float(site.asm_y), COORD_ROUND_DIGITS)
+
+        raw_specs: list[tuple[str, str, float, float, int, str | None, int]] = [
+            (TASK_PLACE_ENTITY, tier.pole_name, *(_rot(0.0, 7.0)), 0, None, 1),
+            (TASK_PLACE_ENTITY, tier.furnace_name, *(_rot(-2.5, 2.0)), 0, None, 1),
+            (TASK_PLACE_ENTITY, tier.assembler_name, *(_rot(2.0, 9.0)), 0, science_recipe, 1),
+            (TASK_CONFIGURE_RECIPE, tier.assembler_name, *(_rot(2.0, 6.0)), 0, gear_item, 1),
+            (TASK_CONFIGURE_RECIPE, tier.assembler_name, *(_rot(2.0, 9.0)), 0, science_recipe, 1),
+            (
+                TASK_SEED_FUEL,
+                copper_plate_item,
+                *(_rot(2.0, 9.0)),
+                0,
+                science_recipe,
+                DEFAULT_SEED_FUEL_COUNT,
+            ),
+            (TASK_PLACE_ENTITY, tier.inserter_name, *(_rot(0.0, 6.0)), _dir(4), None, 1),
+            (TASK_PLACE_ENTITY, tier.inserter_name, *(_rot(0.0, 9.0)), _dir(12), None, 1),
+            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 6.0)), _dir(8), None, 1),
+            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 7.0)), _dir(8), None, 1),
+            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 8.0)), _dir(8), None, 1),
+            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 9.0)), _dir(8), None, 1),
+        ]
+
+        tasks: list[BotBuildTask] = []
+        for idx, (kind, name, r_dx, r_dy, ent_dir, rec, count) in enumerate(raw_specs):
+            tx = round(px + r_dx, COORD_ROUND_DIGITS)
+            ty = round(py + r_dy, COORD_ROUND_DIGITS)
+            if kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL) and rec in (belt_recipe, gear_item):
+                tx, ty = asm1_x, asm1_y
+            elif kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL) and rec == science_recipe:
+                tx, ty = asm2_x, asm2_y
+            tasks.append(
+                BotBuildTask(
+                    task_index=idx,
+                    phase=PHASE_STARTER_BASE_CORE,
+                    task_kind=kind,
+                    target_name=name,
+                    target_x=tx,
+                    target_y=ty,
+                    stand_x=sx,
+                    stand_y=sy,
+                    direction=ent_dir,
+                    recipe=rec,
+                    item_count=count,
                 )
-                for fx, fy in fp:
-                    for dx in range(-2, 3):
-                        for dy in range(-2, 3):
-                            blocked.add((fx + dx, fy + dy))
-        for idx, task in enumerate(self.plan.tasks):
-            if task.task_index in self.completed_task_indices:
-                continue
-            footprint = _entity_footprint_tiles(
-                {
-                    "name": task.target_name,
-                    "position": {"x": task.target_x, "y": task.target_y},
-                    "direction": task.direction,
-                },
-                self.data,
             )
-            reach_lim = (
-                self.plan.reach_limits.resource_reach
-                if task.task_kind == TASK_CLEAR_OBSTACLE
-                else self.plan.reach_limits.build_reach
-            )
-            stand_x, stand_y = select_standing_position(
-                target_x=task.target_x,
-                target_y=task.target_y,
-                reach_limit=reach_lim,
-                water_tiles=self.plan.surface.water_tiles,
-                blocked_tiles=blocked | footprint,
-                reference_pos=cur_pos,
-            )
-            cur_pos = (stand_x, stand_y)
-            blocked.update(footprint)
-            self.plan.tasks[idx] = BotBuildTask(
-                task_index=task.task_index,
-                phase=task.phase,
-                task_kind=task.task_kind,
-                target_name=task.target_name,
-                target_x=task.target_x,
-                target_y=task.target_y,
-                stand_x=stand_x,
-                stand_y=stand_y,
-                direction=task.direction,
-                entity_type=task.entity_type,
-                recipe=task.recipe,
-                unit_number=task.unit_number,
-                item_count=task.item_count,
-            )
+        self.plan.tasks = tasks
+        self.completed_task_indices.clear()
+        self._active_mining_task = None
+        self._last_walk_vec = None
+        self._last_walk_tick = -1000
+        self._last_action_tick = -1000
+        return tasks
 
     def find_mall_producer_task(self, item_name: str) -> BotBuildTask | None:
         """Find a placed assembler task whose configured recipe produces item_name."""
@@ -1030,7 +1066,7 @@ class BotAgent:
         if task is None:
             return "completed"
 
-        if proxy.pending_action_count() > 0:
+        if proxy.pending_action_count() > 0 or world_state.tick == self._last_action_tick:
             return "waiting_for_queue"
 
         if task.task_kind in (TASK_PLACE_ENTITY, TASK_SEED_FUEL):
@@ -1081,6 +1117,7 @@ class BotAgent:
                     )
                     for act_type, payload in encode_task_input_actions(collect_task, id_mappings):
                         proxy.queue_action(act_type, player_index, payload)
+                    self._last_action_tick = world_state.tick
                     return f"collecting_mall_{required_item}"
                 if world_state.walking or self._last_walk_vec is not None:
                     act_type, payload = build_stop_walking_action()
@@ -1123,17 +1160,20 @@ class BotAgent:
                 for act_type, payload in encode_task_input_actions(task, id_mappings):
                     proxy.queue_action(act_type, player_index, payload)
                 self._active_mining_task = task.task_index
+                self._last_action_tick = world_state.tick
                 return f"mining_obstacle_{task.task_index}"
             if not world_state.mining:
                 stop_type, stop_payload = build_stop_mining_action()
                 proxy.queue_action(stop_type, player_index, stop_payload)
                 self.mark_task_complete(task.task_index)
+                self._last_action_tick = world_state.tick
                 return f"cleared_obstacle_{task.task_index}"
             return f"mining_obstacle_{task.task_index}"
 
         for act_type, payload in encode_task_input_actions(task, id_mappings):
             proxy.queue_action(act_type, player_index, payload)
         self.mark_task_complete(task.task_index)
+        self._last_action_tick = world_state.tick
         return f"executed_task_{task.task_index}"
 
     def build_lua_plan_executor_snippet(self, check_inventory: bool = False) -> str:

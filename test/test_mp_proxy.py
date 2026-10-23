@@ -742,10 +742,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     researched_techs={"automation", "logistics"},
                 )
                 mining_targets = (
-                    (smelt_ore_name, 152),
+                    (smelt_ore_name, 156),
                     (stone_item_name, 25),
-                    (fuel_item_name, 48),
-                    (copper_ore_name, 38),
+                    (fuel_item_name, 64),
+                    (copper_ore_name, 42),
                 )
                 patch_idx = 0
                 furnaces_hand_crafted = False
@@ -772,6 +772,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 phase1_belts_mc_target = 23
                 phase1_inserters_mc_target = 25
                 phase1_asm_mc_target = 26
+                phase1_asm_start_tick = 0
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
@@ -1375,7 +1376,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 power_placed_queued
                                 and not lab_craft_queued
                                 and proxy.pending_action_count() == 0
-                                and state.tick >= smelt_start_tick + 10200
+                                and state.tick >= smelt_start_tick + 10800
                             ):
                                 lab_craft_queued = True
                                 f4_x = 2.0 * site.furnace_x - site.furnace2_x
@@ -1395,6 +1396,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 )
                                 act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
                                     into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_pip_io, pay_pip_io = mp_proxy.build_pipette_item_action(
+                                    smelt_ore_id
                                 )
                                 act_clb, pay_clb = mp_proxy.build_craft_action(
                                     lab_recipe_id, count=1
@@ -1638,6 +1645,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                             ):
                                 phase1_asm_queued = True
                                 phase1_asm_mc_target = state.machine_crafted_count + 1
+                                phase1_asm_start_tick = state.tick
                                 for act, pay in encode_assembler_batch_actions(
                                     site.asm_x,
                                     site.asm_y,
@@ -1653,13 +1661,28 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 and not phase1_collected_queued
                                 and proxy.pending_action_count() == 0
                                 and state.machine_crafted_count >= phase1_asm_mc_target
+                                and state.tick >= phase1_asm_start_tick + 75
                                 and cartography_file.is_file()
                             ):
                                 phase1_collected_queued = True
                                 phase1_planned = True
+                                f4_x = 2.0 * site.furnace_x - site.furnace2_x
+                                f4_y = 2.0 * site.furnace_y - site.furnace2_y
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
+                                )
+                                act_sel_f1, pay_sel_f1 = mp_proxy.build_selected_entity_action(
+                                    site.furnace_x, site.furnace_y
+                                )
+                                act_sel_f2, pay_sel_f2 = mp_proxy.build_selected_entity_action(
+                                    site.furnace2_x, site.furnace2_y
+                                )
+                                act_sel_f3, pay_sel_f3 = mp_proxy.build_selected_entity_action(
+                                    site.furnace3_x, site.furnace3_y
+                                )
+                                act_sel_f4, pay_sel_f4 = mp_proxy.build_selected_entity_action(
+                                    f4_x, f4_y
                                 )
                                 act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
                                     into_entity=False
@@ -1668,95 +1691,38 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     (act_clr, pay_clr),
                                     (act_sel_a, pay_sel_a),
                                     (act_ft_out, pay_ft_out),
+                                    (act_sel_f1, pay_sel_f1),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_f2, pay_sel_f2),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_f4, pay_sel_f4),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_f3, pay_sel_f3),
+                                    (act_ft_out, pay_ft_out),
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
 
                                 self.assertTrue(bot_agent.ingest_cartography(cartography_file))
-                                bot_plan = bot_agent.synthesize_plan(
+                                bot_agent.synthesize_plan(
                                     reference_pos=(state.player_x, state.player_y),
                                     bounds=None,
                                     base_origin=None,
                                     verify=False,
                                 )
-                                f4_x = 2.0 * site.furnace_x - site.furnace2_x
-                                f4_y = 2.0 * site.furnace_y - site.furnace2_y
-                                lakeside_pts = (
-                                    (site.pump_x, site.pump_y),
-                                    (site.boiler_x, site.boiler_y),
-                                    (site.engine_x, site.engine_y),
-                                    (site.pole_x, site.pole_y),
-                                    (site.furnace_x, site.furnace_y),
-                                    (site.furnace2_x, site.furnace2_y),
-                                    (site.furnace3_x, site.furnace3_y),
-                                    (f4_x, f4_y),
-                                    (site.asm_x, site.asm_y),
-                                    (site.lab_x, site.lab_y),
+                                expansion_tasks = bot_agent.synthesize_lakeside_expansion_tasks(
+                                    site=site,
+                                    belt_recipe=belt_item_name,
+                                    science_recipe=science_item_name,
+                                    gear_item=craft_recipe_name,
+                                    iron_plate_item=plate_item_name,
+                                    copper_plate_item=copper_plate_name,
                                 )
-                                lakeside_blocked: set[tuple[int, int]] = set()
-                                for lx, ly in lakeside_pts:
-                                    for dx in range(-3, 4):
-                                        for dy in range(-3, 4):
-                                            lakeside_blocked.add(
-                                                (math.floor(lx) + dx, math.floor(ly) + dy)
-                                            )
-                                for wx, wy in bot_plan.surface.water_tiles:
-                                    for dx in range(-4, 5):
-                                        for dy in range(-4, 5):
-                                            lakeside_blocked.add((wx + dx, wy + dy))
-                                max_counts = {
-                                    pole_item_name: 1,
-                                    furnace_item_name: 1,
-                                    drill_item_name: 1,
-                                    target_item_name: 1,
-                                    inserter_item_name: 2,
-                                    belt_item_name: 4,
-                                }
-                                candidate_tasks = [
-                                    t
-                                    for t in bot_plan.tasks
-                                    if t.task_kind == "place_entity"
-                                    and t.target_name in max_counts
-                                    and t.phase != "shoreline_power"
-                                    and all(
-                                        math.hypot(t.target_x - lx, t.target_y - ly) >= 3.5
-                                        for lx, ly in lakeside_pts
-                                    )
-                                ]
-                                candidate_tasks.sort(
-                                    key=lambda t: (
-                                        math.hypot(
-                                            t.target_x - state.player_x,
-                                            t.target_y - state.player_y,
-                                        ),
-                                        t.task_index,
-                                    )
-                                )
-                                chosen_counts: dict[str, int] = {}
-                                phase1_target_task_indices = set()
-                                for cand in candidate_tasks:
-                                    cur_c = chosen_counts.get(cand.target_name, 0)
-                                    if cur_c < max_counts[cand.target_name]:
-                                        chosen_counts[cand.target_name] = cur_c + 1
-                                        phase1_target_task_indices.add(cand.task_index)
-                                for t in bot_plan.tasks:
-                                    if t.task_index not in phase1_target_task_indices:
-                                        bot_agent.mark_task_complete(t.task_index)
-                                bot_agent.reanchor_uncompleted_tasks(
-                                    (state.player_x, state.player_y),
-                                    extra_blocked_tiles=lakeside_blocked,
-                                )
-                                bot_agent.plan.tasks.sort(
-                                    key=lambda t: (
-                                        t.task_index not in phase1_target_task_indices,
-                                        math.hypot(
-                                            t.stand_x - state.player_x,
-                                            t.stand_y - state.player_y,
-                                        ),
-                                        t.task_index,
-                                    )
-                                )
+                                phase1_target_task_indices = {t.task_index for t in expansion_tasks}
                             elif phase1_collected_queued and proxy.pending_action_count() == 0:
-                                if state.inventory.get(target_item_name, 0) >= 1:
+                                if (
+                                    state.inventory.get(target_item_name, 0) >= 1
+                                    and state.inventory.get(copper_plate_name, 0) >= 1
+                                ):
                                     phase1_inventory_ready = True
                                 if phase1_inventory_ready and bot_agent.current_task() is not None:
                                     bot_agent.step_lockstep_proxy(
@@ -1770,7 +1736,9 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         mined_ore >= 148
                         and last_state is not None
                         and last_state.hand_crafted_count == 106
-                        and last_state.machine_crafted_count >= 26
+                        and last_state.machine_crafted_count >= 28
+                        and last_state.automated_belts_crafted >= 1
+                        and last_state.automated_science_crafted >= 1
                         and last_state.steam_energy_generated > 0.0
                         and last_state.steam_power_researched
                         and last_state.electronics_researched
@@ -1865,8 +1833,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
                 self.assertGreaterEqual(
                     last_state.machine_crafted_count,
-                    26,
-                    f"Steam-powered assembling-machine-1 did not finish all 26 Phase 1 crafts.\n"
+                    28,
+                    f"Steam-powered assembling-machine-1s did not finish all 28 Phase 1 crafts.\n"
                     f"Stages: patch_idx={patch_idx}, walk_stage={walk_stage}, mining_phase={mining_phase}, "
                     f"shore_stage={shore_stage}, shore_arrived={shore_arrived}, "
                     f"smelt_queued={smelt_queued}, power_craft={power_craft_queued}, "
@@ -1882,9 +1850,21 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Server log:\n{server_log[-3000:]}\nClient log:\n{client_log[-3000:]}",
                 )
                 self.assertGreaterEqual(
+                    last_state.automated_belts_crafted,
+                    1,
+                    f"Phase 1 automated belt assembler did not craft transport-belts.\n"
+                    f"Last state: {last_state}",
+                )
+                self.assertGreaterEqual(
+                    last_state.automated_science_crafted,
+                    1,
+                    f"Phase 1 automated science assembler did not craft automation-science-packs.\n"
+                    f"Last state: {last_state}",
+                )
+                self.assertGreaterEqual(
                     len(phase1_target_task_indices),
-                    9,
-                    f"Expected at least 9 Phase 1 starter base placement tasks, got {len(phase1_target_task_indices)}",
+                    12,
+                    f"Expected at least 12 Phase 1 starter base tasks, got {len(phase1_target_task_indices)}",
                 )
                 self.assertTrue(
                     phase1_planned
