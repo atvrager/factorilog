@@ -9,6 +9,7 @@ filegroup(
     name = "py_srcs",
     srcs = glob([
         "*.py",
+        "campaign/*.py",
         "native_engine/*.py",
         "router/*.py",
         "untangle/*.py",
@@ -53,6 +54,8 @@ py_library(
         "belt_library.py",
         "blueprint.py",
         "bp2save.py",
+        "campaign/__init__.py",
+        "campaign/cartographer.py",
         "chassis.py",
         "channel_router.py",
         "circuit.py",
