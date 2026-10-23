@@ -165,6 +165,14 @@ class TestMpProtocolUnit(unittest.TestCase):
         self.assertEqual(act_cls, mp_proxy.ACTION_CLOSE_GUI)
         self.assertEqual(pay_cls, b"\x00\x00")
 
+        act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+        self.assertEqual(act_clr, mp_proxy.ACTION_CLEAR_CURSOR)
+        self.assertEqual(pay_clr, b"")
+
+        act_rst, pay_rst = mp_proxy.build_reset_assembling_machine_action()
+        self.assertEqual(act_rst, mp_proxy.ACTION_RESET_ASSEMBLING_MACHINE)
+        self.assertEqual(pay_rst, b"")
+
     def test_lazy_bastard_max_hand_craft_invariant(self) -> None:
         """Verify dynamic extraction and strict enforcement of the lazy-bastard max hand-craft limit."""
         fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
@@ -406,12 +414,18 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             # Step 2: Dynamically extract runtime prototype IDs from level.dat0 in mp_test.zip
             id_mappings = mp_proxy.extract_save_id_mappings(save_zip)
             build_ach_map = id_mappings.get("build-entity-achievement", {})
+            research_ach_map = id_mappings.get("research-with-science-pack-achievement", {})
             item_map = id_mappings.get("item", {})
             recipe_map = id_mappings.get("recipe", {})
+            tech_map = id_mappings.get("technology", {})
             quality_map = id_mappings.get("quality", {})
             self.assertTrue(
                 build_ach_map,
                 f"Failed to extract build-entity-achievement mappings from save: {list(id_mappings)}",
+            )
+            self.assertTrue(
+                research_ach_map,
+                f"Failed to extract research-with-science-pack-achievement mappings: {list(id_mappings)}",
             )
             self.assertTrue(
                 item_map,
@@ -420,6 +434,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             self.assertTrue(
                 recipe_map,
                 f"Failed to extract recipe mappings from save: {list(id_mappings)}",
+            )
+            self.assertTrue(
+                tech_map,
+                f"Failed to extract technology mappings from save: {list(id_mappings)}",
             )
 
             fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
@@ -432,6 +450,18 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 next(iter(build_ach_map)),
             )
             target_ach_id = build_ach_map[target_ach_name]
+
+            research_ach_name = next(
+                (name for name in research_ach_map if "automation" in name),
+                next(iter(research_ach_map)),
+            )
+            research_ach_id = research_ach_map[research_ach_name]
+
+            automation_tech_name = next(
+                (name for name in tech_map if name == "automation"),
+                next(iter(tech_map)),
+            )
+            automation_tech_id = tech_map[automation_tech_name]
 
             target_item_name = next(
                 (name for name in item_map if name == "assembling-machine-1"),
@@ -447,6 +477,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 next(iter(item_map)),
             )
             furnace_item_id = item_map[furnace_item_name]
+            furnace_recipe_id = recipe_map[furnace_item_name]
 
             pump_item_name = next(
                 (name for name in item_map if name == "offshore-pump"),
@@ -472,6 +503,19 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             )
             pole_item_id = item_map[pole_item_name]
 
+            lab_item_name = next(
+                (name for name in item_map if name == "lab"),
+                next(iter(item_map)),
+            )
+            lab_item_id = item_map[lab_item_name]
+            lab_recipe_id = recipe_map[lab_item_name]
+
+            stone_item_name = next(
+                (name for name in item_map if name == "stone"),
+                next(iter(item_map)),
+            )
+            stone_item_id = item_map[stone_item_name]
+
             fuel_item_name = next(
                 (name for name in item_map if name == "coal"),
                 next(iter(item_map)),
@@ -484,17 +528,59 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             )
             smelt_ore_id = item_map[smelt_ore_name]
 
+            copper_ore_name = next(
+                (name for name in item_map if name == "copper-ore"),
+                next(iter(item_map)),
+            )
+            copper_ore_id = item_map[copper_ore_name]
+
             plate_item_name = next(
                 (name for name in item_map if name == "iron-plate"),
                 next(iter(item_map)),
             )
             plate_item_id = item_map[plate_item_name]
 
+            copper_plate_name = next(
+                (name for name in item_map if name == "copper-plate"),
+                next(iter(item_map)),
+            )
+            copper_plate_id = item_map[copper_plate_name]
+
             craft_recipe_name = next(
                 (name for name in recipe_map if name == "iron-gear-wheel"),
                 next(iter(recipe_map)),
             )
             craft_recipe_id = recipe_map[craft_recipe_name]
+            gear_item_id = item_map[craft_recipe_name]
+
+            belt_item_name = next(
+                (name for name in item_map if name == "transport-belt"),
+                next(iter(item_map)),
+            )
+            belt_item_id = item_map[belt_item_name]
+            belt_recipe_id = recipe_map[belt_item_name]
+
+            cable_item_name = next(
+                (name for name in item_map if name == "copper-cable"),
+                next(iter(item_map)),
+            )
+            cable_item_id = item_map[cable_item_name]
+            cable_recipe_id = recipe_map[cable_item_name]
+
+            circuit_item_name = next(
+                (name for name in item_map if name == "electronic-circuit"),
+                next(iter(item_map)),
+            )
+            circuit_item_id = item_map[circuit_item_name]
+            circuit_recipe_id = recipe_map[circuit_item_name]
+
+            science_item_name = next(
+                (name for name in item_map if name == "automation-science-pack"),
+                next(iter(item_map)),
+            )
+            science_item_id = item_map[science_item_name]
+            science_recipe_id = recipe_map[science_item_name]
+
             normal_quality_id = quality_map.get("normal", 1)
 
             # Add starter items, scenario telemetry hook, and timelapse screenshot hook to control.lua
@@ -507,9 +593,13 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     boiler_item_name: 1,
                     engine_item_name: 1,
                     pole_item_name: 1,
-                    fuel_item_name: 10,
+                    stone_item_name: 10,
+                    fuel_item_name: 40,
                     smelt_ore_name: 6,
-                    plate_item_name: 16,
+                    copper_ore_name: 12,
+                    plate_item_name: 40,
+                    copper_plate_name: 15,
+                    science_item_name: 8,
                 },
                 enable_telemetry=True,
                 timelapse_interval_ticks=4,
@@ -669,8 +759,14 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 smelt_queued = False
                 smelt_started_at = 0.0
                 extract_and_craft_queued = False
-                machine_feed_queued = False
-                machine_extract_queued = False
+                furnace_craft_queued = False
+                copper_smelt_and_gears_queued = False
+                belts_queued = False
+                cables_queued = False
+                circuits_queued = False
+                lab_craft_queued = False
+                lab_place_and_science_queued = False
+                final_science_load_queued = False
                 last_cmd_time = 0.0
                 last_state: mp_proxy.PlayerWorldState | None = None
                 braking_throttles = (
@@ -693,7 +789,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
 
                 success = False
-                join_deadline = time.monotonic() + 110.0
+                join_deadline = time.monotonic() + 180.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
                     if state is not None and proxy.stats.empty_client_heartbeats_seen >= 90:
@@ -982,7 +1078,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     (act_clr, pay_clr),
                                     (act_sel_b, pay_sel_b),
                                     (act_pip_c, pay_pip_c),
-                                    (act_ft_in, pay_ft_in),
+                                    (act_fs_in, pay_fs_in),
                                     (act_clr, pay_clr),
                                     (act_pip_e, pay_pip_e),
                                     (act_bld_e, pay_bld_e),
@@ -996,7 +1092,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 smelt_queued
                                 and not extract_and_craft_queued
                                 and proxy.pending_action_count() == 0
-                                and (now - smelt_started_at) >= 14.0
+                                and (now - smelt_started_at) >= 6.0
                             ):
                                 extract_and_craft_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
@@ -1018,12 +1114,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     proxy.queue_action(act, player_index=0, payload=pay)
                             elif (
                                 extract_and_craft_queued
-                                and not machine_feed_queued
+                                and not furnace_craft_queued
                                 and proxy.pending_action_count() == 0
                                 and state.hand_crafted_count >= 1
-                                and state.inventory.get(plate_item_name, 0) >= 2
                             ):
-                                machine_feed_queued = True
+                                furnace_craft_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_pip_a, pay_pip_a = mp_proxy.build_pipette_item_action(
                                     target_item_id
@@ -1035,14 +1130,14 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     site.asm_x, site.asm_y
                                 )
                                 act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
-                                act_set_a, pay_set_a = (
+                                act_set_f, pay_set_f = (
                                     mp_proxy.build_setup_assembling_machine_action(
-                                        craft_recipe_id, quality_id=normal_quality_id
+                                        furnace_recipe_id, quality_id=normal_quality_id
                                     )
                                 )
                                 act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
-                                act_pip_pl, pay_pip_pl = mp_proxy.build_pipette_item_action(
-                                    plate_item_id
+                                act_pip_st, pay_pip_st = mp_proxy.build_pipette_item_action(
+                                    stone_item_id
                                 )
                                 act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
                                     into_entity=True
@@ -1054,7 +1149,92 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     (act_clr, pay_clr),
                                     (act_sel_a, pay_sel_a),
                                     (act_opn_a, pay_opn_a),
-                                    (act_set_a, pay_set_a),
+                                    (act_set_f, pay_set_f),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_st, pay_pip_st),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                furnace_craft_queued
+                                and not copper_smelt_and_gears_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 2
+                            ):
+                                copper_smelt_and_gears_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_fs_in, pay_fs_in = mp_proxy.build_fast_entity_split_action(
+                                    into_entity=True
+                                )
+                                act_pip_f, pay_pip_f = mp_proxy.build_pipette_item_action(
+                                    furnace_item_id
+                                )
+                                act_bld_f2, pay_bld_f2 = mp_proxy.build_place_entity_action(
+                                    site.furnace2_x, site.furnace2_y, direction=0
+                                )
+                                act_bld_f3, pay_bld_f3 = mp_proxy.build_place_entity_action(
+                                    site.furnace3_x, site.furnace3_y, direction=0
+                                )
+                                act_sel_f2, pay_sel_f2 = mp_proxy.build_selected_entity_action(
+                                    site.furnace2_x, site.furnace2_y
+                                )
+                                act_sel_f3, pay_sel_f3 = mp_proxy.build_selected_entity_action(
+                                    site.furnace3_x, site.furnace3_y
+                                )
+                                act_pip_c, pay_pip_c = mp_proxy.build_pipette_item_action(
+                                    fuel_item_id
+                                )
+                                act_pip_co, pay_pip_co = mp_proxy.build_pipette_item_action(
+                                    copper_ore_id
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_g, pay_set_g = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        craft_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_pl, pay_pip_pl = mp_proxy.build_pipette_item_action(
+                                    plate_item_id
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_pip_f, pay_pip_f),
+                                    (act_bld_f2, pay_bld_f2),
+                                    (act_bld_f3, pay_bld_f3),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f2, pay_sel_f2),
+                                    (act_pip_c, pay_pip_c),
+                                    (act_fs_in, pay_fs_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f3, pay_sel_f3),
+                                    (act_pip_c, pay_pip_c),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f2, pay_sel_f2),
+                                    (act_pip_co, pay_pip_co),
+                                    (act_fs_in, pay_fs_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_f3, pay_sel_f3),
+                                    (act_pip_co, pay_pip_co),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_g, pay_set_g),
                                     (act_cls_a, pay_cls_a),
                                     (act_sel_a, pay_sel_a),
                                     (act_pip_pl, pay_pip_pl),
@@ -1063,12 +1243,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
                             elif (
-                                machine_feed_queued
-                                and not machine_extract_queued
+                                copper_smelt_and_gears_queued
+                                and not belts_queued
                                 and proxy.pending_action_count() == 0
-                                and state.machine_crafted_count >= 1
+                                and state.machine_crafted_count >= 15
                             ):
-                                machine_extract_queued = True
+                                belts_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
                                     site.asm_x, site.asm_y
@@ -1076,24 +1256,321 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
                                     into_entity=False
                                 )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_b, pay_set_b = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        belt_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_pl, pay_pip_pl = mp_proxy.build_pipette_item_action(
+                                    plate_item_id
+                                )
+                                act_pip_gr, pay_pip_gr = mp_proxy.build_pipette_item_action(
+                                    gear_item_id
+                                )
                                 for act, pay in (
                                     (act_clr, pay_clr),
                                     (act_sel_a, pay_sel_a),
                                     (act_ft_out, pay_ft_out),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_b, pay_set_b),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_pl, pay_pip_pl),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_gr, pay_pip_gr),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                belts_queued
+                                and not cables_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 17
+                                and state.electronics_researched
+                            ):
+                                cables_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
+                                    site.furnace_x, site.furnace_y
+                                )
+                                act_sel_f2, pay_sel_f2 = mp_proxy.build_selected_entity_action(
+                                    site.furnace2_x, site.furnace2_y
+                                )
+                                act_sel_f3, pay_sel_f3 = mp_proxy.build_selected_entity_action(
+                                    site.furnace3_x, site.furnace3_y
+                                )
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_cb, pay_set_cb = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        cable_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_cp, pay_pip_cp = mp_proxy.build_pipette_item_action(
+                                    copper_plate_id
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_f, pay_sel_f),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_f2, pay_sel_f2),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_f3, pay_sel_f3),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_cb, pay_set_cb),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_cp, pay_pip_cp),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                cables_queued
+                                and not circuits_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 32
+                            ):
+                                circuits_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_ec, pay_set_ec = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        circuit_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_cb, pay_pip_cb = mp_proxy.build_pipette_item_action(
+                                    cable_item_id
+                                )
+                                act_pip_pl, pay_pip_pl = mp_proxy.build_pipette_item_action(
+                                    plate_item_id
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_ec, pay_set_ec),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_cb, pay_pip_cb),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_pl, pay_pip_pl),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_cb, pay_pip_cb),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                circuits_queued
+                                and not lab_craft_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 42
+                            ):
+                                lab_craft_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_lb, pay_set_lb = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        lab_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_ec, pay_pip_ec = mp_proxy.build_pipette_item_action(
+                                    circuit_item_id
+                                )
+                                act_pip_gr, pay_pip_gr = mp_proxy.build_pipette_item_action(
+                                    gear_item_id
+                                )
+                                act_pip_bt, pay_pip_bt = mp_proxy.build_pipette_item_action(
+                                    belt_item_id
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_lb, pay_set_lb),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_ec, pay_pip_ec),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_gr, pay_pip_gr),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_bt, pay_pip_bt),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                lab_craft_queued
+                                and not lab_place_and_science_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 43
+                                and state.science_pack_researched
+                            ):
+                                lab_place_and_science_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                act_pip_lb, pay_pip_lb = mp_proxy.build_pipette_item_action(
+                                    lab_item_id
+                                )
+                                act_bld_lb, pay_bld_lb = mp_proxy.build_place_entity_action(
+                                    site.lab_x, site.lab_y, direction=0
+                                )
+                                act_res, pay_res = mp_proxy.build_start_research_action(
+                                    automation_tech_id
+                                )
+                                act_sel_lb, pay_sel_lb = mp_proxy.build_selected_entity_action(
+                                    site.lab_x, site.lab_y
+                                )
+                                act_pip_sp, pay_pip_sp = mp_proxy.build_pipette_item_action(
+                                    science_item_id
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_sp, pay_set_sp = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        science_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_cp, pay_pip_cp = mp_proxy.build_pipette_item_action(
+                                    copper_plate_id
+                                )
+                                act_pip_gr, pay_pip_gr = mp_proxy.build_pipette_item_action(
+                                    gear_item_id
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_pip_lb, pay_pip_lb),
+                                    (act_bld_lb, pay_bld_lb),
+                                    (act_clr, pay_clr),
+                                    (act_res, pay_res),
+                                    (act_sel_lb, pay_sel_lb),
+                                    (act_pip_sp, pay_pip_sp),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_sp, pay_set_sp),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_cp, pay_pip_cp),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_gr, pay_pip_gr),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                lab_place_and_science_queued
+                                and not final_science_load_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 45
+                            ):
+                                final_science_load_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                act_sel_lb, pay_sel_lb = mp_proxy.build_selected_entity_action(
+                                    site.lab_x, site.lab_y
+                                )
+                                act_pip_sp, pay_pip_sp = mp_proxy.build_pipette_item_action(
+                                    science_item_id
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                    (act_sel_lb, pay_sel_lb),
+                                    (act_pip_sp, pay_pip_sp),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
 
                     if (
                         mined_ore >= 1
                         and last_state is not None
-                        and last_state.hand_crafted_count >= 1
-                        and last_state.machine_crafted_count >= 1
+                        and last_state.hand_crafted_count == 1
+                        and last_state.machine_crafted_count >= 45
                         and last_state.steam_energy_generated > 0.0
-                        and last_state.inventory.get(craft_recipe_name, 0) >= 2
-                        and machine_extract_queued
+                        and last_state.electronics_researched
+                        and last_state.science_pack_researched
+                        and last_state.automation_researched
+                        and final_science_load_queued
                         and proxy.pending_action_count() == 0
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
+                        and research_ach_id in proxy.stats.client_emitted_achievement_ids
+                        and research_ach_id in proxy.stats.server_broadcast_achievement_ids
                     ):
                         # Allow a brief pause so the achievement toast and final frames render
                         time.sleep(0.5)
@@ -1159,20 +1636,25 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
                 self.assertIsNotNone(last_state)
                 assert last_state is not None
-                self.assertGreaterEqual(
+                self.assertEqual(
                     last_state.hand_crafted_count,
                     1,
-                    f"Bot did not smelt iron-plate and hand-craft {craft_recipe_name}.\n"
+                    f"Bot hand_crafted_count was not exactly 1.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}",
                 )
                 self.assertGreaterEqual(
                     last_state.machine_crafted_count,
-                    1,
-                    f"Steam-powered assembling-machine-1 did not craft {craft_recipe_name}.\n"
+                    45,
+                    f"Steam-powered assembling-machine-1 did not finish all 45 crafts.\n"
                     f"Stages: walk_stage={walk_stage}, mining_phase={mining_phase}, "
                     f"shore_stage={shore_stage}, shore_arrived={shore_arrived}, "
                     f"smelt_queued={smelt_queued}, extract_and_craft={extract_and_craft_queued}, "
-                    f"machine_feed={machine_feed_queued}, machine_extract={machine_extract_queued}\n"
+                    f"furnace_craft={furnace_craft_queued}, "
+                    f"copper_smelt_and_gears={copper_smelt_and_gears_queued}, "
+                    f"belts={belts_queued}, cables={cables_queued}, "
+                    f"circuits={circuits_queued}, lab_craft={lab_craft_queued}, "
+                    f"lab_place_and_science={lab_place_and_science_queued}, "
+                    f"final_science_load={final_science_load_queued}\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Server log:\n{server_log[-3000:]}\nClient log:\n{client_log[-3000:]}",
                 )
@@ -1182,10 +1664,19 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Steam-engine did not generate electricity on the lakeside electric network.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}",
                 )
-                self.assertGreaterEqual(
-                    last_state.inventory.get(craft_recipe_name, 0),
-                    2,
-                    f"Bot did not extract machine-crafted {craft_recipe_name} into inventory.\n"
+                self.assertTrue(
+                    last_state.electronics_researched,
+                    f"Copper-plate smelting did not trigger electronics technology.\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}",
+                )
+                self.assertTrue(
+                    last_state.science_pack_researched,
+                    f"Machine-crafting lab did not trigger automation-science-pack technology.\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}",
+                )
+                self.assertTrue(
+                    last_state.automation_researched,
+                    f"Powered lab did not finish researching automation technology.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}",
                 )
                 self.assertLessEqual(
@@ -1201,10 +1692,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 self.assertEqual(proxy.stats.blocked_hand_craft_actions, 0)
                 self.assertTrue(
                     success,
-                    f"Client did not complete lakeside steam-powered factory flow and unlock "
-                    f"{target_ach_name}={target_ach_id} after finding/mining {res_name}, "
-                    f"walking to shoreline {site}, smelting, hand-crafting, and powering "
-                    f"assembling-machine-1 with steam-engine.\n"
+                    f"Client did not complete lakeside Lazy Bastard expansion and unlock "
+                    f"{target_ach_name}={target_ach_id} and {research_ach_name}={research_ach_id} "
+                    f"after finding/mining {res_name}, walking to shoreline {site}, smelting, "
+                    f"machine-crafting furnaces/gears/belts/cables/circuits/lab/science, and "
+                    f"researching {automation_tech_name} in a steam-powered lab.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )

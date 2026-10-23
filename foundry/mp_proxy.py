@@ -63,7 +63,8 @@ ACTION_BEGIN_MINING = 0x0002
 ACTION_STOP_MINING = 0x0003
 ACTION_OPEN_GUI = 0x0005
 ACTION_SELECTED_ENTITY_CLEARED = 0x0009
-ACTION_CLEAR_CURSOR = 0x000B
+ACTION_CLEAR_CURSOR = 0x000A
+ACTION_RESET_ASSEMBLING_MACHINE = 0x000B
 ACTION_CLOSE_GUI = 0x003D
 ACTION_BUILD = 0x0045
 ACTION_START_WALKING = 0x0046
@@ -92,6 +93,7 @@ KNOWN_ACTION_PAYLOAD_SIZES: dict[int, int] = {
     ACTION_OPEN_GUI: 0,
     ACTION_SELECTED_ENTITY_CLEARED: 0,
     ACTION_CLEAR_CURSOR: 0,
+    ACTION_RESET_ASSEMBLING_MACHINE: 0,
     ACTION_CLOSE_GUI: 2,
     ACTION_BUILD: 12,
     ACTION_START_WALKING: 16,
@@ -275,8 +277,13 @@ def build_stop_mining_action() -> tuple[int, bytes]:
 
 
 def build_clear_cursor_action() -> tuple[int, bytes]:
-    """Build ClearCursor (0x000b) InputAction."""
+    """Build ClearCursor (0x000a) InputAction."""
     return ACTION_CLEAR_CURSOR, b""
+
+
+def build_reset_assembling_machine_action() -> tuple[int, bytes]:
+    """Build ResetAssemblingMachine (0x000b) InputAction."""
+    return ACTION_RESET_ASSEMBLING_MACHINE, b""
 
 
 def build_open_gui_action() -> tuple[int, bytes]:
@@ -515,6 +522,12 @@ class ShorelineSite:
     furnace_y: float
     stand_x: float
     stand_y: float
+    furnace2_x: float = 0.0
+    furnace2_y: float = 0.0
+    furnace3_x: float = 0.0
+    furnace3_y: float = 0.0
+    lab_x: float = 0.0
+    lab_y: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -537,6 +550,9 @@ class PlayerWorldState:
     hand_crafted_count: int = 0
     machine_crafted_count: int = 0
     steam_energy_generated: float = 0.0
+    electronics_researched: bool = False
+    science_pack_researched: bool = False
+    automation_researched: bool = False
 
 
 def read_world_state(state_path: Path) -> PlayerWorldState | None:
@@ -615,6 +631,12 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
             furnace_y=float(shore_raw["furnace_y"]),
             stand_x=float(shore_raw["stand_x"]),
             stand_y=float(shore_raw["stand_y"]),
+            furnace2_x=float(shore_raw.get("furnace2_x", 0.0)),
+            furnace2_y=float(shore_raw.get("furnace2_y", 0.0)),
+            furnace3_x=float(shore_raw.get("furnace3_x", 0.0)),
+            furnace3_y=float(shore_raw.get("furnace3_y", 0.0)),
+            lab_x=float(shore_raw.get("lab_x", 0.0)),
+            lab_y=float(shore_raw.get("lab_y", 0.0)),
         )
 
     return PlayerWorldState(
@@ -634,6 +656,9 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         hand_crafted_count=int(player.get("hand_crafted_count", 0)),
         machine_crafted_count=int(player.get("machine_crafted_count", 0)),
         steam_energy_generated=float(player.get("steam_energy_generated", 0.0)),
+        electronics_researched=bool(player.get("electronics_researched", False)),
+        science_pack_researched=bool(player.get("science_pack_researched", False)),
+        automation_researched=bool(player.get("automation_researched", False)),
     )
 
 
@@ -675,6 +700,13 @@ def augment_save_freeplay_created_items(
         "      storage.disable_crashsite = true\n"
         "      storage.skip_intro = true\n"
         "      storage.chart_distance = 64\n"
+        "      local p = game.get_player(e.player_index)\n"
+        "      if p and p.force then\n"
+        "        if p.force.technologies['steam-power'] then\n"
+        "          p.force.technologies['steam-power'].researched = true\n"
+        "        end\n"
+        "        p.force.laboratory_speed_modifier = 4.0\n"
+        "      end\n"
         "    end\n"
         "  }\n"
         "})\n"
@@ -779,19 +811,28 @@ def augment_save_freeplay_created_items(
             "                  local e_dx, e_dy = rot(4.0, 2.0, d)\n"
             "                  local po_dx, po_dy = rot(2.0, 4.0, d)\n"
             "                  local a_dx, a_dy = rot(2.0, 6.0, d)\n"
-            "                  local f_dx, f_dy = rot(-2.5, 5.5, d)\n"
-            "                  local s_dx, s_dy = rot(-1.5, 3.0, d)\n"
+            "                  local l_dx, l_dy = rot(5.0, 5.5, d)\n"
+            "                  local f_dx, f_dy = rot(-2.5, 6.0, d)\n"
+            "                  local f2_dx, f2_dy = rot(-2.5, 4.0, d)\n"
+            "                  local f3_dx, f3_dy = rot(-2.5, 2.0, d)\n"
+            "                  local s_dx, s_dy = rot(-0.5, 4.5, d)\n"
             "                  local bx, by = px + b_dx, py + b_dy\n"
             "                  local ex, ey = px + e_dx, py + e_dy\n"
             "                  local pox, poy = px + po_dx, py + po_dy\n"
             "                  local ax, ay = px + a_dx, py + a_dy\n"
+            "                  local lx, ly = px + l_dx, py + l_dy\n"
             "                  local fx, fy = px + f_dx, py + f_dy\n"
+            "                  local f2x, f2y = px + f2_dx, py + f2_dy\n"
+            "                  local f3x, f3y = px + f3_dx, py + f3_dy\n"
             "                  local sx, sy = px + s_dx, py + s_dy\n"
             "                  if p.surface.can_place_entity({name = 'boiler', position = {bx, by}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'steam-engine', position = {ex, ey}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'small-electric-pole', position = {pox, poy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'assembling-machine-1', position = {ax, ay}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'lab', position = {lx, ly}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {fx, fy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f2x, f2y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {f3x, f3y}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
             "                    and p.surface.can_place_entity({name = 'character', position = {sx, sy}, force = p.force}) then\n"
             "                    local clear_path = true\n"
             "                    local steps_x = math.max(1, math.ceil(math.abs(sx - ref_x)))\n"
@@ -816,7 +857,10 @@ def augment_save_freeplay_created_items(
             "                        engine_x = ex, engine_y = ey, engine_dir = b_dir,\n"
             "                        pole_x = pox, pole_y = poy,\n"
             "                        asm_x = ax, asm_y = ay,\n"
+            "                        lab_x = lx, lab_y = ly,\n"
             "                        furnace_x = fx, furnace_y = fy,\n"
+            "                        furnace2_x = f2x, furnace2_y = f2y,\n"
+            "                        furnace3_x = f3x, furnace3_y = f3y,\n"
             "                        stand_x = sx, stand_y = sy\n"
             "                      }\n"
             "                      break\n"
@@ -859,6 +903,10 @@ def augment_save_freeplay_created_items(
             "          y = p.selected.position.y\n"
             "        }\n"
             "      end\n"
+            "      local techs = p.force.technologies\n"
+            "      local elec_res = techs['electronics'] and techs['electronics'].researched or false\n"
+            "      local sp_res = techs['automation-science-pack'] and techs['automation-science-pack'].researched or false\n"
+            "      local auto_res = techs['automation'] and techs['automation'].researched or false\n"
             "      local state = {\n"
             "        tick = e.tick,\n"
             "        player = {\n"
@@ -871,7 +919,10 @@ def augment_save_freeplay_created_items(
             "          crafting_queue_size = p.crafting_queue_size,\n"
             "          hand_crafted_count = storage.hand_crafted_count or 0,\n"
             "          machine_crafted_count = mc_count,\n"
-            "          steam_energy_generated = steam_energy\n"
+            "          steam_energy_generated = steam_energy,\n"
+            "          electronics_researched = elec_res,\n"
+            "          science_pack_researched = sp_res,\n"
+            "          automation_researched = auto_res\n"
             "        },\n"
             "        nearest_resource = storage.nearest_resource,\n"
             "        resources_by_name = storage.resources_by_name or {},\n"
