@@ -394,6 +394,58 @@ def _required_drill_count(
     return max(1, math.ceil(target_rate_per_min / rate_per_drill))
 
 
+def cluster_resource_tiles(patch_tiles: set[TileCoord]) -> list[set[TileCoord]]:
+    """Partition patch_tiles into 8-connected components sorted by descending size."""
+    remaining = set(patch_tiles)
+    clusters: list[set[TileCoord]] = []
+    while remaining:
+        start = min(remaining)
+        remaining.remove(start)
+        comp = {start}
+        queue = [start]
+        while queue:
+            cx, cy = queue.pop()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nb = (cx + dx, cy + dy)
+                    if nb in remaining:
+                        remaining.remove(nb)
+                        comp.add(nb)
+                        queue.append(nb)
+        clusters.append(comp)
+    clusters.sort(key=lambda c: (-len(c), min(c)))
+    return clusters
+
+
+def select_primary_patch_clusters(
+    resource_patches: Mapping[str, set[TileCoord]],
+    reference_pos: TileCoord = (0, 0),
+    min_tiles: int = 9,
+) -> dict[str, set[TileCoord]]:
+    """Select the primary connected resource cluster nearest reference_pos for each commodity."""
+    selected: dict[str, set[TileCoord]] = {}
+    rx, ry = reference_pos
+    for comm, tiles in resource_patches.items():
+        if not tiles:
+            continue
+        clusters = cluster_resource_tiles(set(tiles))
+        if len(clusters) == 1:
+            selected[comm] = clusters[0]
+            continue
+        viable = [c for c in clusters if len(c) >= min_tiles] or clusters
+        best = min(
+            viable,
+            key=lambda c: math.hypot(
+                sum(pt[0] for pt in c) / len(c) - rx,
+                sum(pt[1] for pt in c) / len(c) - ry,
+            ),
+        )
+        selected[comm] = best
+    return selected
+
+
 def _try_build_patch_row(
     commodity: str,
     patch_tiles: set[TileCoord],
@@ -415,9 +467,9 @@ def _try_build_patch_row(
     along_vals = xs if is_horiz else ys
     min_a, max_a = min(along_vals), max(along_vals)
 
-    start_a = min_a if step_sign > 0 else max_a - dw + 1
-    stop_a = (max_a - dw + 2) if step_sign > 0 else (min_a - 1)
-    slot_starts = list(range(start_a, stop_a, step_sign * dw))
+    start_a = (max_a - dw + 1) if step_sign > 0 else min_a
+    stop_a = (min_a - 1) if step_sign > 0 else (max_a - dw + 2)
+    slot_starts = list(range(start_a, stop_a, -step_sign * dw))
     if not slot_starts:
         return None
 
@@ -464,8 +516,8 @@ def _try_build_patch_row(
         return None
 
     first_a = min(drop_along_coords) if step_sign > 0 else max(drop_along_coords)
-    last_patch_a = max(along_vals) if step_sign > 0 else min(along_vals)
-    exit_a = last_patch_a + step_sign * 2
+    last_drop_a = max(drop_along_coords) if step_sign > 0 else min(drop_along_coords)
+    exit_a = last_drop_a + step_sign * 2
 
     belt_a_coords = list(range(first_a, exit_a + step_sign, step_sign))
     belt_entities: list[EntityDict] = []
@@ -497,7 +549,11 @@ def _try_build_patch_row(
             spl_pos = (belt_line_coord + 1.0, spl_a + TILE_HALF)
             term_pts = [(belt_line_coord, out_a), (belt_line_coord + 1, out_a)]
 
-        if spl_tiles & obstacles or spl_tiles & occupied or any(t in obstacles for t in term_pts):
+        if (
+            spl_tiles & obstacles
+            or spl_tiles & occupied
+            or any(t in obstacles or t in occupied for t in term_pts)
+        ):
             return None
         belt_entities.append(
             {
@@ -520,6 +576,13 @@ def _try_build_patch_row(
             )
             occupied.add(t_pt)
         output_terminals = term_pts
+
+    step_dx, step_dy = DIR_STEPS[belt_dir]
+    for t_pt in output_terminals:
+        for k in (1, 2):
+            ahead = (t_pt[0] + k * step_dx, t_pt[1] + k * step_dy)
+            if ahead in obstacles or ahead in occupied:
+                return None
 
     return PatchArrayResult(
         commodity=commodity,
@@ -611,7 +674,7 @@ def synthesize_shoreline_power_array(
 
     for wx, wy in sorted(water_tiles):
         for d_idx, p_dir in enumerate(CARDINAL_DIRS):
-            w_dx, w_dy = _rotate_offset(0.0, -1.5, p_dir)
+            w_dx, w_dy = _rotate_offset(0.0, -1.0, p_dir)
             px = round(wx - w_dx - TILE_HALF) + TILE_HALF
             py = round(wy - w_dy - TILE_HALF) + TILE_HALF
             pump_tile = (math.floor(px), math.floor(py))
@@ -644,8 +707,14 @@ def synthesize_shoreline_power_array(
             ins_tile = (math.floor(ix), math.floor(iy))
             fuel_tile = (math.floor(fx), math.floor(fy))
 
+            b_step_dx, b_step_dy = DIR_STEPS[b_dir]
+            fuel_approach = {
+                (fuel_tile[0] - k * b_step_dx, fuel_tile[1] - k * b_step_dy) for k in (1, 2)
+            }
             all_fp = {pump_tile, ins_tile, fuel_tile} | b_fp | e_fp
             if all_fp & water_tiles or all_fp & obstacles:
+                continue
+            if fuel_approach & water_tiles or fuel_approach & obstacles or fuel_approach & all_fp:
                 continue
 
             entities: list[EntityDict] = [
@@ -1020,12 +1089,16 @@ def _select_base_origin(
     base_height: int = 20,
 ) -> TileCoord:
     """Find an obstacle-free bounding box for the starter base core near patches and power."""
+    primary_patches = select_primary_patch_clusters(
+        surface.resource_patches,
+        reference_pos=power_array.fuel_input_terminal,
+    )
     patch_centers = [
         (
             sum(pt[0] for pt in pts) / len(pts),
             sum(pt[1] for pt in pts) / len(pts),
         )
-        for pts in surface.resource_patches.values()
+        for pts in primary_patches.values()
         if pts
     ]
     all_pts = [*patch_centers, power_array.fuel_input_terminal]
@@ -1040,20 +1113,21 @@ def _select_base_origin(
     )
 
     best_origin: TileCoord | None = None
-    best_dist = math.inf
-    margin = 4
+    best_score = math.inf
+    margin = 6
     for ox in range(surface.min_x + margin, surface.max_x - base_width - margin + 1, 2):
         for oy in range(surface.min_y + margin, surface.max_y - base_height - margin + 1, 2):
-            dist = math.hypot(ox - target_x, oy - target_y)
-            if dist >= best_dist:
+            west_penalty = 0.0 if ox >= target_x + 4 else (target_x + 4 - ox) * 1.25
+            score = math.hypot(ox - target_x, oy - target_y) + west_penalty
+            if score >= best_score:
                 continue
             box_tiles = {
                 (tx, ty)
-                for tx in range(ox - 2, ox + base_width + 2)
+                for tx in range(ox - 5, ox + base_width + 2)
                 for ty in range(oy - 2, oy + base_height + 2)
             }
             if not (box_tiles & blocked):
-                best_dist = dist
+                best_score = score
                 best_origin = (ox, oy)
 
     if best_origin is None:
@@ -1102,12 +1176,17 @@ def route_patch_to_base(
     rates, raw, _surplus = solve.solve_rates(data, demand, tier.allowed_recipes)
     _lines, base_power_watts = solve.machine_counts(data, rates, allowed=tier.allowed_recipes)
 
-    ref_pt = (
+    center_ref = (
         (surface.min_x + surface.max_x) // 2,
         (surface.min_y + surface.max_y) // 2,
     )
-    if surface.resource_patches.get(tier.fuel_commodity):
-        f_pts = surface.resource_patches[tier.fuel_commodity]
+    initial_clusters = select_primary_patch_clusters(
+        surface.resource_patches,
+        reference_pos=center_ref,
+    )
+    ref_pt = center_ref
+    if initial_clusters.get(tier.fuel_commodity):
+        f_pts = initial_clusters[tier.fuel_commodity]
         ref_pt = (
             round(sum(p[0] for p in f_pts) / len(f_pts)),
             round(sum(p[1] for p in f_pts) / len(f_pts)),
@@ -1124,6 +1203,10 @@ def route_patch_to_base(
         tier=tier,
     )
 
+    primary_patches = select_primary_patch_clusters(
+        surface.resource_patches,
+        reference_pos=power_array.fuel_input_terminal,
+    )
     chosen_origin = (
         base_origin if base_origin is not None else _select_base_origin(surface, power_array)
     )
@@ -1145,14 +1228,14 @@ def route_patch_to_base(
     )
 
     for comm, base_term in sorted(base_core.input_terminals.items()):
-        if comm not in surface.resource_patches:
+        if comm not in primary_patches:
             raise ValueError(f"Required resource patch '{comm}' not present on map surface")
         is_fuel = comm == tier.fuel_commodity
         fanout = 2 if is_fuel else 1
         target_rate = max(15.0, float(raw.get(comm, 15.0)))
         p_array = synthesize_patch_miner_array(
             commodity=comm,
-            patch_tiles=surface.resource_patches[comm],
+            patch_tiles=primary_patches[comm],
             target_rate_per_min=target_rate,
             target_anchor=base_term,
             obstacles=placed_obstacles,
@@ -1207,11 +1290,24 @@ def route_patch_to_base(
                 )
             )
 
+    active_tiles = (
+        set(power_array.occupied_tiles)
+        | set(base_core.occupied_tiles)
+        | {pt for pa in patch_arrays.values() for pt in pa.occupied_tiles}
+    )
+    act_xs = [pt[0] for pt in active_tiles]
+    act_ys = [pt[1] for pt in active_tiles]
+    r_margin = 28
+    r_min_x = max(surface.min_x, min(act_xs) - r_margin)
+    r_max_x = min(surface.max_x, max(act_xs) + r_margin)
+    r_min_y = max(surface.min_y, min(act_ys) - r_margin)
+    r_max_y = min(surface.max_y, max(act_ys) + r_margin)
+
     router = DualLaneMazeRouter(
-        min_x=surface.min_x,
-        max_x=surface.max_x,
-        min_y=surface.min_y,
-        max_y=surface.max_y,
+        min_x=r_min_x,
+        max_x=r_max_x,
+        min_y=r_min_y,
+        max_y=r_max_y,
         engine=engine,
         prototypes=tier.filtered_prototypes,
         obstacles=router_obstacles,

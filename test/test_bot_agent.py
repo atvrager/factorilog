@@ -603,7 +603,12 @@ class BotAgentTest(unittest.TestCase):
                 msg=f"Stats: {sim_stats}",
             )
 
-            if export_dir.is_dir() and shutil.which("Xvfb") and shutil.which("ffmpeg"):
+            if (
+                os.environ.get("RECORD_BOT_VIDEOS") == "1"
+                and export_dir.is_dir()
+                and shutil.which("Xvfb")
+                and shutil.which("ffmpeg")
+            ):
                 self._record_bot_videos(
                     factorio_bin=Path(factorio_bin),
                     tmp_path=tmp_path,
@@ -611,6 +616,250 @@ class BotAgentTest(unittest.TestCase):
                     save_zip=save_zip,
                     export_dir=export_dir,
                 )
+
+    def test_bot_synthesizes_and_builds_on_real_freeplay_map(self) -> None:
+        """Verify Cartographer and automatic site selection on the real seed-42 Freeplay map."""
+        from foundry.entity_helpers import (
+            check_collisions,
+            check_power,
+            check_underground_pairing,
+            get_pole_supply_radius,
+        )
+
+        try:
+            factorio_bin = find_factorio_binary()
+        except FileNotFoundError:
+            self.skipTest("Factorio binary not available for headless simulation")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            mods_dir = tmp_path / "mods"
+            mods_dir.mkdir(parents=True, exist_ok=True)
+            mod_list = {
+                "mods": [
+                    {"name": "base", "enabled": True},
+                    {"name": "elevated-rails", "enabled": False},
+                    {"name": "quality", "enabled": False},
+                    {"name": "recycler", "enabled": False},
+                    {"name": "space-age", "enabled": False},
+                ]
+            }
+            (mods_dir / "mod-list.json").write_text(json.dumps(mod_list, indent=2))
+
+            config_file = tmp_path / "config.ini"
+            config_file.write_text(
+                f"[path]\nread-data=__PATH__executable__/../../data\nwrite-data={tmp_path}\n"
+            )
+
+            map_gen = {"width": 256, "height": 256, "seed": 42}
+            map_gen_file = tmp_path / "map-gen-settings.json"
+            map_gen_file.write_text(json.dumps(map_gen, indent=2))
+
+            base_save = tmp_path / "saves" / "freeplay_42.zip"
+            base_save.parent.mkdir(parents=True, exist_ok=True)
+            proc_create = subprocess.run(
+                [
+                    str(factorio_bin),
+                    "-c",
+                    str(config_file),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--create",
+                    str(base_save),
+                    "--map-gen-settings",
+                    str(map_gen_file),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc_create.returncode,
+                0,
+                msg=f"STDOUT:\n{proc_create.stdout}\nSTDERR:\n{proc_create.stderr}",
+            )
+
+            scan_save = tmp_path / "saves" / "freeplay_42_scan.zip"
+            shutil.copy2(base_save, scan_save)
+            scanner_lua = build_lua_cartography_scanner_snippet(radius=120)
+            scan_hook = (
+                "\nlocal handler = require('event_handler')\n"
+                "handler.add_lib({\n"
+                "  on_nth_tick = {\n"
+                "    [1] = function(e)\n"
+                "      local p = nil\n"
+                + scanner_lua
+                + "      helpers.write_file('freeplay_cartography.json', helpers.table_to_json({cartography = storage.cartography}) .. '\\n', false)\n"
+                "    end\n"
+                "  }\n"
+                "})\n"
+            )
+            self._append_lua_to_save(scan_save, scan_hook)
+
+            proc_scan = subprocess.run(
+                [
+                    str(factorio_bin),
+                    "-c",
+                    str(config_file),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--benchmark",
+                    str(scan_save),
+                    "--benchmark-ticks",
+                    "5",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc_scan.returncode,
+                0,
+                msg=f"STDOUT:\n{proc_scan.stdout}\nSTDERR:\n{proc_scan.stderr}",
+            )
+
+            dump_file = tmp_path / "script-output" / "freeplay_cartography.json"
+            self.assertTrue(dump_file.is_file())
+
+            bot = BotAgent(data=self.data, researched_techs={"automation", "logistics"})
+            self.assertTrue(bot.ingest_cartography(dump_file))
+            self.assertGreater(len(bot.cartographer.water_tiles), 50)
+            for comm in ("coal", "iron-ore", "copper-ore", "stone"):
+                self.assertIn(comm, bot.cartographer.resource_patches)
+                self.assertGreater(len(bot.cartographer.resource_patches[comm]), 20)
+
+            # Synthesize plan with automatic site selection (base_origin=None, bounds=None)
+            plan = bot.synthesize_plan(
+                reference_pos=(0.0, 0.0),
+                bounds=None,
+                base_origin=None,
+                verify=False,
+            )
+            self.assertEqual(len(plan.layout.trunk_nets), 4)
+            for route in plan.layout.trunk_routes.values():
+                self.assertTrue(route.is_success)
+            self.assertEqual(check_collisions(plan.layout.entities), [])
+            self.assertEqual(check_underground_pairing(plan.layout.entities), [])
+            supply_rad = get_pole_supply_radius("small-electric-pole")
+            self.assertEqual(check_power(plan.layout.entities, supply_rad), [])
+
+            exec_save = tmp_path / "saves" / "freeplay_42_exec.zip"
+            shutil.copy2(base_save, exec_save)
+            executor_lua = bot.build_lua_plan_executor_snippet()
+            ox, oy = plan.layout.base_core.bounds[0], plan.layout.base_core.bounds[1]
+            exec_hook = (
+                "\nlocal handler = require('event_handler')\n"
+                "handler.add_lib({\n"
+                "  on_nth_tick = {\n"
+                "    [1] = function(e)\n"
+                "      if storage.fp_exec_done then return end\n"
+                "      storage.fp_exec_done = true\n"
+                "      local surface = game.surfaces[1]\n"
+                "      surface.request_to_generate_chunks({0, 0}, 4)\n"
+                "      surface.force_generate_chunk_requests()\n"
+                "      local force = game.forces['player']\n"
+                "      for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
+                "        if force.technologies[t_name] then\n"
+                "          force.technologies[t_name].researched = true\n"
+                "        end\n"
+                "      end\n"
+                "      if force.technologies['steel-processing'] then\n"
+                "        force.add_research('steel-processing')\n"
+                "      end\n"
+                f"      surface.create_entity({{name = 'character', position = {{{ox}, {oy}}}, force = force}})\n"
+                + executor_lua
+                + "    end,\n"
+                "    [500] = function(e)\n"
+                "      if e.tick == 0 then return end\n"
+                "      local surface = game.surfaces[1]\n"
+                "      local drills_active = 0\n"
+                "      for _, d in pairs(surface.find_entities_filtered({name = 'electric-mining-drill'})) do\n"
+                "        if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
+                "          drills_active = drills_active + 1\n"
+                "        end\n"
+                "      end\n"
+                "      local plates_made = 0\n"
+                "      for _, f in pairs(surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
+                "        plates_made = plates_made + (f.products_finished or 0)\n"
+                "      end\n"
+                "      local asm_made = {}\n"
+                "      for _, a in pairs(surface.find_entities_filtered({name = 'assembling-machine-1'})) do\n"
+                "        local rec = a.get_recipe()\n"
+                "        if rec then\n"
+                "          asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
+                "        end\n"
+                "      end\n"
+                "      helpers.write_file('freeplay_sim_stats.json', helpers.table_to_json({\n"
+                "        tick = e.tick,\n"
+                "        bot_execution = storage.bot_execution,\n"
+                "        drills_active = drills_active,\n"
+                "        plates_made = plates_made,\n"
+                "        asm_made = asm_made,\n"
+                "      }) .. '\\n', false)\n"
+                "    end\n"
+                "  }\n"
+                "})\n"
+            )
+            self._append_lua_to_save(exec_save, exec_hook)
+
+            export_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ""))
+            if export_dir.is_dir():
+                shutil.copy2(exec_save, export_dir / "freeplay_42_bot_save.zip")
+
+            proc_sim = subprocess.run(
+                [
+                    str(factorio_bin),
+                    "-c",
+                    str(config_file),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--benchmark",
+                    str(exec_save),
+                    "--benchmark-ticks",
+                    "7200",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc_sim.returncode,
+                0,
+                msg=f"STDOUT:\n{proc_sim.stdout}\nSTDERR:\n{proc_sim.stderr}",
+            )
+
+            stats_file = tmp_path / "script-output" / "freeplay_sim_stats.json"
+            self.assertTrue(stats_file.is_file())
+            sim_stats = json.loads(stats_file.read_text())
+            exec_info = sim_stats["bot_execution"]
+            self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
+            self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
+            self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
+            self.assertGreater(
+                sim_stats["asm_made"].get("iron-gear-wheel", 0), 0, msg=f"Stats: {sim_stats}"
+            )
+            self.assertGreater(
+                sim_stats["asm_made"].get("transport-belt", 0), 0, msg=f"Stats: {sim_stats}"
+            )
+            self.assertGreater(
+                sim_stats["asm_made"].get("automation-science-pack", 0),
+                0,
+                msg=f"Stats: {sim_stats}",
+            )
+
+    @staticmethod
+    def _append_lua_to_save(save_zip_path: Path, lua_hook: str) -> None:
+        """Append lua_hook to control.lua inside save_zip_path."""
+        import zipfile
+
+        temp_zip = save_zip_path.with_suffix(".tmp.zip")
+        with (
+            zipfile.ZipFile(save_zip_path, "r") as zin,
+            zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zout,
+        ):
+            for item in zin.infolist():
+                raw = zin.read(item.filename)
+                if item.filename.endswith("/control.lua") or item.filename == "control.lua":
+                    raw = raw + lua_hook.encode("utf-8")
+                zout.writestr(item, raw)
+        temp_zip.replace(save_zip_path)
 
     def _record_bot_videos(
         self,
