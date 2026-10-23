@@ -483,7 +483,6 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             has_xvfb_ffmpeg = bool(shutil.which("Xvfb") and shutil.which("ffmpeg"))
             if has_xvfb_ffmpeg:
                 recorder.start_display()
-                recorder.start_recording()
 
             server_proc: subprocess.Popen[str] | None = None
             client_proc: subprocess.Popen[str] | None = None
@@ -606,9 +605,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
-                patrol_x = -12.0
-                patrol_y = -8.0
-                patrol_done = False
+                primed_walk = False
+                primed_stop = False
+                recording_started = False
+                walk_stage = 0
+                walk_dx = -1.0
+                walk_dy = 0.0
                 furnace_x = 0.0
                 furnace_y = 0.0
                 initial_ore = 0
@@ -622,7 +624,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 last_state: mp_proxy.PlayerWorldState | None = None
 
                 success = False
-                join_deadline = time.monotonic() + 55.0
+                join_deadline = time.monotonic() + 75.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
                     if state is not None and proxy.stats.empty_client_heartbeats_seen >= 90:
@@ -633,43 +635,100 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                             res_y = state.nearest_resource.y
                             initial_ore = state.inventory.get(res_name, 0)
 
-                        if res_name is not None:
-                            mined_ore = state.inventory.get(res_name, 0) - initial_ore
-                            dist = math.hypot(res_x - state.player_x, res_y - state.player_y)
-                            patrol_dist = math.hypot(
-                                patrol_x - state.player_x, patrol_y - state.player_y
-                            )
-                            now = time.monotonic()
+                        now = time.monotonic()
+                        # Pre-recording setup (before tick 1220):
+                        # Walk the shorter axis so the character is aligned on a single pure cardinal line
+                        # to (res_x, res_y) AND PlayerInputSource::lastSentWalkingState->tick > 0 is primed,
+                        # then stand still across 3 full 300-tick windows (300..1200) so ServerSynchronizer
+                        # drops client latency L all the way to 2 ticks.
+                        if res_name is not None and not primed_stop:
+                            raw_dx = res_x - state.player_x
+                            raw_dy = res_y - state.player_y
+                            short_err = abs(raw_dy) if abs(raw_dx) >= abs(raw_dy) else abs(raw_dx)
+                            if not primed_walk and proxy.pending_action_count() == 0:
+                                primed_walk = True
+                                if abs(raw_dx) >= abs(raw_dy):
+                                    pdx, pdy = 0.0, math.copysign(1.0, raw_dy)
+                                else:
+                                    pdx, pdy = math.copysign(1.0, raw_dx), 0.0
+                                act_pw, pay_pw = mp_proxy.build_start_walking_action(pdx, pdy)
+                                proxy.queue_action(act_pw, player_index=0, payload=pay_pw)
+                                last_cmd_time = now
+                            elif (
+                                primed_walk
+                                and proxy.pending_action_count() == 0
+                                and (short_err <= 2.35 or state.tick >= 260)
+                            ):
+                                primed_stop = True
+                                act_ps, pay_ps = mp_proxy.build_stop_walking_action()
+                                proxy.queue_action(act_ps, player_index=0, payload=pay_ps)
+                                last_cmd_time = now
 
-                            if not patrol_done:
-                                if patrol_dist > 1.5:
-                                    if (
-                                        proxy.pending_action_count() == 0
-                                        and (now - last_cmd_time) >= 0.25
-                                    ):
-                                        dx, dy = mp_proxy.compute_walking_vector(
-                                            state.player_x, state.player_y, patrol_x, patrol_y
+                        # Wait until ServerSynchronizer reduces client latency at tick 1200
+                        if res_name is not None and primed_stop and state.tick >= 1200:
+                            if state.tick >= 1215 and not recording_started:
+                                recording_started = True
+                                if has_xvfb_ffmpeg:
+                                    recorder.start_recording()
+
+                            mined_ore = state.inventory.get(res_name, 0) - initial_ore
+                            raw_dx = res_x - state.player_x
+                            raw_dy = res_y - state.player_y
+                            dist = math.hypot(raw_dx, raw_dy)
+                            axis_err = abs(raw_dx) if abs(walk_dx) >= abs(walk_dy) else abs(raw_dy)
+
+                            if mined_ore < 1:
+                                if (
+                                    not mining_phase
+                                    and (walk_stage == 0 or axis_err > 2.15)
+                                    and dist > 2.35
+                                ):
+                                    if walk_stage == 0 and proxy.pending_action_count() == 0:
+                                        walk_stage = 2
+                                        if abs(raw_dx) >= abs(raw_dy):
+                                            walk_dx, walk_dy = math.copysign(1.0, raw_dx), 0.0
+                                        else:
+                                            walk_dx, walk_dy = 0.0, math.copysign(1.0, raw_dy)
+                                        act_w, pay_w = mp_proxy.build_start_walking_action(
+                                            walk_dx, walk_dy
                                         )
-                                        act_w, pay_w = mp_proxy.build_start_walking_action(dx, dy)
                                         proxy.queue_action(act_w, player_index=0, payload=pay_w)
                                         last_cmd_time = now
-                                else:
-                                    patrol_done = True
-                            elif mined_ore < 1:
-                                if not mining_phase and dist > 1.75:
-                                    if (
-                                        proxy.pending_action_count() == 0
-                                        and (now - last_cmd_time) >= 0.25
+                                    elif (
+                                        not state.walking
+                                        and proxy.pending_action_count() == 0
+                                        and (now - last_cmd_time) >= 0.8
                                     ):
-                                        dx, dy = mp_proxy.compute_walking_vector(
-                                            state.player_x, state.player_y, res_x, res_y
+                                        act_w, pay_w = mp_proxy.build_start_walking_action(
+                                            walk_dx, walk_dy
                                         )
-                                        act_w, pay_w = mp_proxy.build_start_walking_action(dx, dy)
                                         proxy.queue_action(act_w, player_index=0, payload=pay_w)
                                         last_cmd_time = now
                                 else:
                                     if not mining_phase:
                                         mining_phase = True
+                                        for throttle in (
+                                            0.88,
+                                            0.77,
+                                            0.67,
+                                            0.59,
+                                            0.51,
+                                            0.45,
+                                            0.39,
+                                            0.34,
+                                            0.30,
+                                            0.26,
+                                            0.23,
+                                            0.20,
+                                            0.18,
+                                            0.15,
+                                            0.13,
+                                            0.11,
+                                        ):
+                                            act_b, pay_b = mp_proxy.build_start_walking_action(
+                                                walk_dx * throttle, walk_dy * throttle
+                                            )
+                                            proxy.queue_action(act_b, player_index=0, payload=pay_b)
                                         act_sw, pay_sw = mp_proxy.build_stop_walking_action()
                                         act_sel, pay_sel = mp_proxy.build_selected_entity_action(
                                             res_x, res_y
@@ -686,6 +745,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     ):
                                         if dist > 2.2:
                                             mining_phase = False
+                                            walk_stage = 0
                                         else:
                                             act_sel, pay_sel = (
                                                 mp_proxy.build_selected_entity_action(res_x, res_y)

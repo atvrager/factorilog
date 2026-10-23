@@ -617,7 +617,7 @@ def augment_save_freeplay_created_items(
             "    end\n"
         )
         nth_tick_entries.append(
-            "    [5] = function(e)\n"
+            "    [2] = function(e)\n"
             "      local p = game.get_player(1)\n"
             "      if not p then return end\n"
             "      local inv = p.get_main_inventory()\n"
@@ -705,7 +705,7 @@ def augment_save_freeplay_created_items(
         interval = int(timelapse_interval_ticks)
         timelapse_body = (
             "      local p = game.get_player(1)\n"
-            "      if not p then return end\n"
+            "      if not p or e.tick < 1220 or p.walking_state.walking then return end\n"
             "      storage.timelapse_seq = (storage.timelapse_seq or 0) + 1\n"
             "      game.take_screenshot({\n"
             "        player = p,\n"
@@ -718,7 +718,7 @@ def augment_save_freeplay_created_items(
             "        path = string.format('timelapse/frame_%08d.jpg', storage.timelapse_seq)\n"
             "      })\n"
         )
-        if interval == 5 and nth_tick_entries:
+        if interval == 2 and nth_tick_entries:
             nth_tick_entries[0] = nth_tick_entries[0][:-7] + timelapse_body + "    end"
         else:
             nth_tick_entries.append(f"    [{interval}] = function(e)\n{timelapse_body}    end")
@@ -740,6 +740,7 @@ def augment_save_freeplay_created_items(
         "        if p.character then\n"
         "          p.character.destructible = true\n"
         "        end\n"
+        "        p.game_view_settings.update_entity_selection = false\n"
         f"        for k, v in pairs({{{lua_entries}}}) do\n"
         "          p.insert({name = k, count = v})\n"
         "        end\n"
@@ -1346,6 +1347,8 @@ class XvfbVideoRecorder:
     def stop(self) -> None:
         """Finalize the MP4 file and terminate ffmpeg and Xvfb."""
         if self._ffmpeg_proc is not None:
+            if self._ffmpeg_proc.stdin is not None:
+                self._ffmpeg_proc.stdin.close()
             if self._ffmpeg_proc.poll() is None:
                 self._ffmpeg_proc.send_signal(signal.SIGINT)
                 try:
