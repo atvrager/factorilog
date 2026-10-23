@@ -531,6 +531,18 @@ class ShorelineSite:
 
 
 @dataclass(frozen=True)
+class PlacedSurfaceEntity:
+    """Placed player-force entity serialized from the live Factorio surface."""
+
+    name: str
+    x: float
+    y: float
+    direction: int = 0
+    entity_type: str | None = None
+    recipe: str | None = None
+
+
+@dataclass(frozen=True)
 class PlayerWorldState:
     """Snapshot of player position, activity, selection, inventory, and nearest resource."""
 
@@ -555,8 +567,10 @@ class PlayerWorldState:
     science_pack_researched: bool = False
     automation_researched: bool = False
     logistics_researched: bool = False
-    automated_belts_crafted: int = 0
-    automated_science_crafted: int = 0
+    drills_active: int = 0
+    plates_made: int = 0
+    asm_made: dict[str, int] = field(default_factory=dict)
+    placed_entities: tuple[PlacedSurfaceEntity, ...] = ()
 
 
 def read_world_state(state_path: Path) -> PlayerWorldState | None:
@@ -643,6 +657,31 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
             lab_y=float(shore_raw.get("lab_y", 0.0)),
         )
 
+    asm_raw = payload.get("asm_made")
+    asm_made: dict[str, int] = {}
+    if isinstance(asm_raw, dict):
+        for rname, rcount in asm_raw.items():
+            if isinstance(rname, str) and isinstance(rcount, (int, float)):
+                asm_made[rname] = int(rcount)
+
+    placed_raw = payload.get("placed_entities")
+    placed_entities: list[PlacedSurfaceEntity] = []
+    if isinstance(placed_raw, list):
+        for ent in placed_raw:
+            if isinstance(ent, dict) and "name" in ent and "x" in ent and "y" in ent:
+                ug_val = ent.get("type")
+                rec_val = ent.get("recipe")
+                placed_entities.append(
+                    PlacedSurfaceEntity(
+                        name=str(ent["name"]),
+                        x=float(ent["x"]),
+                        y=float(ent["y"]),
+                        direction=int(ent.get("direction", 0)),
+                        entity_type=str(ug_val) if isinstance(ug_val, str) and ug_val else None,
+                        recipe=str(rec_val) if isinstance(rec_val, str) and rec_val else None,
+                    )
+                )
+
     return PlayerWorldState(
         tick=int(payload.get("tick", 0)),
         player_x=float(player.get("x", 0.0)),
@@ -665,8 +704,10 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         science_pack_researched=bool(player.get("science_pack_researched", False)),
         automation_researched=bool(player.get("automation_researched", False)),
         logistics_researched=bool(player.get("logistics_researched", False)),
-        automated_belts_crafted=int(player.get("automated_belts_crafted", 0)),
-        automated_science_crafted=int(player.get("automated_science_crafted", 0)),
+        drills_active=int(payload.get("drills_active", 0)),
+        plates_made=int(payload.get("plates_made", 0)),
+        asm_made=asm_made,
+        placed_entities=tuple(placed_entities),
     )
 
 
@@ -699,10 +740,13 @@ def augment_save_freeplay_created_items(
     timelapse_zoom: float = 0.85,
     stationary_game_speed: float = 1.0,
     walking_game_speed: float = 1.0,
+    phase1_bom_items: dict[str, int] | None = None,
 ) -> None:
     """Augment control.lua inside save_zip_path to skip cutscene and emit telemetry."""
     items_dict = extra_items or {}
     lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in items_dict.items())
+    bom_dict = phase1_bom_items or {}
+    bom_lua_entries = ", ".join(f'["{name}"] = {int(count)}' for name, count in bom_dict.items())
     pre_hook = (
         "local handler = require('event_handler')\n"
         "handler.add_lib({\n"
@@ -710,7 +754,7 @@ def augment_save_freeplay_created_items(
         "    [defines.events.on_player_created] = function(e)\n"
         "      storage.disable_crashsite = true\n"
         "      storage.skip_intro = true\n"
-        "      storage.chart_distance = 64\n"
+        "      storage.chart_distance = 128\n"
         "    end\n"
         "  }\n"
         "})\n"
@@ -767,12 +811,9 @@ def augment_save_freeplay_created_items(
             "              end\n"
             "            end\n"
             "          end\n"
-            "          if #asms >= 2 and (auto_belts < 1 or auto_sci < 1) then\n"
-            "            for _, am in ipairs(asms) do\n"
-            "              if am.valid and am.is_crafting() then\n"
-            "                fast_want = true\n"
-            "                break\n"
-            "              end\n"
+            "          if storage.phase1_bom_granted and ((asm_made['transport-belt'] or 0) < 1 or (asm_made['automation-science-pack'] or 0) < 1) then\n"
+            "            if (contents['transport-belt'] or 0) == 0 and (drills_active > 0 or plates_made > 0) then\n"
+            "              fast_want = true\n"
             "            end\n"
             "          end\n"
             "        end\n"
@@ -792,11 +833,64 @@ def augment_save_freeplay_created_items(
             ",\n"
             "    [defines.events.on_player_crafted_item] = function(e)\n"
             "      storage.hand_crafted_count = (storage.hand_crafted_count or 0) + 1\n"
+            "    end,\n"
+            "    [defines.events.on_built_entity] = function(e)\n"
+            "      local ent = e.entity\n"
+            "      if ent and ent.valid and ent.type == 'underground-belt' and ent.belt_to_ground_type == 'input' then\n"
+            "        local dx, dy = 0, 0\n"
+            "        if ent.direction == 0 then dy = -1\n"
+            "        elseif ent.direction == 4 then dx = 1\n"
+            "        elseif ent.direction == 8 then dy = 1\n"
+            "        elseif ent.direction == 12 then dx = -1 end\n"
+            "        local max_d = ent.prototype.max_underground_distance or 5\n"
+            "        for step = 1, max_d do\n"
+            "          local p = ent.surface.find_entity(ent.name, {ent.position.x - dx * step, ent.position.y - dy * step})\n"
+            "          if p and p.valid and p.direction == ent.direction and p.belt_to_ground_type == 'input' then\n"
+            "            local nm = ent.name\n"
+            "            local pos = {ent.position.x, ent.position.y}\n"
+            "            local dir = ent.direction\n"
+            "            local frc = ent.force\n"
+            "            ent.destroy()\n"
+            "            p.surface.create_entity({name = nm, position = pos, direction = dir, force = frc, type = 'output'})\n"
+            "            break\n"
+            "          end\n"
+            "        end\n"
+            "      end\n"
             "    end\n"
         )
         nth_tick_entries.append(
             "    [2] = function(e)\n"
             "      local p = game.get_player(1)\n"
+            "      local surf = (p and p.surface) or game.surfaces[1]\n"
+            "      if not storage.cartography_written and surf and #game.players == 0 then\n"
+            "        local r_scan = 120\n"
+            "        local area = {{-r_scan, -r_scan}, {r_scan, r_scan}}\n"
+            "        for _, o in ipairs(surf.find_entities_filtered({area = area, type = {'tree', 'simple-entity', 'cliff'}})) do\n"
+            "          o.destroy()\n"
+            "        end\n"
+            "        local water_pts = {}\n"
+            "        for _, t in ipairs(surf.find_tiles_filtered({area = area, collision_mask = 'water_tile'})) do\n"
+            "          if not t.collides_with('ground_tile') then\n"
+            "            water_pts[#water_pts + 1] = {t.position.x, t.position.y}\n"
+            "          end\n"
+            "        end\n"
+            "        local patches = {}\n"
+            "        for _, res in ipairs(surf.find_entities_filtered({area = area, type = 'resource'})) do\n"
+            "          local mp = res.prototype.mineable_properties\n"
+            "          if mp and mp.minable and not mp.required_fluid then\n"
+            "            local list = patches[res.name]\n"
+            "            if not list then list = {} patches[res.name] = list end\n"
+            "            list[#list + 1] = {math.floor(res.position.x), math.floor(res.position.y), res.amount}\n"
+            "          end\n"
+            "        end\n"
+            "        local obs_list = {}\n"
+            "        helpers.write_file('factorilog_cartography.json', helpers.table_to_json({\n"
+            "          water_tiles = water_pts,\n"
+            "          resource_patches = patches,\n"
+            "          obstacles = obs_list\n"
+            "        }) .. '\\n', false)\n"
+            "        storage.cartography_written = true\n"
+            "      end\n"
             "      if not p then return end\n"
             "      local inv = p.get_main_inventory()\n"
             "      local contents = {}\n"
@@ -969,78 +1063,111 @@ def augment_save_freeplay_created_items(
             "        end\n"
             "        if best_site then\n"
             "          storage.shoreline_site = best_site\n"
-            "          local min_x = math.min(ref_x, best_site.stand_x)\n"
-            "          local max_x = math.max(ref_x, best_site.stand_x)\n"
-            "          local min_y = math.min(ref_y, best_site.stand_y)\n"
-            "          local max_y = math.max(ref_y, best_site.stand_y)\n"
-            "          for _, rinfo in pairs(storage.resources_by_name or {}) do\n"
-            "            if rinfo.x < min_x then min_x = rinfo.x end\n"
-            "            if rinfo.x > max_x then max_x = rinfo.x end\n"
-            "            if rinfo.y < min_y then min_y = rinfo.y end\n"
-            "            if rinfo.y > max_y then max_y = rinfo.y end\n"
-            "          end\n"
-            "          min_x = min_x - 14\n"
-            "          max_x = max_x + 14\n"
-            "          min_y = min_y - 14\n"
-            "          max_y = max_y + 24\n"
-            "          local obs = p.surface.find_entities_filtered({type = {'tree', 'simple-entity'}, area = {{min_x, min_y}, {max_x, max_y}}})\n"
+            "          local obs = p.surface.find_entities_filtered({type = {'tree', 'simple-entity', 'cliff'}, area = {{-120, -120}, {120, 120}}})\n"
             "          for _, o in ipairs(obs) do o.destroy() end\n"
             "        end\n"
             "      end\n"
-            "      if not storage.cartography_written then\n"
-            "        local r_scan = 96\n"
-            "        local px0 = math.floor(p.position.x)\n"
-            "        local py0 = math.floor(p.position.y)\n"
-            "        local area = {{px0 - r_scan, py0 - r_scan}, {px0 + r_scan, py0 + r_scan}}\n"
-            "        local water_pts = {}\n"
-            "        for _, t in ipairs(p.surface.find_tiles_filtered({area = area, collision_mask = 'water_tile'})) do\n"
-            "          if not t.collides_with('ground_tile') then\n"
-            "            water_pts[#water_pts + 1] = {t.position.x, t.position.y}\n"
-            "          end\n"
-            "        end\n"
-            "        local patches = {}\n"
-            "        for _, res in ipairs(p.surface.find_entities_filtered({area = area, type = 'resource'})) do\n"
-            "          local mp = res.prototype.mineable_properties\n"
-            "          if mp and mp.minable and not mp.required_fluid then\n"
-            "            local list = patches[res.name]\n"
-            "            if not list then list = {} patches[res.name] = list end\n"
-            "            list[#list + 1] = {math.floor(res.position.x), math.floor(res.position.y), res.amount}\n"
-            "          end\n"
-            "        end\n"
-            "        local obs_list = {}\n"
-            "        for _, o in ipairs(p.surface.find_entities_filtered({area = area, type = {'tree', 'simple-entity', 'cliff'}})) do\n"
-            "          local bb = o.bounding_box\n"
-            "          obs_list[#obs_list + 1] = {\n"
-            "            name = o.name,\n"
-            "            type = o.type,\n"
-            "            position = {x = o.position.x, y = o.position.y},\n"
-            "            bounding_box = {{bb.left_top.x, bb.left_top.y}, {bb.right_bottom.x, bb.right_bottom.y}},\n"
-            "            unit_number = o.unit_number,\n"
-            "            cliff_orientation = o.type == 'cliff' and o.cliff_orientation or nil\n"
-            "          }\n"
-            "        end\n"
-            "        helpers.write_file('factorilog_cartography.json', helpers.table_to_json({\n"
-            "          water_tiles = water_pts,\n"
-            "          resource_patches = patches,\n"
-            "          obstacles = obs_list\n"
-            "        }) .. '\\n', false)\n"
-            "        storage.cartography_written = true\n"
-            "      end\n"
             "      local mc_count = 0\n"
-            "      local auto_belts = 0\n"
-            "      local auto_sci = 0\n"
-            "      local asms = p.surface.find_entities_filtered({name = 'assembling-machine-1', force = p.force})\n"
+            "      local asm_made = {}\n"
+            "      local asms = p.surface.find_entities_filtered({type = 'assembling-machine', force = p.force})\n"
             "      for _, am in ipairs(asms) do\n"
             "        local pf = am.products_finished or 0\n"
             "        mc_count = mc_count + pf\n"
-            "        if #asms >= 2 then\n"
-            "          local rec = am.get_recipe()\n"
-            "          if rec and rec.name == 'iron-gear-wheel' then\n"
-            "            if not storage.gear_asm_base then storage.gear_asm_base = pf end\n"
-            "            auto_belts = auto_belts + math.max(0, pf - storage.gear_asm_base)\n"
-            "          end\n"
-            "          if rec and rec.name == 'automation-science-pack' then auto_sci = auto_sci + pf end\n"
+            "        local rec = am.get_recipe()\n"
+            "        if rec then\n"
+            "          asm_made[rec.name] = (asm_made[rec.name] or 0) + pf\n"
             "        end\n"
+            "      end\n"
+            "      if storage.phase0_mc_base then\n"
+            "        mc_count = mc_count + storage.phase0_mc_base\n"
+            "      end\n"
+            f"      if not storage.phase1_bom_granted and mc_count >= 26 and (contents['assembling-machine-1'] or 0) >= 1 then\n"
+            "        storage.phase1_bom_granted = true\n"
+            "        storage.phase0_mc_base = mc_count\n"
+            "        if p.character and p.character.valid then\n"
+            "          p.character_running_speed_modifier = 2.0\n"
+            "          p.character_build_distance_bonus = 60\n"
+            "          p.character_reach_distance_bonus = 60\n"
+            "        end\n"
+            "        for _, ent in ipairs(p.surface.find_entities_filtered({force = p.force})) do\n"
+            "          if ent.valid and ent.name ~= 'character' then\n"
+            "            ent.destroy()\n"
+            "          end\n"
+            "        end\n"
+            "        local techs_f = p.force.technologies\n"
+            "        if techs_f['logistics'] then techs_f['logistics'].researched = true end\n"
+            "        if not p.force.current_research and techs_f['steel-processing'] then\n"
+            "          p.force.add_research('steel-processing')\n"
+            "        end\n"
+            f"        for k, v in pairs({{{bom_lua_entries}}}) do\n"
+            "          local cur = contents[k] or 0\n"
+            "          if cur < v then\n"
+            "            p.insert({name = k, count = v - cur})\n"
+            "          end\n"
+            "        end\n"
+            "        if inv then\n"
+            "          contents = {}\n"
+            "          for _, item in ipairs(inv.get_contents()) do\n"
+            "            contents[item.name] = (contents[item.name] or 0) + item.count\n"
+            "          end\n"
+            "        end\n"
+            "      end\n"
+            "      if storage.phase1_bom_granted and p.walking_state.walking and p.character and p.character.valid then\n"
+            "        local dir_dx = {[0]=0, [2]=0.707, [4]=1, [6]=0.707, [8]=0, [10]=-0.707, [12]=-1, [14]=-0.707}\n"
+            "        local dir_dy = {[0]=-1, [2]=-0.707, [4]=0, [6]=0.707, [8]=1, [10]=0.707, [12]=0, [14]=-0.707}\n"
+            "        local d_val = p.walking_state.direction or 0\n"
+            "        local wx = dir_dx[d_val] or 0\n"
+            "        local wy = dir_dy[d_val] or 0\n"
+            "        if storage.last_walk_pos then\n"
+            "          local moved = math.sqrt((p.position.x - storage.last_walk_pos.x)^2 + (p.position.y - storage.last_walk_pos.y)^2)\n"
+            "          if moved < 0.05 then\n"
+            "            storage.walk_stall_ticks = (storage.walk_stall_ticks or 0) + 1\n"
+            "            if storage.walk_stall_ticks >= 4 then\n"
+            "              storage.walk_stall_ticks = 0\n"
+            "              local tx = p.position.x + wx * 1.2\n"
+            "              local ty = p.position.y + wy * 1.2\n"
+            "              local gt = p.surface.get_tile(tx, ty)\n"
+            "              if gt and gt.valid and not gt.collides_with('water_tile') then\n"
+            "                p.character.teleport({tx, ty})\n"
+            "              end\n"
+            "            end\n"
+            "          else\n"
+            "            storage.walk_stall_ticks = 0\n"
+            "          end\n"
+            "        end\n"
+            "        storage.last_walk_pos = {x = p.position.x, y = p.position.y}\n"
+            "      else\n"
+            "        storage.last_walk_pos = nil\n"
+            "        storage.walk_stall_ticks = 0\n"
+            "      end\n"
+            "      local drills_active = 0\n"
+            "      for _, d in ipairs(p.surface.find_entities_filtered({name = 'electric-mining-drill', force = p.force})) do\n"
+            "        if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
+            "          drills_active = drills_active + 1\n"
+            "        end\n"
+            "      end\n"
+            "      local plates_made = 0\n"
+            "      for _, f in ipairs(p.surface.find_entities_filtered({name = 'stone-furnace', force = p.force})) do\n"
+            "        plates_made = plates_made + (f.products_finished or 0)\n"
+            "      end\n"
+            "      local placed_entities = storage.cached_placed_entities or {}\n"
+            "      if not storage.cached_placed_entities or (storage.phase1_bom_granted and (contents['transport-belt'] or 0) == 0 and e.tick % 60 == 0) then\n"
+            "        placed_entities = {}\n"
+            "        for _, ent in ipairs(p.surface.find_entities_filtered({force = p.force})) do\n"
+            "          if ent.valid and ent.name ~= 'character' then\n"
+            "            local ug_t = (ent.type == 'underground-belt') and ent.belt_to_ground_type or nil\n"
+            "            local rec_n = (ent.type == 'assembling-machine' and ent.get_recipe()) and ent.get_recipe().name or nil\n"
+            "            placed_entities[#placed_entities + 1] = {\n"
+            "              name = ent.name,\n"
+            "              x = math.floor(ent.position.x * 100 + 0.5) / 100,\n"
+            "              y = math.floor(ent.position.y * 100 + 0.5) / 100,\n"
+            "              direction = ent.direction,\n"
+            "              type = ug_t,\n"
+            "              recipe = rec_n\n"
+            "            }\n"
+            "          end\n"
+            "        end\n"
+            "        storage.cached_placed_entities = placed_entities\n"
             "      end\n"
             "      local steam_energy = 0\n"
             "      local poles = p.surface.find_entities_filtered({type = 'electric-pole', force = p.force})\n"
@@ -1051,6 +1178,10 @@ def augment_save_freeplay_created_items(
             "          if val and val > steam_energy then steam_energy = val end\n"
             "        end\n"
             "      end\n"
+            "      if steam_energy > (storage.max_steam_energy or 0) then\n"
+            "        storage.max_steam_energy = steam_energy\n"
+            "      end\n"
+            "      steam_energy = math.max(steam_energy, storage.max_steam_energy or 0)\n"
             "      local sel = nil\n"
             "      if p.selected and p.selected.valid then\n"
             "        sel = {\n"
@@ -1083,10 +1214,12 @@ def augment_save_freeplay_created_items(
             "          electronics_researched = elec_res,\n"
             "          science_pack_researched = sp_res,\n"
             "          automation_researched = auto_res,\n"
-            "          logistics_researched = logi_res,\n"
-            "          automated_belts_crafted = auto_belts,\n"
-            "          automated_science_crafted = auto_sci\n"
+            "          logistics_researched = logi_res\n"
             "        },\n"
+            "        drills_active = drills_active,\n"
+            "        plates_made = plates_made,\n"
+            "        asm_made = asm_made,\n"
+            "        placed_entities = placed_entities,\n"
             "        nearest_resource = storage.nearest_resource,\n"
             "        resources_by_name = storage.resources_by_name or {},\n"
             "        shoreline_site = storage.shoreline_site\n"
@@ -1395,13 +1528,13 @@ def scan_heartbeat_for_crafts(
     return crafts
 
 
-def inject_action_into_empty_client_heartbeat(
+def inject_actions_into_empty_client_heartbeat(
     buf: bytes,
-    action_type: int,
-    player_index: int,
-    action_payload: bytes,
+    actions: list[tuple[int, int, bytes]] | tuple[tuple[int, int, bytes], ...],
 ) -> bytes | None:
-    """Inject an InputAction into an unfragmented ClientToServerHeartbeat with empty TickClosures."""
+    """Inject one or more InputActions into an unfragmented ClientToServerHeartbeat with empty TickClosures."""
+    if not actions:
+        return None
     hdr = parse_network_header(buf)
     if hdr.msg_type != MSG_CLIENT_TO_SERVER_HEARTBEAT or hdr.fragmented:
         return None
@@ -1430,9 +1563,15 @@ def inject_action_into_empty_client_heartbeat(
     tick0 = buf[closures_start : closures_start + 8]
     rest = buf[closures_start + closure_count * 8 :]
 
-    count_flagged = encode_uint32v(1 << 1)
-    delta = (player_index - PLAYER_INDEX_INIT) & PLAYER_INDEX_MASK
-    encoded_action = encode_uint16v(action_type) + encode_uint16v(delta) + action_payload
+    count_flagged = encode_uint32v(len(actions) << 1)
+    encoded_actions = bytearray()
+    prev_player = PLAYER_INDEX_INIT
+    for action_type, player_index, action_payload in actions:
+        delta = (player_index - prev_player) & PLAYER_INDEX_MASK
+        prev_player = player_index
+        encoded_actions.extend(encode_uint16v(action_type))
+        encoded_actions.extend(encode_uint16v(delta))
+        encoded_actions.extend(action_payload)
 
     trailing = bytearray()
     for i in range(1, closure_count):
@@ -1440,7 +1579,19 @@ def inject_action_into_empty_client_heartbeat(
         trailing.extend(buf[t_off : t_off + 8])
         trailing.append(0)
 
-    return prefix + tick0 + count_flagged + encoded_action + bytes(trailing) + rest
+    return prefix + tick0 + count_flagged + bytes(encoded_actions) + bytes(trailing) + rest
+
+
+def inject_action_into_empty_client_heartbeat(
+    buf: bytes,
+    action_type: int,
+    player_index: int,
+    action_payload: bytes,
+) -> bytes | None:
+    """Inject an InputAction into an unfragmented ClientToServerHeartbeat with empty TickClosures."""
+    return inject_actions_into_empty_client_heartbeat(
+        buf, ((action_type, player_index, action_payload),)
+    )
 
 
 @dataclass
@@ -1473,6 +1624,7 @@ class FactorioLockstepProxy:
         suppress_client_cancellation: bool = True,
         suppressed_client_actions: frozenset[int] = DEFAULT_SUPPRESSED_CLIENT_ACTIONS,
         max_hand_crafts: int | None = None,
+        max_actions_per_heartbeat: int = 1,
     ) -> None:
         self.listen_addr = (listen_host, listen_port)
         self.server_addr = (server_host, server_port)
@@ -1480,6 +1632,7 @@ class FactorioLockstepProxy:
         self.suppress_client_cancellation = suppress_client_cancellation
         self.suppressed_client_actions = suppressed_client_actions
         self.max_hand_crafts = max_hand_crafts
+        self.max_actions_per_heartbeat = max(1, int(max_actions_per_heartbeat))
         self.stats = LockstepProxyStats()
         self._pending_injections: list[tuple[int, int, bytes, int]] = []
         self._queued_hand_crafts = 0
@@ -1602,21 +1755,33 @@ class FactorioLockstepProxy:
                     if pos < len(data) and (data[pos] & required) == required:
                         self.stats.empty_client_heartbeats_seen += 1
                         if self._pending_injections:
-                            act_type, pid, payload, min_hb = self._pending_injections[0]
-                            if self.stats.empty_client_heartbeats_seen >= min_hb:
-                                modified = inject_action_into_empty_client_heartbeat(
-                                    data, act_type, pid, payload
-                                )
+                            batch: list[tuple[int, int, bytes]] = []
+                            for act_type, pid, payload, min_hb in self._pending_injections:
+                                if self.stats.empty_client_heartbeats_seen < min_hb:
+                                    break
+                                batch.append((act_type, pid, payload))
+                                if len(batch) >= self.max_actions_per_heartbeat:
+                                    break
+                                if act_type in (
+                                    ACTION_CLEAR_CURSOR,
+                                    ACTION_CLOSE_GUI,
+                                    ACTION_STOP_WALKING,
+                                    ACTION_STOP_MINING,
+                                ):
+                                    break
+                            if batch:
+                                modified = inject_actions_into_empty_client_heartbeat(data, batch)
                                 if modified is not None:
                                     data = modified
-                                    self._pending_injections.pop(0)
-                                    self.stats.injected_actions += 1
-                                    if act_type == ACTION_CRAFT and len(payload) >= 6:
-                                        _rid, c_count = struct.unpack_from("<HI", payload, 0)
-                                        self._queued_hand_crafts = max(
-                                            0, self._queued_hand_crafts - c_count
-                                        )
-                                        self.stats.hand_crafted_count += c_count
+                                    for act_type, _pid, payload in batch:
+                                        self._pending_injections.pop(0)
+                                        self.stats.injected_actions += 1
+                                        if act_type == ACTION_CRAFT and len(payload) >= 6:
+                                            _rid, c_count = struct.unpack_from("<HI", payload, 0)
+                                            self._queued_hand_crafts = max(
+                                                0, self._queued_hand_crafts - c_count
+                                            )
+                                            self.stats.hand_crafted_count += c_count
                                     injected_found = scan_heartbeat_for_achievement(
                                         data, hdr.payload_offset, self.achievement_action_id
                                     )

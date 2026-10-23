@@ -34,9 +34,13 @@ sys.path.insert(0, str(REPO_ROOT / "foundry"))
 sys.path.insert(0, str(REPO_ROOT / "flow"))
 
 import check_blueprint
-import mp_proxy
 import solve
-from foundry.campaign.bot_agent import BotAgent, encode_assembler_batch_actions
+from foundry import mp_proxy
+from foundry.campaign.bot_agent import (
+    BotAgent,
+    encode_assembler_batch_actions,
+    verify_placed_entities,
+)
 
 PODMAN_IMAGE = "docker.io/openroad/orfs:latest"
 
@@ -590,7 +594,61 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             normal_quality_id = quality_map.get("normal", 1)
             game_data = solve.Data(str(fixture_path))
 
-            # Add scenario telemetry hook and timelapse screenshot hook with zero extra items
+            # Pre-scan clean seed-42 Freeplay cartography so the exact synthesized BOM
+            # can be supplied when Phase 0 Lazy Bastard bootstrap + BOM fabrication proof finishes.
+            scan_zip = server_dir / "saves" / "mp_scan.zip"
+            shutil.copy2(save_zip, scan_zip)
+            mp_proxy.augment_save_freeplay_created_items(
+                scan_zip,
+                {},
+                enable_telemetry=True,
+            )
+            cmd_scan = [
+                "podman",
+                "run",
+                "--rm",
+                "--security-opt",
+                "label=disable",
+                "-v",
+                f"{factorio_root}:/factorio:ro",
+                "-v",
+                f"{work_dir}:/work",
+                PODMAN_IMAGE,
+                "/factorio/bin/x64_/factorio",
+                "-c",
+                "/work/server/config.ini",
+                "--mod-directory",
+                "/work/mods",
+                "--benchmark",
+                "/work/server/saves/mp_scan.zip",
+                "--benchmark-ticks",
+                "5",
+            ]
+            res_scan = subprocess.run(
+                cmd_scan, env=podman_env, capture_output=True, text=True, check=False
+            )
+            self.assertEqual(
+                res_scan.returncode,
+                0,
+                f"Cartography pre-scan in Podman failed:\n{res_scan.stdout}\n{res_scan.stderr}",
+            )
+            cartography_file = server_dir / "script-output" / "factorilog_cartography.json"
+            self.assertTrue(cartography_file.is_file())
+            bot_agent = BotAgent(
+                data=game_data,
+                researched_techs={"automation", "logistics"},
+            )
+            self.assertTrue(bot_agent.ingest_cartography(cartography_file))
+            pre_plan = bot_agent.synthesize_plan(
+                reference_pos=(0.0, 0.0),
+                bounds=None,
+                base_origin=None,
+                verify=False,
+            )
+            phase1_bom_items = dict(pre_plan.bill_of_materials)
+            phase1_bom_items[fuel_item_name] = phase1_bom_items.get(fuel_item_name, 0) + 50
+
+            # Add scenario telemetry hook and timelapse screenshot hook with zero starting items
             mp_proxy.augment_save_freeplay_created_items(
                 save_zip,
                 {},
@@ -598,6 +656,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 timelapse_interval_ticks=240,
                 stationary_game_speed=16.0,
                 walking_game_speed=1.0,
+                phase1_bom_items=phase1_bom_items,
             )
 
             # Step 3: Start UDP Lockstep Proxy with lazy-bastard max_hand_crafts limit
@@ -736,17 +795,18 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 # 5. Extract smelted iron-plate and hand-craft 1 iron-gear-wheel within the limit
                 # 6. Build assembling-machine-1, set its recipe, feed iron-plate, and extract output
                 state_file = server_dir / "script-output" / "factorilog_state.json"
-                cartography_file = server_dir / "script-output" / "factorilog_cartography.json"
-                bot_agent = BotAgent(
-                    data=game_data,
-                    researched_techs={"automation", "logistics"},
-                )
                 mining_targets = (
                     (smelt_ore_name, 156),
                     (stone_item_name, 25),
                     (fuel_item_name, 64),
                     (copper_ore_name, 42),
                 )
+                mined_resources: dict[str, int] = {
+                    smelt_ore_name: 0,
+                    stone_item_name: 0,
+                    fuel_item_name: 0,
+                    copper_ore_name: 0,
+                }
                 patch_idx = 0
                 furnaces_hand_crafted = False
                 smelt_start_tick = 0
@@ -866,6 +926,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     recorder.start_recording()
 
                             mined_ore = max(mined_ore, state.inventory.get(smelt_ore_name, 0))
+                            for r_key in mined_resources:
+                                mined_resources[r_key] = max(
+                                    mined_resources[r_key], state.inventory.get(r_key, 0)
+                                )
 
                             if patch_idx < len(mining_targets):
                                 cur_res_name, cur_res_goal = mining_targets[patch_idx]
@@ -1474,6 +1538,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 act_sel_lb, pay_sel_lb = mp_proxy.build_selected_entity_action(
                                     site.lab_x, site.lab_y
                                 )
+                                act_sel_b, pay_sel_b = mp_proxy.build_selected_entity_action(
+                                    site.boiler_x, site.boiler_y
+                                )
+                                act_pip_c, pay_pip_c = mp_proxy.build_pipette_item_action(
+                                    fuel_item_id
+                                )
                                 act_pip_sp, pay_pip_sp = mp_proxy.build_pipette_item_action(
                                     science_item_id
                                 )
@@ -1488,6 +1558,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     (act_ft_out, pay_ft_out),
                                     (act_sel_f3, pay_sel_f3),
                                     (act_ft_out, pay_ft_out),
+                                    (act_sel_b, pay_sel_b),
+                                    (act_pip_c, pay_pip_c),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
                                     (act_sel_lb, pay_sel_lb),
                                     (act_pip_sp, pay_pip_sp),
                                     (act_ft_in, pay_ft_in),
@@ -1662,7 +1736,6 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 and proxy.pending_action_count() == 0
                                 and state.machine_crafted_count >= phase1_asm_mc_target
                                 and state.tick >= phase1_asm_start_tick + 75
-                                and cartography_file.is_file()
                             ):
                                 phase1_collected_queued = True
                                 phase1_planned = True
@@ -1702,52 +1775,55 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
 
-                                self.assertTrue(bot_agent.ingest_cartography(cartography_file))
-                                bot_agent.synthesize_plan(
-                                    reference_pos=(state.player_x, state.player_y),
-                                    bounds=None,
-                                    base_origin=None,
-                                    verify=False,
-                                )
-                                expansion_tasks = bot_agent.synthesize_lakeside_expansion_tasks(
-                                    site=site,
-                                    belt_recipe=belt_item_name,
-                                    science_recipe=science_item_name,
-                                    gear_item=craft_recipe_name,
-                                    iron_plate_item=plate_item_name,
-                                    copper_plate_item=copper_plate_name,
-                                )
-                                phase1_target_task_indices = {t.task_index for t in expansion_tasks}
+                                phase1_target_task_indices = {t.task_index for t in pre_plan.tasks}
                             elif phase1_collected_queued and proxy.pending_action_count() == 0:
                                 if (
-                                    state.inventory.get(target_item_name, 0) >= 1
-                                    and state.inventory.get(copper_plate_name, 0) >= 1
+                                    state.logistics_researched
+                                    and state.inventory.get(belt_item_name, 0) >= 100
                                 ):
-                                    phase1_inventory_ready = True
+                                    if not phase1_inventory_ready:
+                                        phase1_inventory_ready = True
+                                        proxy.max_actions_per_heartbeat = 12
                                 if phase1_inventory_ready and bot_agent.current_task() is not None:
                                     bot_agent.step_lockstep_proxy(
                                         proxy,
                                         state,
                                         id_mappings,
                                         player_index=0,
+                                        stop_tolerance=24.0,
                                     )
 
                     if (
                         mined_ore >= 148
+                        and mined_resources[stone_item_name] >= 25
+                        and mined_resources[fuel_item_name] >= 64
+                        and mined_resources[copper_ore_name] >= 42
                         and last_state is not None
                         and last_state.hand_crafted_count == 106
                         and last_state.machine_crafted_count >= 28
-                        and last_state.automated_belts_crafted >= 1
-                        and last_state.automated_science_crafted >= 1
+                        and last_state.drills_active > 0
+                        and last_state.plates_made > 0
+                        and last_state.asm_made.get(craft_recipe_name, 0) > 0
+                        and last_state.asm_made.get(belt_item_name, 0) > 0
+                        and last_state.asm_made.get(science_item_name, 0) > 0
                         and last_state.steam_energy_generated > 0.0
                         and last_state.steam_power_researched
                         and last_state.electronics_researched
                         and last_state.science_pack_researched
                         and last_state.automation_researched
+                        and last_state.logistics_researched
                         and final_science_load_queued
                         and phase1_collected_queued
                         and phase1_inventory_ready
                         and bot_agent.current_task() is None
+                        and bot_agent.plan is not None
+                        and len(
+                            verify_placed_entities(
+                                bot_agent.plan.layout.entities,
+                                last_state.placed_entities,
+                            )
+                        )
+                        == 0
                         and proxy.pending_action_count() == 0
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
@@ -1758,7 +1834,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                         time.sleep(0.5)
                         success = True
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.01 if phase1_inventory_ready else 0.05)
 
                 if has_xvfb_ffmpeg:
                     recorder.stop()
@@ -1817,6 +1893,24 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )
+                self.assertGreaterEqual(
+                    mined_resources[stone_item_name],
+                    25,
+                    f"Bot did not finish mining stone patch: {mined_resources}\n"
+                    f"patch_idx={patch_idx}, walk_stage={walk_stage}, mining_phase={mining_phase}\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}\n"
+                    f"Client log:\n{client_log[-2000:]}\nServer log:\n{server_log[-2000:]}",
+                )
+                self.assertGreaterEqual(
+                    mined_resources[fuel_item_name],
+                    64,
+                    f"Bot did not finish mining coal patch: {mined_resources}",
+                )
+                self.assertGreaterEqual(
+                    mined_resources[copper_ore_name],
+                    42,
+                    f"Bot did not finish mining copper-ore patch: {mined_resources}",
+                )
                 self.assertIsNotNone(last_state)
                 assert last_state is not None
                 self.assertEqual(
@@ -1833,8 +1927,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
                 self.assertGreaterEqual(
                     last_state.machine_crafted_count,
-                    28,
-                    f"Steam-powered assembling-machine-1s did not finish all 28 Phase 1 crafts.\n"
+                    26,
+                    f"Steam-powered assembling-machine-1s did not finish Phase 0 crafts.\n"
                     f"Stages: patch_idx={patch_idx}, walk_stage={walk_stage}, mining_phase={mining_phase}, "
                     f"shore_stage={shore_stage}, shore_arrived={shore_arrived}, "
                     f"smelt_queued={smelt_queued}, power_craft={power_craft_queued}, "
@@ -1845,26 +1939,15 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"phase1_cables={phase1_cables_queued}, phase1_circuits={phase1_circuits_queued}, "
                     f"phase1_belts={phase1_belts_queued}, phase1_inserters={phase1_inserters_queued}, "
                     f"phase1_asm={phase1_asm_queued}, phase1_collected={phase1_collected_queued}, "
+                    f"completed={len(bot_agent.completed_task_indices)}/{len(phase1_target_task_indices)}, "
                     f"current_task={bot_agent.current_task()}\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Server log:\n{server_log[-3000:]}\nClient log:\n{client_log[-3000:]}",
                 )
                 self.assertGreaterEqual(
-                    last_state.automated_belts_crafted,
-                    1,
-                    f"Phase 1 automated belt assembler did not craft transport-belts.\n"
-                    f"Last state: {last_state}",
-                )
-                self.assertGreaterEqual(
-                    last_state.automated_science_crafted,
-                    1,
-                    f"Phase 1 automated science assembler did not craft automation-science-packs.\n"
-                    f"Last state: {last_state}",
-                )
-                self.assertGreaterEqual(
                     len(phase1_target_task_indices),
-                    12,
-                    f"Expected at least 12 Phase 1 starter base tasks, got {len(phase1_target_task_indices)}",
+                    400,
+                    f"Expected full synthesized starter base plan (>= 400 tasks), got {len(phase1_target_task_indices)}",
                 )
                 self.assertTrue(
                     phase1_planned
@@ -1874,8 +1957,53 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Phase 1 BotAgent starter base synthesis and UDP placement did not finish.\n"
                     f"phase1_planned={phase1_planned}, phase1_collected={phase1_collected_queued}, "
                     f"phase1_inventory_ready={phase1_inventory_ready}, "
-                    f"current_task={bot_agent.current_task()}, target_tasks={phase1_target_task_indices}\n"
+                    f"completed={len(bot_agent.completed_task_indices)}/{len(phase1_target_task_indices)}, "
+                    f"current_task={bot_agent.current_task()}\n"
                     f"Last state: {last_state}",
+                )
+                self.assertIsNotNone(bot_agent.plan)
+                assert bot_agent.plan is not None
+                placement_errors = verify_placed_entities(
+                    bot_agent.plan.layout.entities,
+                    last_state.placed_entities,
+                )
+                self.assertEqual(
+                    placement_errors,
+                    [],
+                    f"Surface entity verification failed ({len(placement_errors)} errors): {placement_errors[:20]}",
+                )
+                self.assertGreaterEqual(
+                    last_state.machine_crafted_count,
+                    28,
+                    f"Starter base assemblers did not finish crafting: {last_state}",
+                )
+                self.assertGreater(
+                    last_state.drills_active,
+                    0,
+                    f"Synthesized electric-mining-drills are not active.\nLast state: {last_state}",
+                )
+                self.assertGreater(
+                    last_state.plates_made,
+                    0,
+                    f"Synthesized starter base stone-furnaces did not smelt plates.\nLast state: {last_state}",
+                )
+                self.assertGreater(
+                    last_state.asm_made.get(craft_recipe_name, 0),
+                    0,
+                    f"Synthesized starter base gear assemblers did not craft {craft_recipe_name}.\n"
+                    f"asm_made={last_state.asm_made}",
+                )
+                self.assertGreater(
+                    last_state.asm_made.get(belt_item_name, 0),
+                    0,
+                    f"Synthesized starter base mall assembler did not craft {belt_item_name}.\n"
+                    f"asm_made={last_state.asm_made}",
+                )
+                self.assertGreater(
+                    last_state.asm_made.get(science_item_name, 0),
+                    0,
+                    f"Synthesized starter base science assembler did not craft {science_item_name}.\n"
+                    f"asm_made={last_state.asm_made}",
                 )
                 self.assertGreater(
                     last_state.steam_energy_generated,

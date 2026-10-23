@@ -31,6 +31,7 @@ from foundry.campaign.bot_agent import (
     encode_assembler_batch_actions,
     encode_task_input_actions,
     extract_character_reach,
+    verify_placed_entities,
 )
 from foundry.campaign.cartographer import build_lua_cartography_scanner_snippet
 from foundry.mp_proxy import (
@@ -41,7 +42,6 @@ from foundry.mp_proxy import (
     ACTION_FAST_ENTITY_TRANSFER,
     ACTION_OPEN_GUI,
     ACTION_PIPETTE,
-    ACTION_ROTATE_ENTITY,
     ACTION_SELECTED_ENTITY_CHANGED,
     ACTION_SETUP_ASSEMBLING_MACHINE,
     FactorioLockstepProxy,
@@ -216,11 +216,10 @@ class BotAgentTest(unittest.TestCase):
                     [ACTION_SELECTED_ENTITY_CHANGED, ACTION_BEGIN_MINING],
                 )
             elif task.task_kind == TASK_PLACE_ENTITY:
-                self.assertEqual(action_types[0], ACTION_PIPETTE)
-                self.assertEqual(action_types[1], ACTION_BUILD)
-                self.assertEqual(action_types[-1], ACTION_CLEAR_CURSOR)
-                if task.entity_type == "output":
-                    self.assertIn(ACTION_ROTATE_ENTITY, action_types)
+                self.assertEqual(
+                    action_types,
+                    [ACTION_PIPETTE, ACTION_BUILD, ACTION_CLEAR_CURSOR],
+                )
             elif task.task_kind == TASK_CONFIGURE_RECIPE:
                 self.assertEqual(
                     action_types,
@@ -401,31 +400,11 @@ class BotAgentTest(unittest.TestCase):
         self.assertIn(ACTION_PIPETTE, batch_types)
         self.assertIn(ACTION_FAST_ENTITY_TRANSFER, batch_types)
 
-        # Verify lakeside expansion task synthesis and reach constraints
-        from types import SimpleNamespace
-
-        mock_site = SimpleNamespace(
-            pump_x=54.5,
-            pump_y=-0.5,
-            pump_dir=4,
-            asm_x=48.5,
-            asm_y=1.5,
-            stand_x=50.5,
-            stand_y=-1.0,
-        )
-        expansion_tasks = bot.synthesize_lakeside_expansion_tasks(site=mock_site)
-        self.assertEqual(len(expansion_tasks), 12)
-        for task in expansion_tasks:
-            dist = math.hypot(task.target_x - task.stand_x, task.target_y - task.stand_y)
-            self.assertLessEqual(dist, plan.reach_limits.build_reach)
-        seed_tasks = [t for t in expansion_tasks if t.task_kind == TASK_SEED_FUEL]
-        self.assertEqual(len(seed_tasks), 1)
-        for seed_task in seed_tasks:
-            seed_acts = [
-                act_type
-                for act_type, _payload in encode_task_input_actions(seed_task, batch_id_mappings)
-            ]
-            self.assertIn(ACTION_FAST_ENTITY_TRANSFER, seed_acts)
+        # Verify 100% entity placement verification helper against planned layout
+        self.assertEqual(verify_placed_entities(plan.layout.entities, plan.layout.entities), [])
+        missing_check = verify_placed_entities(plan.layout.entities, plan.layout.entities[:-1])
+        self.assertEqual(len(missing_check), 1)
+        self.assertIn("Missing", missing_check[0])
 
     def test_headless_factorio_cartographer_to_bot_starter_base_e2e(self) -> None:
         """Verify live Factorio cartography scan, bot plan synthesis, obstacle clearing, and base production."""
@@ -656,12 +635,28 @@ class BotAgentTest(unittest.TestCase):
                 + "      asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
                 + "    end\n"
                 + "  end\n"
+                + "  local placed_entities = {}\n"
+                + "  for _, ent in pairs(surface.find_entities_filtered({force = game.forces['player']})) do\n"
+                + "    if ent.valid and ent.name ~= 'character' then\n"
+                + "      local ug_t = (ent.type == 'underground-belt') and ent.belt_to_ground_type or nil\n"
+                + "      local rec_n = (ent.type == 'assembling-machine' and ent.get_recipe()) and ent.get_recipe().name or nil\n"
+                + "      placed_entities[#placed_entities + 1] = {\n"
+                + "        name = ent.name,\n"
+                + "        x = math.floor(ent.position.x * 100 + 0.5) / 100,\n"
+                + "        y = math.floor(ent.position.y * 100 + 0.5) / 100,\n"
+                + "        direction = ent.direction,\n"
+                + "        type = ug_t,\n"
+                + "        recipe = rec_n\n"
+                + "      }\n"
+                + "    end\n"
+                + "  end\n"
                 + "  local out = {\n"
                 + "    tick = event.tick,\n"
                 + "    bot_execution = storage.bot_execution,\n"
                 + "    drills_active = drills_active,\n"
                 + "    plates_made = plates_made,\n"
                 + "    asm_made = asm_made,\n"
+                + "    placed_entities = placed_entities,\n"
                 + "  }\n"
                 + "  helpers.write_file('bot_sim_stats.json', helpers.table_to_json(out) .. '\\n', false)\n"
                 + "end)\n"
@@ -722,6 +717,10 @@ class BotAgentTest(unittest.TestCase):
             self.assertGreaterEqual(exec_info["cleared_count"], 2)
             self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
             self.assertGreaterEqual(exec_info["seeded_count"], 1)
+            self.assertEqual(
+                verify_placed_entities(plan.layout.entities, sim_stats["placed_entities"]),
+                [],
+            )
 
             self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
             self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
@@ -887,7 +886,10 @@ class BotAgentTest(unittest.TestCase):
                 "lab": 1,
             }
             fab_plan = bot.compute_bom_fabrication(starting_inventory=bootstrap_kit)
-            self.assertEqual(fab_plan.missing_bom["transport-belt"], 377)
+            self.assertEqual(
+                fab_plan.missing_bom["transport-belt"],
+                plan.bill_of_materials["transport-belt"],
+            )
             self.assertGreater(fab_plan.raw_materials_needed.get("iron-ore", 0), 500)
             self.assertGreater(fab_plan.raw_materials_needed.get("copper-ore", 0), 40)
             self.assertGreater(fab_plan.raw_materials_needed.get("stone", 0), 4)
@@ -1018,12 +1020,28 @@ class BotAgentTest(unittest.TestCase):
                 + "          asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
                 + "        end\n"
                 + "      end\n"
+                + "      local placed_entities = {}\n"
+                + "      for _, ent in pairs(surface.find_entities_filtered({force = game.forces['player']})) do\n"
+                + "        if ent.valid and ent.name ~= 'character' then\n"
+                + "          local ug_t = (ent.type == 'underground-belt') and ent.belt_to_ground_type or nil\n"
+                + "          local rec_n = (ent.type == 'assembling-machine' and ent.get_recipe()) and ent.get_recipe().name or nil\n"
+                + "          placed_entities[#placed_entities + 1] = {\n"
+                + "            name = ent.name,\n"
+                + "            x = math.floor(ent.position.x * 100 + 0.5) / 100,\n"
+                + "            y = math.floor(ent.position.y * 100 + 0.5) / 100,\n"
+                + "            direction = ent.direction,\n"
+                + "            type = ug_t,\n"
+                + "            recipe = rec_n\n"
+                + "          }\n"
+                + "        end\n"
+                + "      end\n"
                 + "      helpers.write_file('freeplay_sim_stats.json', helpers.table_to_json({\n"
                 + "        tick = e.tick,\n"
                 + "        bot_execution = storage.bot_execution,\n"
                 + "        drills_active = drills_active,\n"
                 + "        plates_made = plates_made,\n"
                 + "        asm_made = asm_made,\n"
+                + "        placed_entities = placed_entities,\n"
                 + "      }) .. '\\n', false)\n"
                 + "    end\n"
                 + "  }\n"
@@ -1062,6 +1080,10 @@ class BotAgentTest(unittest.TestCase):
             exec_info = sim_stats["bot_execution"]
             self.assertTrue(exec_info["completed"], msg=f"Exec info: {exec_info}")
             self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
+            self.assertEqual(
+                verify_placed_entities(plan.layout.entities, sim_stats["placed_entities"]),
+                [],
+            )
             self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
             self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
             self.assertGreater(

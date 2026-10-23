@@ -679,9 +679,25 @@ def synthesize_shoreline_power_array(
             py = round(wy - w_dy - TILE_HALF) + TILE_HALF
             pump_tile = (math.floor(px), math.floor(py))
             water_check = (math.floor(px + w_dx), math.floor(py + w_dy))
-            if water_check not in water_tiles:
+            water_deep = (math.floor(px + 2.0 * w_dx), math.floor(py + 2.0 * w_dy))
+            lat_dx, lat_dy = _rotate_offset(1.0, 0.0, p_dir)
+            water_lat_pos = (math.floor(px + w_dx + lat_dx), math.floor(py + w_dy + lat_dy))
+            water_lat_neg = (math.floor(px + w_dx - lat_dx), math.floor(py + w_dy - lat_dy))
+            ground_lat_pos = (math.floor(px + lat_dx), math.floor(py + lat_dy))
+            ground_lat_neg = (math.floor(px - lat_dx), math.floor(py - lat_dy))
+            if (
+                water_check not in water_tiles
+                or water_deep not in water_tiles
+                or water_lat_pos not in water_tiles
+                or water_lat_neg not in water_tiles
+            ):
                 continue
-            if pump_tile in water_tiles or pump_tile in obstacles:
+            if (
+                pump_tile in water_tiles
+                or pump_tile in obstacles
+                or ground_lat_pos in water_tiles
+                or ground_lat_neg in water_tiles
+            ):
                 continue
 
             dist = math.hypot(pump_tile[0] - reference_pos[0], pump_tile[1] - reference_pos[1])

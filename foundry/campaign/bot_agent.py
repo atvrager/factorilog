@@ -10,7 +10,6 @@ All docstrings and comments follow Simplified Technical English (ASD-STE100).
 from __future__ import annotations
 
 import math
-import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +19,8 @@ from foundry import solve
 from foundry.campaign.cartographer import MapCartographer, TerrainObstacle
 from foundry.entity_helpers import DIRECTION_NORTH, entity_size, register_prototype_boxes
 from foundry.mp_proxy import (
-    ACTION_ROTATE_ENTITY,
     FactorioLockstepProxy,
+    PlacedSurfaceEntity,
     PlayerWorldState,
     build_begin_mining_action,
     build_clear_cursor_action,
@@ -70,32 +69,14 @@ TASK_COLLECT_MALL_OUTPUT = "collect_mall_output"
 
 TILE_CENTER_OFFSET: float = 0.5
 COORD_ROUND_DIGITS: int = 2
-REACH_SAFETY_MARGIN: float = 2.6
+REACH_SAFETY_MARGIN: float = 3.2
 SEARCH_RADIUS_PADDING: int = 2
 DEFAULT_SEED_FUEL_COUNT: int = 50
-DEFAULT_STOP_TOLERANCE: float = 2.2
+DEFAULT_STOP_TOLERANCE: float = 1.6
 CARDINAL_AXIS_RATIO: float = 0.65
 WALK_REISSUE_TICKS: int = 24
 BOX_EPSILON: float = 1e-6
 HALF_DIVISOR: float = 2.0
-BRAKING_THROTTLES: tuple[float, ...] = (
-    0.88,
-    0.77,
-    0.67,
-    0.59,
-    0.51,
-    0.45,
-    0.39,
-    0.34,
-    0.30,
-    0.26,
-    0.23,
-    0.20,
-    0.18,
-    0.15,
-    0.13,
-    0.11,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +311,98 @@ def _entity_pos_key(ent: Mapping[str, Any]) -> tuple[float, float]:
         round(float(pos["x"]), COORD_ROUND_DIGITS),
         round(float(pos["y"]), COORD_ROUND_DIGITS),
     )
+
+
+DIRECTIONLESS_ENTITY_NAMES: frozenset[str] = frozenset(
+    {
+        "small-electric-pole",
+        "medium-electric-pole",
+        "big-electric-pole",
+        "substation",
+        "stone-furnace",
+        "steel-furnace",
+        "electric-furnace",
+        "assembling-machine-1",
+        "assembling-machine-2",
+        "assembling-machine-3",
+        "lab",
+        "wooden-chest",
+        "iron-chest",
+        "steel-chest",
+    }
+)
+
+
+SYMMETRIC_AXIS_ENTITY_NAMES: frozenset[str] = frozenset(
+    {
+        "steam-engine",
+    }
+)
+
+
+def verify_placed_entities(
+    planned_entities: Sequence[Mapping[str, Any]],
+    surface_entities: Sequence[PlacedSurfaceEntity | Mapping[str, Any]],
+) -> list[str]:
+    """Verify that 100% of planned_entities exist on the Factorio surface with matching attributes."""
+    by_pos: dict[tuple[float, float], PlacedSurfaceEntity] = {}
+    for raw in surface_entities:
+        if isinstance(raw, Mapping):
+            pos = raw.get("position")
+            if isinstance(pos, Mapping):
+                rx = float(pos["x"])
+                ry = float(pos["y"])
+            else:
+                rx = float(raw["x"])
+                ry = float(raw["y"])
+            ug_val = raw.get("type")
+            rec_val = raw.get("recipe")
+            ent = PlacedSurfaceEntity(
+                name=str(raw["name"]),
+                x=rx,
+                y=ry,
+                direction=int(raw.get("direction", DIRECTION_NORTH)),
+                entity_type=str(ug_val) if isinstance(ug_val, str) and ug_val else None,
+                recipe=str(rec_val) if isinstance(rec_val, str) and rec_val else None,
+            )
+        else:
+            ent = raw
+        key = (round(ent.x, COORD_ROUND_DIGITS), round(ent.y, COORD_ROUND_DIGITS))
+        by_pos[key] = ent
+
+    errors: list[str] = []
+    for planned in planned_entities:
+        key = _entity_pos_key(planned)
+        exp_name = str(planned["name"])
+        exp_dir = int(planned.get("direction", DIRECTION_NORTH))
+        exp_ug = str(planned["type"]) if planned.get("type") else None
+        exp_rec = str(planned["recipe"]) if planned.get("recipe") else None
+
+        actual = by_pos.get(key)
+        if actual is None:
+            errors.append(f"Missing {exp_name} at {key}")
+            continue
+        if actual.name != exp_name:
+            errors.append(f"Name mismatch at {key}: expected {exp_name}, got {actual.name}")
+            continue
+        if exp_name in SYMMETRIC_AXIS_ENTITY_NAMES:
+            if (actual.direction % 8) != (exp_dir % 8):
+                errors.append(
+                    f"Axis mismatch for {exp_name} at {key}: expected {exp_dir}, got {actual.direction}"
+                )
+        elif exp_name not in DIRECTIONLESS_ENTITY_NAMES and actual.direction != exp_dir:
+            errors.append(
+                f"Direction mismatch for {exp_name} at {key}: expected {exp_dir}, got {actual.direction}"
+            )
+        if exp_ug is not None and actual.entity_type != exp_ug:
+            errors.append(
+                f"Underground belt type mismatch for {exp_name} at {key}: expected {exp_ug}, got {actual.entity_type}"
+            )
+        if exp_rec is not None and actual.recipe != exp_rec:
+            errors.append(
+                f"Recipe mismatch for {exp_name} at {key}: expected {exp_rec}, got {actual.recipe}"
+            )
+    return errors
 
 
 def _entity_footprint_tiles(
@@ -597,52 +670,75 @@ def compile_starter_base_tasks(
                 )
             )
 
+    def _schedule_nn(ents: Sequence[Mapping[str, Any]], phase: str) -> None:
+        remaining = list(ents)
+        while remaining:
+            best_idx = min(
+                range(len(remaining)),
+                key=lambda idx: (
+                    math.hypot(
+                        float(remaining[idx]["position"]["x"]) - cur_pos[0],
+                        float(remaining[idx]["position"]["y"]) - cur_pos[1],
+                    ),
+                    idx,
+                ),
+            )
+            _schedule_entity(remaining.pop(best_idx), phase)
+
     # Phase 1: Shoreline steam power array
     power_ents = sorted(layout.power_array.entities, key=_power_entity_sort_key)
     for ent in power_ents:
         _schedule_entity(ent, PHASE_SHORELINE_POWER)
 
-    # Phase 2: Resource patch miner arrays (fuel patch first so coal flows as soon as power connects)
-    patch_order = sorted(
-        layout.patch_arrays.keys(),
-        key=lambda comm: (0 if comm == fuel_commodity else 1, comm),
-    )
-    for comm in patch_order:
+    # Phase 2: Resource patch miner arrays (fuel patch first, then nearest patch)
+    remaining_patches = list(layout.patch_arrays.keys())
+    while remaining_patches:
+        best_p_idx = min(
+            range(len(remaining_patches)),
+            key=lambda idx: (
+                0 if remaining_patches[idx] == fuel_commodity else 1,
+                math.hypot(
+                    float(layout.patch_arrays[remaining_patches[idx]].entities[0]["position"]["x"])
+                    - cur_pos[0],
+                    float(layout.patch_arrays[remaining_patches[idx]].entities[0]["position"]["y"])
+                    - cur_pos[1],
+                )
+                if layout.patch_arrays[remaining_patches[idx]].entities
+                else 0.0,
+                remaining_patches[idx],
+            ),
+        )
+        comm = remaining_patches.pop(best_p_idx)
         p_ents = sorted(layout.patch_arrays[comm].entities, key=_patch_entity_sort_key)
         for ent in p_ents:
             _schedule_entity(ent, PHASE_PATCH_MINERS)
 
-    # Phase 3: Power distribution network (poles ordered outward from the steam engine)
-    engine_anchor = cur_pos
-    for ent in layout.power_array.entities:
-        if str(ent["name"]) == "steam-engine":
-            engine_anchor = _entity_pos_key(ent)
-            break
-
+    # Phase 3: Power distribution network (poles ordered by nearest-neighbor from cur_pos)
     pole_ents = [
         ent
         for ent in layout.entities
         if _entity_pos_key(ent) not in scheduled_positions and "pole" in str(ent["name"])
     ]
-    pole_ents.sort(
-        key=lambda e: (
-            math.hypot(
-                float(e["position"]["x"]) - engine_anchor[0],
-                float(e["position"]["y"]) - engine_anchor[1],
-            ),
-            float(e["position"]["x"]),
-            float(e["position"]["y"]),
-        )
-    )
-    for ent in pole_ents:
-        _schedule_entity(ent, PHASE_POWER_NETWORK)
+    _schedule_nn(pole_ents, PHASE_POWER_NETWORK)
 
-    # Phase 4: Trunk belts (boiler fuel trunk first, then base ore trunks)
-    trunk_order = sorted(
-        layout.trunk_routes.keys(),
-        key=lambda net_name: (0 if "boiler" in net_name else 1, net_name),
-    )
-    for net_name in trunk_order:
+    # Phase 4: Trunk belts (boiler fuel trunk first, then nearest trunk route)
+    remaining_trunks = list(layout.trunk_routes.keys())
+    while remaining_trunks:
+        best_t_idx = min(
+            range(len(remaining_trunks)),
+            key=lambda idx: (
+                0 if "boiler" in remaining_trunks[idx] else 1,
+                min(
+                    (
+                        math.hypot(node.x - cur_pos[0], node.y - cur_pos[1])
+                        for node in layout.trunk_routes[remaining_trunks[idx]].nodes
+                    ),
+                    default=0.0,
+                ),
+                remaining_trunks[idx],
+            ),
+        )
+        net_name = remaining_trunks.pop(best_t_idx)
         route_res = layout.trunk_routes[net_name]
         route_ents: list[Mapping[str, Any]] = []
         for node in route_res.nodes:
@@ -652,18 +748,19 @@ def compile_starter_base_tasks(
             )
             if n_key in entities_by_pos:
                 route_ents.append(entities_by_pos[n_key])
-        for ent in sorted(route_ents, key=_trunk_entity_sort_key):
-            _schedule_entity(ent, PHASE_TRUNK_BELTS)
+        for rank_group in (0, 1, 2):
+            grp = [e for e in route_ents if _trunk_entity_sort_key(e)[0] == rank_group]
+            _schedule_nn(grp, PHASE_TRUNK_BELTS)
 
     # Phase 5: Starter base core (furnaces, assemblers + recipes, lab, belts, inserters)
     core_ents = sorted(layout.base_core.entities, key=_base_core_entity_sort_key)
-    for ent in core_ents:
-        _schedule_entity(ent, PHASE_STARTER_BASE_CORE)
+    for rank_group in range(6):
+        grp = [e for e in core_ents if _base_core_entity_sort_key(e)[0] == rank_group]
+        _schedule_nn(grp, PHASE_STARTER_BASE_CORE)
 
     # Schedule any remaining unscheduled entities from layout.entities
-    for ent in layout.entities:
-        if _entity_pos_key(ent) not in scheduled_positions:
-            _schedule_entity(ent, PHASE_STARTER_BASE_CORE)
+    rem_ents = [ent for ent in layout.entities if _entity_pos_key(ent) not in scheduled_positions]
+    _schedule_nn(rem_ents, PHASE_STARTER_BASE_CORE)
 
     return tasks
 
@@ -798,11 +895,8 @@ def encode_task_input_actions(
                 task.target_y,
                 direction=task.direction,
             ),
+            build_clear_cursor_action(),
         ]
-        if task.entity_type == "output":
-            actions.append(build_selected_entity_action(task.target_x, task.target_y))
-            actions.append((ACTION_ROTATE_ENTITY, struct.pack("<B", 0)))
-        actions.append(build_clear_cursor_action())
         return actions
 
     if task.task_kind == TASK_CONFIGURE_RECIPE:
@@ -887,6 +981,8 @@ class BotAgent:
         self._last_walk_vec: tuple[float, float] | None = None
         self._last_walk_tick: int = -1000
         self._last_action_tick: int = -1000
+        self._last_walk_pos: tuple[float, float] | None = None
+        self._walk_stuck_retries: int = 0
 
     def ingest_cartography(self, source: str | Path | Mapping[str, Any]) -> bool:
         """Ingest cartography telemetry from a JSON file path or parsed dictionary."""
@@ -925,6 +1021,8 @@ class BotAgent:
         self._last_walk_vec = None
         self._last_walk_tick = -1000
         self._last_action_tick = -1000
+        self._last_walk_pos = None
+        self._walk_stuck_retries = 0
         return self.plan
 
     def current_task(self) -> BotBuildTask | None:
@@ -945,100 +1043,6 @@ class BotAgent:
             task = self.plan.tasks[task_index]
             if task.task_kind == TASK_CLEAR_OBSTACLE:
                 self.cartographer.remove_obstacle_at(task.target_x, task.target_y)
-
-    def synthesize_lakeside_expansion_tasks(
-        self,
-        site: Any,
-        belt_recipe: str = "transport-belt",
-        science_recipe: str = "automation-science-pack",
-        gear_item: str = "iron-gear-wheel",
-        iron_plate_item: str = "iron-plate",
-        copper_plate_item: str = "copper-plate",
-    ) -> list[BotBuildTask]:
-        """Synthesize a connected, powered lakeside automated expansion schedule from site."""
-        if self.plan is None:
-            raise RuntimeError(
-                "Cannot synthesize lakeside expansion tasks before synthesize_plan()"
-            )
-        tier = resolve_tech_tier(self.data, unlocked_by="logistics")
-        _ = iron_plate_item
-        d = (int(site.pump_dir) // 4) % 4
-
-        def _rot(dx: float, dy: float) -> tuple[float, float]:
-            if d == 0:
-                return dx, dy
-            if d == 1:
-                return -dy, dx
-            if d == 2:
-                return -dx, -dy
-            return dy, -dx
-
-        def _dir(north_rel_dir: int) -> int:
-            return (north_rel_dir + d * 4) % 16
-
-        px = float(site.pump_x)
-        py = float(site.pump_y)
-        sx = round(float(site.stand_x), COORD_ROUND_DIGITS)
-        sy = round(float(site.stand_y), COORD_ROUND_DIGITS)
-
-        asm2_dx, asm2_dy = _rot(2.0, 9.0)
-        asm2_x = round(px + asm2_dx, COORD_ROUND_DIGITS)
-        asm2_y = round(py + asm2_dy, COORD_ROUND_DIGITS)
-        asm1_x = round(float(site.asm_x), COORD_ROUND_DIGITS)
-        asm1_y = round(float(site.asm_y), COORD_ROUND_DIGITS)
-
-        raw_specs: list[tuple[str, str, float, float, int, str | None, int]] = [
-            (TASK_PLACE_ENTITY, tier.pole_name, *(_rot(0.0, 7.0)), 0, None, 1),
-            (TASK_PLACE_ENTITY, tier.furnace_name, *(_rot(-2.5, 2.0)), 0, None, 1),
-            (TASK_PLACE_ENTITY, tier.assembler_name, *(_rot(2.0, 9.0)), 0, science_recipe, 1),
-            (TASK_CONFIGURE_RECIPE, tier.assembler_name, *(_rot(2.0, 6.0)), 0, gear_item, 1),
-            (TASK_CONFIGURE_RECIPE, tier.assembler_name, *(_rot(2.0, 9.0)), 0, science_recipe, 1),
-            (
-                TASK_SEED_FUEL,
-                copper_plate_item,
-                *(_rot(2.0, 9.0)),
-                0,
-                science_recipe,
-                DEFAULT_SEED_FUEL_COUNT,
-            ),
-            (TASK_PLACE_ENTITY, tier.inserter_name, *(_rot(0.0, 6.0)), _dir(4), None, 1),
-            (TASK_PLACE_ENTITY, tier.inserter_name, *(_rot(0.0, 9.0)), _dir(12), None, 1),
-            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 6.0)), _dir(8), None, 1),
-            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 7.0)), _dir(8), None, 1),
-            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 8.0)), _dir(8), None, 1),
-            (TASK_PLACE_ENTITY, tier.belt_name, *(_rot(-1.0, 9.0)), _dir(8), None, 1),
-        ]
-
-        tasks: list[BotBuildTask] = []
-        for idx, (kind, name, r_dx, r_dy, ent_dir, rec, count) in enumerate(raw_specs):
-            tx = round(px + r_dx, COORD_ROUND_DIGITS)
-            ty = round(py + r_dy, COORD_ROUND_DIGITS)
-            if kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL) and rec in (belt_recipe, gear_item):
-                tx, ty = asm1_x, asm1_y
-            elif kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL) and rec == science_recipe:
-                tx, ty = asm2_x, asm2_y
-            tasks.append(
-                BotBuildTask(
-                    task_index=idx,
-                    phase=PHASE_STARTER_BASE_CORE,
-                    task_kind=kind,
-                    target_name=name,
-                    target_x=tx,
-                    target_y=ty,
-                    stand_x=sx,
-                    stand_y=sy,
-                    direction=ent_dir,
-                    recipe=rec,
-                    item_count=count,
-                )
-            )
-        self.plan.tasks = tasks
-        self.completed_task_indices.clear()
-        self._active_mining_task = None
-        self._last_walk_vec = None
-        self._last_walk_tick = -1000
-        self._last_action_tick = -1000
-        return tasks
 
     def find_mall_producer_task(self, item_name: str) -> BotBuildTask | None:
         """Find a placed assembler task whose configured recipe produces item_name."""
@@ -1095,13 +1099,6 @@ class BotAgent:
                             self._last_walk_tick = world_state.tick
                         return f"walking_to_mall_for_{required_item}"
                     if world_state.walking or self._last_walk_vec is not None:
-                        if self._last_walk_vec is not None:
-                            for throttle in BRAKING_THROTTLES:
-                                act_b, pay_b = build_start_walking_action(
-                                    self._last_walk_vec[0] * throttle,
-                                    self._last_walk_vec[1] * throttle,
-                                )
-                                proxy.queue_action(act_b, player_index, pay_b)
                         act_type, payload = build_stop_walking_action()
                         proxy.queue_action(act_type, player_index, payload)
                         self._last_walk_vec = None
@@ -1133,24 +1130,54 @@ class BotAgent:
             stop_tolerance=stop_tolerance,
         )
         if walk_vec is not None:
-            if walk_vec != self._last_walk_vec or (
-                not world_state.walking
-                and (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
+            reissue_due = (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
+            stuck_blocked = (
+                reissue_due
+                and self._last_walk_pos is not None
+                and math.hypot(
+                    world_state.player_x - self._last_walk_pos[0],
+                    world_state.player_y - self._last_walk_pos[1],
+                )
+                < 0.15
+            )
+            if (
+                (walk_vec != self._last_walk_vec and self._walk_stuck_retries == 0)
+                or (not world_state.walking and reissue_due)
+                or stuck_blocked
             ):
+                if stuck_blocked:
+                    self._walk_stuck_retries += 1
+                    dx = task.stand_x - world_state.player_x
+                    dy = task.stand_y - world_state.player_y
+                    if self._walk_stuck_retries % 2 == 1:
+                        if abs(walk_vec[0]) > 0.0:
+                            walk_vec = (0.0, 1.0 if dy >= 0.0 else -1.0)
+                        else:
+                            walk_vec = (1.0 if dx >= 0.0 else -1.0, 0.0)
+                    else:
+                        sx = (1.0 if dx >= 0.0 else -1.0) * 0.707
+                        sy = (1.0 if dy >= 0.0 else -1.0) * 0.707
+                        walk_vec = (sx, sy)
+                else:
+                    self._walk_stuck_retries = 0
                 act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
                 proxy.queue_action(act_type, player_index, payload)
                 self._last_walk_vec = walk_vec
                 self._last_walk_tick = world_state.tick
+                self._last_walk_pos = (world_state.player_x, world_state.player_y)
+            elif reissue_due:
+                self._walk_stuck_retries = 0
+                self._last_walk_tick = world_state.tick
+                self._last_walk_pos = (world_state.player_x, world_state.player_y)
+                if walk_vec != self._last_walk_vec:
+                    act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
+                    proxy.queue_action(act_type, player_index, payload)
+                    self._last_walk_vec = walk_vec
             return f"walking_to_task_{task.task_index}"
 
+        self._walk_stuck_retries = 0
+        self._last_walk_pos = None
         if world_state.walking or self._last_walk_vec is not None:
-            if self._last_walk_vec is not None:
-                for throttle in BRAKING_THROTTLES:
-                    act_b, pay_b = build_start_walking_action(
-                        self._last_walk_vec[0] * throttle,
-                        self._last_walk_vec[1] * throttle,
-                    )
-                    proxy.queue_action(act_b, player_index, pay_b)
             act_type, payload = build_stop_walking_action()
             proxy.queue_action(act_type, player_index, payload)
             self._last_walk_vec = None
@@ -1170,11 +1197,44 @@ class BotAgent:
                 return f"cleared_obstacle_{task.task_index}"
             return f"mining_obstacle_{task.task_index}"
 
-        for act_type, payload in encode_task_input_actions(task, id_mappings):
-            proxy.queue_action(act_type, player_index, payload)
-        self.mark_task_complete(task.task_index)
+        reach_limit = (
+            max(self.plan.reach_limits.build_reach, stop_tolerance + 2.0)
+            if self.plan is not None
+            else 10.0
+        )
+        inv_remaining: dict[str, int] = dict(world_state.inventory)
+        last_executed_idx = task.task_index
+        while True:
+            cur_t = self.current_task()
+            if cur_t is None or cur_t.task_kind == TASK_CLEAR_OBSTACLE:
+                break
+            if (
+                math.hypot(
+                    cur_t.stand_x - world_state.player_x,
+                    cur_t.stand_y - world_state.player_y,
+                )
+                > stop_tolerance
+                and math.hypot(
+                    cur_t.target_x - world_state.player_x,
+                    cur_t.target_y - world_state.player_y,
+                )
+                > reach_limit
+            ):
+                break
+            if cur_t.task_kind in (TASK_PLACE_ENTITY, TASK_SEED_FUEL):
+                req_item = cur_t.target_name
+                need_qty = max(1, cur_t.item_count) if cur_t.task_kind == TASK_SEED_FUEL else 1
+                have_qty = int(inv_remaining.get(req_item, 0))
+                if have_qty < 1:
+                    break
+                inv_remaining[req_item] = max(0, have_qty - need_qty)
+            for act_type, payload in encode_task_input_actions(cur_t, id_mappings):
+                proxy.queue_action(act_type, player_index, payload)
+            self.mark_task_complete(cur_t.task_index)
+            last_executed_idx = cur_t.task_index
+
         self._last_action_tick = world_state.tick
-        return f"executed_task_{task.task_index}"
+        return f"executed_task_{last_executed_idx}"
 
     def build_lua_plan_executor_snippet(self, check_inventory: bool = False) -> str:
         """Generate a Lua snippet that executes every task in self.plan on surface 1."""
@@ -1425,6 +1485,9 @@ class BotAgent:
             "      local params = {name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, raise_built = true}\n"
             "      if t.ug then params.type = t.ug end\n"
             "      if t.rec then params.recipe = t.rec end\n"
+            "      if t.name == 'offshore-pump' and not surface.can_place_entity({name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, build_check_type = defines.build_check_type.manual}) then\n"
+            "        return\n"
+            "      end\n"
             "      local ent = surface.create_entity(params)\n"
             "      if ent then\n"
             "        exec.placed_count = exec.placed_count + 1\n"
