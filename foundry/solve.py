@@ -418,10 +418,16 @@ class Data:
         """Return the crafting time in seconds of a recipe."""
         return float(recipe.get("energy_required", DEFAULT_CRAFT_SECONDS))
 
-    def machine_for(self, recipe: ProtoRecord) -> Any:
+    def machine_for(
+        self,
+        recipe: ProtoRecord,
+        allowed: set[str] | None = None,
+    ) -> Any:
         """Return the highest-preference machine name and crafting speed for recipe."""
         categories = recipe.get("categories") or DEFAULT_RECIPE_CATEGORY
         for name in MACHINE_PREFERENCE:
+            if allowed is not None and name in self.unlocked_by and name not in allowed:
+                continue
             proto = self.machines.get(name)
             if proto is None:
                 continue
@@ -831,13 +837,17 @@ def solve_rates(
     return rates, raw, surplus
 
 
-def machine_counts(data: Data, rates: RateMap) -> tuple[list[MachineLine], float]:
+def machine_counts(
+    data: Data,
+    rates: RateMap,
+    allowed: set[str] | None = None,
+) -> tuple[list[MachineLine], float]:
     """Compute machines per recipe and total power draw of the machine list."""
     lines: list[MachineLine] = []
     power = 0.0
     for name, rate in sorted(rates.items(), key=lambda kv: -kv[1]):
         recipe = data.recipes[name]
-        pick = data.machine_for(recipe)
+        pick = data.machine_for(recipe, allowed=allowed)
         if pick is None:
             lines.append((name, rate, "no machine", 0.0, 0.0))
             continue

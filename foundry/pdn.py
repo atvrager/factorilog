@@ -83,6 +83,8 @@ POWERED_KEYWORDS: tuple[str, ...] = (
     "oil-refinery",
     "centrifuge",
     "rocket-silo",
+    "electric-mining-drill",
+    "pumpjack",
     "inserter",
     "pump",
     "combinator",
@@ -105,6 +107,19 @@ class PdnConfig:
     bbox_margin: int = 12
     terminal_place_radius: float = 8.0
     terminal_search_steps: int = 8
+
+
+def make_pdn_config(pole_name: str = "medium-electric-pole") -> PdnConfig:
+    """Create a PdnConfig with supply radius, wire reach, and grid step from prototype data."""
+    supply_rad = get_pole_supply_radius(pole_name)
+    reach = get_pole_wire_reach(pole_name)
+    step = max(2, min(6, int(reach // 2)))
+    return PdnConfig(
+        pole_name=pole_name,
+        supply_radius=supply_rad,
+        wire_reach=reach,
+        grid_step=step,
+    )
 
 
 DEFAULT_PDN_CONFIG = PdnConfig()

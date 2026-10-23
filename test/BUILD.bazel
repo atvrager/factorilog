@@ -414,3 +414,17 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "patch_router_test",
+    size = "medium",
+    srcs = ["test_patch_router.py"],
+    data = [
+        "data/dump-fixture.json",
+    ],
+    local = True,
+    main = "test_patch_router.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)

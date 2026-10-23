@@ -71,6 +71,7 @@ py_library(
         "native_engine/verifier.py",
         "netbuild.py",
         "netlist.py",
+        "patch_router.py",
         "pdk.py",
         "pdn.py",
         "placement.py",
