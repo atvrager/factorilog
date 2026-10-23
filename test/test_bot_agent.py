@@ -415,7 +415,7 @@ class BotAgentTest(unittest.TestCase):
                 verify=False,
             )
             self.assertGreaterEqual(len(plan.obstacles_to_clear), 2)
-            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.75)
+            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.15)
 
             # Stage 3: Execute the progressive bot plan across ticks and verify full production
             build_scenario = "bot_starter_base_exec"
@@ -457,7 +457,7 @@ class BotAgentTest(unittest.TestCase):
                 + "    p.game_view_settings.show_entity_info = true\n"
                 + "    if not storage.mp_speed_set then\n"
                 + "      storage.mp_speed_set = true\n"
-                + "      game.speed = 4\n"
+                + "      game.speed = 1\n"
                 + "      for _, c in pairs(surface.find_entities_filtered({name = 'character'})) do\n"
                 + "        if p.character and c.unit_number ~= p.character.unit_number then c.destroy() end\n"
                 + "      end\n"
@@ -469,17 +469,20 @@ class BotAgentTest(unittest.TestCase):
                 + "    step_bot_plan(surface, force)\n"
                 + "  end\n"
                 + "  local building = not (storage.bot_execution and storage.bot_execution.completed)\n"
-                + "  local snap_stride = building and 6 or 24\n"
-                + "  if p and p.valid and storage.active_ticks >= 36 and storage.active_ticks % snap_stride == 0 and (storage.frame_seq or 0) < 280 then\n"
+                + "  if p and p.valid and storage.active_ticks % 3 == 0 and (storage.frame_seq or 0) < 1360 then\n"
                 + "    storage.frame_seq = (storage.frame_seq or 0) + 1\n"
                 + "    local char_ent = p.character or surface.find_entities_filtered({name = 'character'})[1]\n"
-                + "    local follow_pos = (char_ent and char_ent.valid and building) and char_ent.position or {x = 30, y = 21}\n"
+                + "    local tx = (char_ent and char_ent.valid and building) and char_ent.position.x or 31.5\n"
+                + "    local ty = (char_ent and char_ent.valid and building) and char_ent.position.y or 22.5\n"
+                + "    storage.cam_x = storage.cam_x and (storage.cam_x + (tx - storage.cam_x) * 0.12) or tx\n"
+                + "    storage.cam_y = storage.cam_y and (storage.cam_y + (ty - storage.cam_y) * 0.12) or ty\n"
                 + "    game.take_screenshot({\n"
                 + "      player = p,\n"
                 + "      by_player = p,\n"
-                + "      position = {x = 23, y = 22},\n"
+                + "      position = {x = 24, y = 21},\n"
                 + "      resolution = {1280, 800},\n"
-                + "      zoom = 0.55,\n"
+                + "      zoom = 0.56,\n"
+                + "      quality = 80,\n"
                 + "      daytime = 0.0,\n"
                 + "      show_gui = false,\n"
                 + "      show_entity_info = true,\n"
@@ -488,9 +491,10 @@ class BotAgentTest(unittest.TestCase):
                 + "    game.take_screenshot({\n"
                 + "      player = p,\n"
                 + "      by_player = p,\n"
-                + "      position = follow_pos,\n"
+                + "      position = {x = storage.cam_x, y = storage.cam_y},\n"
                 + "      resolution = {1280, 800},\n"
-                + "      zoom = 0.95,\n"
+                + "      zoom = 0.88,\n"
+                + "      quality = 80,\n"
                 + "      daytime = 0.0,\n"
                 + "      show_gui = false,\n"
                 + "      show_entity_info = true,\n"
@@ -564,7 +568,7 @@ class BotAgentTest(unittest.TestCase):
                     "--benchmark",
                     str(save_zip),
                     "--benchmark-ticks",
-                    "8500",
+                    "10000",
                 ],
                 capture_output=True,
                 text=True,
@@ -667,7 +671,11 @@ class BotAgentTest(unittest.TestCase):
         )
 
         live_mp4 = export_dir / "starter_base_bot_live.mp4"
-        with XvfbVideoRecorder(live_mp4, width=1280, height=800, fps=30) as recorder:
+        recorder = XvfbVideoRecorder(live_mp4, width=1280, height=800, fps=30)
+        recorder.start_display()
+        srv_proc: subprocess.Popen[str] | None = None
+        cli_proc: subprocess.Popen[str] | None = None
+        try:
             srv_proc = subprocess.Popen(
                 [
                     str(elf_bin),
@@ -692,69 +700,77 @@ class BotAgentTest(unittest.TestCase):
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            cli_proc: subprocess.Popen[str] | None = None
-            try:
-                srv_log = srv_dir / "factorio-current.log"
-                deadline = time.monotonic() + 20.0
-                while time.monotonic() < deadline:
-                    if (
-                        srv_log.is_file()
-                        and "changing state from(CreatingGame) to(InGame)"
-                        in srv_log.read_text(errors="replace")
-                    ):
-                        break
-                    time.sleep(0.1)
+            srv_log = srv_dir / "factorio-current.log"
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if (
+                    srv_log.is_file()
+                    and "changing state from(CreatingGame) to(InGame)"
+                    in srv_log.read_text(errors="replace")
+                ):
+                    break
+                time.sleep(0.1)
 
-                cli_proc = subprocess.Popen(
-                    [
-                        str(elf_bin),
-                        "-c",
-                        str(cli_cfg),
-                        "--mod-directory",
-                        str(mods_dir),
-                        "--disable-audio",
-                        "--force-graphics-preset",
-                        "very-low",
-                        "--video-memory-usage",
-                        "low",
-                        "--low-vram",
-                        "--window-size",
-                        "1280x800",
-                        "--mp-connect",
-                        f"127.0.0.1:{port}",
-                    ],
-                    env={
-                        **os.environ,
-                        "HOME": str(cli_home),
-                        "SteamAppId": "427520",
-                        "SteamGameId": "427520",
-                        "DISPLAY": recorder.display,
-                        "WAYLAND_DISPLAY": "",
-                        "SDL_VIDEODRIVER": "x11",
-                    },
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
+            cli_proc = subprocess.Popen(
+                [
+                    str(elf_bin),
+                    "-c",
+                    str(cli_cfg),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--disable-audio",
+                    "--force-graphics-preset",
+                    "very-low",
+                    "--video-memory-usage",
+                    "low",
+                    "--low-vram",
+                    "--window-size",
+                    "1280x800",
+                    "--mp-connect",
+                    f"127.0.0.1:{port}",
+                ],
+                env={
+                    **os.environ,
+                    "HOME": str(cli_home),
+                    "SteamAppId": "427520",
+                    "SteamGameId": "427520",
+                    "DISPLAY": recorder.display,
+                    "WAYLAND_DISPLAY": "",
+                    "SDL_VIDEODRIVER": "x11",
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
 
-                target_frame = (
-                    cli_dir / "script-output" / "timelapse_overview" / "frame_00000240.jpg"
-                )
-                wait_deadline = time.monotonic() + 90.0
-                while time.monotonic() < wait_deadline:
-                    if target_frame.is_file():
-                        break
-                    if cli_proc.poll() is not None or srv_proc.poll() is not None:
-                        break
-                    time.sleep(0.25)
-            finally:
-                for p in (cli_proc, srv_proc):
-                    if p is not None and p.poll() is None:
-                        p.terminate()
-                        try:
-                            p.wait(timeout=5.0)
-                        except subprocess.TimeoutExpired:
-                            p.kill()
+            cli_log = cli_dir / "factorio-current.log"
+            join_deadline = time.monotonic() + 30.0
+            while time.monotonic() < join_deadline:
+                if cli_log.is_file() and "to(InGame)" in cli_log.read_text(errors="replace"):
+                    break
+                if cli_proc.poll() is not None or srv_proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+
+            recorder.start_recording()
+
+            target_frame = cli_dir / "script-output" / "timelapse_overview" / "frame_00001360.jpg"
+            wait_deadline = time.monotonic() + 160.0
+            while time.monotonic() < wait_deadline:
+                if target_frame.is_file():
+                    break
+                if cli_proc.poll() is not None or srv_proc.poll() is not None:
+                    break
+                time.sleep(0.25)
+        finally:
+            for p in (cli_proc, srv_proc):
+                if p is not None and p.poll() is None:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+            recorder.stop()
 
         overview_dir = cli_dir / "script-output" / "timelapse_overview"
         follow_dir = cli_dir / "script-output" / "timelapse_follow"

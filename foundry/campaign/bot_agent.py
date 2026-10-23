@@ -821,7 +821,7 @@ class BotAgent:
 
     def build_lua_progressive_plan_executor_snippet(
         self,
-        step_stride: float = 0.55,
+        step_stride: float = 0.15,
     ) -> str:
         """Generate a Lua snippet that walks the bot and executes tasks progressively across ticks."""
         if self.plan is None:
@@ -831,12 +831,27 @@ class BotAgent:
         for task in self.plan.tasks:
             ug_str = f"'{task.entity_type}'" if task.entity_type in ("input", "output") else "nil"
             rec_str = f"'{task.recipe}'" if task.recipe is not None else "nil"
+            if task.task_kind == TASK_CLEAR_OBSTACLE:
+                wait_ticks = 20
+            elif task.task_kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL):
+                wait_ticks = 5
+            elif task.target_name == "transport-belt":
+                wait_ticks = 3
+            elif (
+                "pole" in task.target_name
+                or "inserter" in task.target_name
+                or "underground" in task.target_name
+                or "splitter" in task.target_name
+            ):
+                wait_ticks = 6
+            else:
+                wait_ticks = 10
             task_entries.append(
                 f"    {{kind = '{task.task_kind}', name = '{task.target_name}', "
                 f"tx = {task.target_x}, ty = {task.target_y}, "
                 f"sx = {task.stand_x}, sy = {task.stand_y}, "
                 f"dir = {task.direction}, ug = {ug_str}, rec = {rec_str}, "
-                f"cnt = {task.item_count}}}"
+                f"cnt = {task.item_count}, wait = {wait_ticks}}}"
             )
 
         tasks_lua = ",\n".join(task_entries)
@@ -845,6 +860,12 @@ class BotAgent:
             "local BOT_TASKS = {\n"
             f"{tasks_lua}\n"
             "}\n\n"
+            "local function vec_to_dir(dx, dy)\n"
+            "  if math.abs(dx) < 1e-4 and math.abs(dy) < 1e-4 then return defines.direction.south end\n"
+            "  local angle = math.atan2(dy, dx)\n"
+            "  local octant = math.floor(((angle + math.pi / 2) / (2 * math.pi)) * 8 + 0.5) % 8\n"
+            "  return octant * 2\n"
+            "end\n\n"
             "local function step_bot_plan(surface, force)\n"
             "  if not storage.bot_execution then\n"
             "    storage.bot_execution = {\n"
@@ -853,17 +874,31 @@ class BotAgent:
             "      configured_count = 0,\n"
             "      seeded_count = 0,\n"
             "      task_idx = 1,\n"
+            "      wait_left = nil,\n"
             "      completed = false,\n"
             "    }\n"
             "  end\n"
             "  local exec = storage.bot_execution\n"
             "  if exec.completed then return end\n"
+            "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
             "  local idx = exec.task_idx\n"
             "  if idx > #BOT_TASKS then\n"
+            "    if char_ent and char_ent.valid then\n"
+            "      local dx = 31.5 - char_ent.position.x\n"
+            "      local dy = 22.5 - char_ent.position.y\n"
+            "      local dist = math.sqrt(dx * dx + dy * dy)\n"
+            f"      if dist > {stride_val} then\n"
+            f"        char_ent.direction = vec_to_dir(dx, dy)\n"
+            f"        char_ent.teleport({{char_ent.position.x + (dx / dist) * {stride_val}, char_ent.position.y + (dy / dist) * {stride_val}}})\n"
+            "        return\n"
+            "      else\n"
+            "        char_ent.teleport({31.5, 22.5})\n"
+            "        char_ent.direction = defines.direction.east\n"
+            "      end\n"
+            "    end\n"
             "    exec.completed = true\n"
             "    return\n"
             "  end\n"
-            "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
             "  local t = BOT_TASKS[idx]\n"
             "  if char_ent and char_ent.valid then\n"
             "    local dx = t.sx - char_ent.position.x\n"
@@ -872,12 +907,22 @@ class BotAgent:
             f"    if dist > {stride_val} then\n"
             f"      local nx = char_ent.position.x + (dx / dist) * {stride_val}\n"
             f"      local ny = char_ent.position.y + (dy / dist) * {stride_val}\n"
+            "      char_ent.direction = vec_to_dir(dx, dy)\n"
             "      char_ent.teleport({nx, ny})\n"
             "      return\n"
             "    else\n"
             "      char_ent.teleport({t.sx, t.sy})\n"
+            "      char_ent.direction = vec_to_dir(t.tx - t.sx, t.ty - t.sy)\n"
             "    end\n"
             "  end\n"
+            "  if exec.wait_left == nil then\n"
+            "    exec.wait_left = t.wait or 4\n"
+            "  end\n"
+            "  if exec.wait_left > 0 then\n"
+            "    exec.wait_left = exec.wait_left - 1\n"
+            "    return\n"
+            "  end\n"
+            "  exec.wait_left = nil\n"
             "  if t.kind == 'clear_obstacle' then\n"
             "    for _, obs in pairs(surface.find_entities_filtered({position = {t.tx, t.ty}, radius = 1.5})) do\n"
             "      if obs.valid and obs.name ~= 'character' and obs.type ~= 'resource' then\n"
