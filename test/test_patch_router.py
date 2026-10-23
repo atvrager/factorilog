@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import collections
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from pathlib import Path
 
 from foundry import blueprint, solve
 from foundry.bp2save import find_factorio_binary
+from foundry.render_bp import render_blueprint
 from foundry.entity_helpers import (
     check_collisions,
     check_power,
@@ -451,6 +454,16 @@ end)
                 proc.returncode, 0, msg=f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
             )
             save_zip = tmp_path / "saves" / f"{scenario_name}.zip"
+            png_out = render_blueprint(res.blueprint_string, tmp_path / "starter_base.png")
+            self.assertTrue(png_out.is_file())
+            self.assertGreater(png_out.stat().st_size, 0)
+            export_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ""))
+            if export_dir.is_dir():
+                shutil.copy2(save_zip, export_dir / "starter_base_sim.zip")
+                shutil.copy2(png_out, export_dir / "starter_base.png")
+                (export_dir / "starter_base.blueprint").write_text(
+                    res.blueprint_string + "\n", encoding="utf-8"
+                )
             subprocess.run(
                 [
                     str(factorio_bin),
