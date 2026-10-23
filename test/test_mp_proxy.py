@@ -157,6 +157,14 @@ class TestMpProtocolUnit(unittest.TestCase):
         self.assertEqual(act_res, mp_proxy.ACTION_START_RESEARCH)
         self.assertEqual(struct.unpack("<H", pay_res), (15,))
 
+        act_opn, pay_opn = mp_proxy.build_open_gui_action()
+        self.assertEqual(act_opn, mp_proxy.ACTION_OPEN_GUI)
+        self.assertEqual(pay_opn, b"")
+
+        act_cls, pay_cls = mp_proxy.build_close_gui_action()
+        self.assertEqual(act_cls, mp_proxy.ACTION_CLOSE_GUI)
+        self.assertEqual(pay_cls, b"\x00\x00")
+
     def test_lazy_bastard_max_hand_craft_invariant(self) -> None:
         """Verify dynamic extraction and strict enforcement of the lazy-bastard max hand-craft limit."""
         fixture_path = REPO_ROOT / "test" / "data" / "dump-fixture.json"
@@ -400,6 +408,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             build_ach_map = id_mappings.get("build-entity-achievement", {})
             item_map = id_mappings.get("item", {})
             recipe_map = id_mappings.get("recipe", {})
+            quality_map = id_mappings.get("quality", {})
             self.assertTrue(
                 build_ach_map,
                 f"Failed to extract build-entity-achievement mappings from save: {list(id_mappings)}",
@@ -417,7 +426,7 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             fixture_data = json.loads(fixture_path.read_text(encoding="utf-8"))
             max_hand_crafts = mp_proxy.extract_lazy_bastard_limit(fixture_data)
 
-            # Dynamically resolve the target achievement ID and placeable entity item ID
+            # Dynamically resolve target achievement IDs and placeable entity item IDs
             target_ach_name = next(
                 (name for name in build_ach_map if "automate" in name),
                 next(iter(build_ach_map)),
@@ -425,8 +434,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             target_ach_id = build_ach_map[target_ach_name]
 
             target_item_name = next(
-                (name for name in item_map if "assembling-machine" in name),
-                next(iter(item_map)),
+                (name for name in item_map if name == "assembling-machine-1"),
+                next(
+                    (name for name in item_map if "assembling-machine" in name),
+                    next(iter(item_map)),
+                ),
             )
             target_item_id = item_map[target_item_name]
 
@@ -435,6 +447,30 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 next(iter(item_map)),
             )
             furnace_item_id = item_map[furnace_item_name]
+
+            pump_item_name = next(
+                (name for name in item_map if name == "offshore-pump"),
+                next(iter(item_map)),
+            )
+            pump_item_id = item_map[pump_item_name]
+
+            boiler_item_name = next(
+                (name for name in item_map if name == "boiler"),
+                next(iter(item_map)),
+            )
+            boiler_item_id = item_map[boiler_item_name]
+
+            engine_item_name = next(
+                (name for name in item_map if name == "steam-engine"),
+                next(iter(item_map)),
+            )
+            engine_item_id = item_map[engine_item_name]
+
+            pole_item_name = next(
+                (name for name in item_map if name == "small-electric-pole"),
+                next(iter(item_map)),
+            )
+            pole_item_id = item_map[pole_item_name]
 
             fuel_item_name = next(
                 (name for name in item_map if name == "coal"),
@@ -448,11 +484,18 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
             )
             smelt_ore_id = item_map[smelt_ore_name]
 
+            plate_item_name = next(
+                (name for name in item_map if name == "iron-plate"),
+                next(iter(item_map)),
+            )
+            plate_item_id = item_map[plate_item_name]
+
             craft_recipe_name = next(
                 (name for name in recipe_map if name == "iron-gear-wheel"),
                 next(iter(recipe_map)),
             )
             craft_recipe_id = recipe_map[craft_recipe_name]
+            normal_quality_id = quality_map.get("normal", 1)
 
             # Add starter items, scenario telemetry hook, and timelapse screenshot hook to control.lua
             mp_proxy.augment_save_freeplay_created_items(
@@ -460,8 +503,13 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 {
                     target_item_name: 1,
                     furnace_item_name: 1,
-                    fuel_item_name: 5,
-                    smelt_ore_name: 2,
+                    pump_item_name: 1,
+                    boiler_item_name: 1,
+                    engine_item_name: 1,
+                    pole_item_name: 1,
+                    fuel_item_name: 10,
+                    smelt_ore_name: 6,
+                    plate_item_name: 16,
                 },
                 enable_telemetry=True,
                 timelapse_interval_ticks=4,
@@ -594,37 +642,58 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 )
 
                 # Step 6: Closed-loop controller:
-                # 1. Discover nearest mineral patch from factorilog_state.json
-                # 2. Walk character to within mining reach of the patch
-                # 3. Select the resource tile and mine ore into player inventory
-                # 4. Place stone-furnace, load fuel + iron-ore through FastEntityTransfer(into_entity=True)
-                # 5. Extract smelted iron-plate through FastEntityTransfer(into_entity=False) and hand-craft
-                #    iron-gear-wheel within the lazy-bastard max_hand_crafts invariant
-                # 6. Pipette + Build assembling machine to unlock native achievement
+                # 1. Discover nearest mineral patch and shoreline site from factorilog_state.json
+                # 2. Walk character to within mining reach of the patch and mine ore
+                # 3. Walk smoothly to shoreline_site.stand_x, shoreline_site.stand_y
+                # 4. Build the lakeside steam power chain and stone-furnace, then load fuel and ore
+                # 5. Extract smelted iron-plate and hand-craft 1 iron-gear-wheel within the limit
+                # 6. Build assembling-machine-1, set its recipe, feed iron-plate, and extract output
                 state_file = server_dir / "script-output" / "factorilog_state.json"
                 res_name: str | None = None
                 res_x = 0.0
                 res_y = 0.0
+                site: mp_proxy.ShorelineSite | None = None
                 primed_walk = False
                 primed_stop = False
                 recording_started = False
                 walk_stage = 0
                 walk_dx = -1.0
                 walk_dy = 0.0
-                furnace_x = 0.0
-                furnace_y = 0.0
+                shore_stage = 0
+                shore_dx = 0.0
+                shore_dy = 0.0
+                shore_arrived = False
                 initial_ore = 0
                 mined_ore = 0
                 mining_phase = False
                 smelt_queued = False
                 smelt_started_at = 0.0
                 extract_and_craft_queued = False
-                build_queued = False
+                machine_feed_queued = False
+                machine_extract_queued = False
                 last_cmd_time = 0.0
                 last_state: mp_proxy.PlayerWorldState | None = None
+                braking_throttles = (
+                    0.88,
+                    0.77,
+                    0.67,
+                    0.59,
+                    0.51,
+                    0.45,
+                    0.39,
+                    0.34,
+                    0.30,
+                    0.26,
+                    0.23,
+                    0.20,
+                    0.18,
+                    0.15,
+                    0.13,
+                    0.11,
+                )
 
                 success = False
-                join_deadline = time.monotonic() + 75.0
+                join_deadline = time.monotonic() + 110.0
                 while time.monotonic() < join_deadline:
                     state = mp_proxy.read_world_state(state_file)
                     if state is not None and proxy.stats.empty_client_heartbeats_seen >= 90:
@@ -634,6 +703,8 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                             res_x = state.nearest_resource.x
                             res_y = state.nearest_resource.y
                             initial_ore = state.inventory.get(res_name, 0)
+                        if site is None and state.shoreline_site is not None:
+                            site = state.shoreline_site
 
                         now = time.monotonic()
                         # Pre-recording setup (before tick 1220):
@@ -665,13 +736,20 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 last_cmd_time = now
 
                         # Wait until ServerSynchronizer reduces client latency at tick 1200
-                        if res_name is not None and primed_stop and state.tick >= 1200:
+                        if (
+                            res_name is not None
+                            and site is not None
+                            and primed_stop
+                            and state.tick >= 1200
+                        ):
                             if state.tick >= 1215 and not recording_started:
                                 recording_started = True
                                 if has_xvfb_ffmpeg:
                                     recorder.start_recording()
 
-                            mined_ore = state.inventory.get(res_name, 0) - initial_ore
+                            mined_ore = max(
+                                mined_ore, state.inventory.get(res_name, 0) - initial_ore
+                            )
                             raw_dx = res_x - state.player_x
                             raw_dy = res_y - state.player_y
                             dist = math.hypot(raw_dx, raw_dy)
@@ -704,97 +782,213 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                         )
                                         proxy.queue_action(act_w, player_index=0, payload=pay_w)
                                         last_cmd_time = now
-                                else:
-                                    if not mining_phase:
-                                        mining_phase = True
-                                        for throttle in (
-                                            0.88,
-                                            0.77,
-                                            0.67,
-                                            0.59,
-                                            0.51,
-                                            0.45,
-                                            0.39,
-                                            0.34,
-                                            0.30,
-                                            0.26,
-                                            0.23,
-                                            0.20,
-                                            0.18,
-                                            0.15,
-                                            0.13,
-                                            0.11,
-                                        ):
+                                elif not mining_phase and proxy.pending_action_count() == 0:
+                                    mining_phase = True
+                                    for throttle in braking_throttles:
+                                        act_b, pay_b = mp_proxy.build_start_walking_action(
+                                            walk_dx * throttle, walk_dy * throttle
+                                        )
+                                        proxy.queue_action(act_b, player_index=0, payload=pay_b)
+                                    act_sw, pay_sw = mp_proxy.build_stop_walking_action()
+                                    act_sel, pay_sel = mp_proxy.build_selected_entity_action(
+                                        res_x, res_y
+                                    )
+                                    act_bm, pay_bm = mp_proxy.build_begin_mining_action()
+                                    proxy.queue_action(act_sw, player_index=0, payload=pay_sw)
+                                    proxy.queue_action(act_sel, player_index=0, payload=pay_sel)
+                                    proxy.queue_action(act_bm, player_index=0, payload=pay_bm)
+                                    last_cmd_time = now
+                                elif (
+                                    mining_phase
+                                    and not state.mining
+                                    and not state.walking
+                                    and proxy.pending_action_count() == 0
+                                    and (now - last_cmd_time) >= 0.8
+                                ):
+                                    act_sel, pay_sel = mp_proxy.build_selected_entity_action(
+                                        res_x, res_y
+                                    )
+                                    act_bm, pay_bm = mp_proxy.build_begin_mining_action()
+                                    proxy.queue_action(act_sel, player_index=0, payload=pay_sel)
+                                    proxy.queue_action(act_bm, player_index=0, payload=pay_bm)
+                                    last_cmd_time = now
+                            elif not shore_arrived:
+                                s_dx = site.stand_x - state.player_x
+                                s_dy = site.stand_y - state.player_y
+                                s_dist = math.hypot(s_dx, s_dy)
+                                if (
+                                    shore_stage == 0
+                                    and not state.walking
+                                    and proxy.pending_action_count() == 0
+                                    and (now - last_cmd_time) >= 0.4
+                                ):
+                                    act_sm, pay_sm = mp_proxy.build_stop_mining_action()
+                                    proxy.queue_action(act_sm, player_index=0, payload=pay_sm)
+                                    if s_dist <= 1.8:
+                                        shore_arrived = True
+                                        last_cmd_time = now
+                                    else:
+                                        shore_stage = 1
+                                        if abs(s_dx) >= abs(s_dy):
+                                            shore_dx, shore_dy = math.copysign(1.0, s_dx), 0.0
+                                        else:
+                                            shore_dx, shore_dy = 0.0, math.copysign(1.0, s_dy)
+                                        act_w, pay_w = mp_proxy.build_start_walking_action(
+                                            shore_dx, shore_dy
+                                        )
+                                        proxy.queue_action(act_w, player_index=0, payload=pay_w)
+                                        last_cmd_time = now
+                                elif (
+                                    shore_stage == 1
+                                    and state.walking
+                                    and proxy.pending_action_count() == 0
+                                    and (now - last_cmd_time) >= 0.25
+                                ):
+                                    err1 = (
+                                        abs(s_dx) if abs(shore_dx) >= abs(shore_dy) else abs(s_dy)
+                                    )
+                                    signed_err1 = (
+                                        s_dx * shore_dx
+                                        if abs(shore_dx) >= abs(shore_dy)
+                                        else s_dy * shore_dy
+                                    )
+                                    if err1 <= 2.35 or signed_err1 <= 0.0:
+                                        for throttle in braking_throttles:
                                             act_b, pay_b = mp_proxy.build_start_walking_action(
-                                                walk_dx * throttle, walk_dy * throttle
+                                                shore_dx * throttle, shore_dy * throttle
                                             )
                                             proxy.queue_action(act_b, player_index=0, payload=pay_b)
                                         act_sw, pay_sw = mp_proxy.build_stop_walking_action()
-                                        act_sel, pay_sel = mp_proxy.build_selected_entity_action(
-                                            res_x, res_y
-                                        )
-                                        act_bm, pay_bm = mp_proxy.build_begin_mining_action()
                                         proxy.queue_action(act_sw, player_index=0, payload=pay_sw)
-                                        proxy.queue_action(act_sel, player_index=0, payload=pay_sel)
-                                        proxy.queue_action(act_bm, player_index=0, payload=pay_bm)
+                                        shore_stage = 2
                                         last_cmd_time = now
-                                    elif (
-                                        not state.mining
-                                        and proxy.pending_action_count() == 0
-                                        and (now - last_cmd_time) >= 0.5
-                                    ):
-                                        if dist > 2.2:
-                                            mining_phase = False
-                                            walk_stage = 0
+                                elif (
+                                    shore_stage == 1
+                                    and not state.walking
+                                    and proxy.pending_action_count() == 0
+                                    and (now - last_cmd_time) >= 0.8
+                                ):
+                                    if abs(s_dx) >= abs(s_dy):
+                                        shore_dx, shore_dy = math.copysign(1.0, s_dx), 0.0
+                                    else:
+                                        shore_dx, shore_dy = 0.0, math.copysign(1.0, s_dy)
+                                    act_w, pay_w = mp_proxy.build_start_walking_action(
+                                        shore_dx, shore_dy
+                                    )
+                                    proxy.queue_action(act_w, player_index=0, payload=pay_w)
+                                    last_cmd_time = now
+                                elif (
+                                    shore_stage == 2
+                                    and not state.walking
+                                    and proxy.pending_action_count() == 0
+                                    and (now - last_cmd_time) >= 0.5
+                                ):
+                                    if s_dist <= 2.15 or (abs(s_dx) <= 1.85 and abs(s_dy) <= 1.85):
+                                        shore_arrived = True
+                                        last_cmd_time = now
+                                    else:
+                                        shore_stage = 1
+                                        if abs(s_dx) >= abs(s_dy):
+                                            shore_dx, shore_dy = math.copysign(1.0, s_dx), 0.0
                                         else:
-                                            act_sel, pay_sel = (
-                                                mp_proxy.build_selected_entity_action(res_x, res_y)
-                                            )
-                                            act_bm, pay_bm = mp_proxy.build_begin_mining_action()
-                                            proxy.queue_action(
-                                                act_sel, player_index=0, payload=pay_sel
-                                            )
-                                            proxy.queue_action(
-                                                act_bm, player_index=0, payload=pay_bm
-                                            )
-                                            last_cmd_time = now
-                            elif not smelt_queued and proxy.pending_action_count() == 0:
+                                            shore_dx, shore_dy = 0.0, math.copysign(1.0, s_dy)
+                                        act_w, pay_w = mp_proxy.build_start_walking_action(
+                                            shore_dx, shore_dy
+                                        )
+                                        proxy.queue_action(act_w, player_index=0, payload=pay_w)
+                                        last_cmd_time = now
+                            elif (
+                                shore_arrived
+                                and not smelt_queued
+                                and not state.walking
+                                and proxy.pending_action_count() == 0
+                                and (now - last_cmd_time) >= 0.4
+                            ):
                                 smelt_queued = True
                                 smelt_started_at = now
-                                furnace_x = state.player_x
-                                furnace_y = state.player_y - 2.0
-                                act_sm, pay_sm = mp_proxy.build_stop_mining_action()
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+
+                                # 1. Build stone-furnace and load coal + iron-ore
                                 act_pip_f, pay_pip_f = mp_proxy.build_pipette_item_action(
                                     furnace_item_id
                                 )
                                 act_bld_f, pay_bld_f = mp_proxy.build_place_entity_action(
-                                    furnace_x, furnace_y, direction=0
+                                    site.furnace_x, site.furnace_y, direction=0
                                 )
-                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
-                                    furnace_x, furnace_y
+                                    site.furnace_x, site.furnace_y
                                 )
                                 act_pip_c, pay_pip_c = mp_proxy.build_pipette_item_action(
                                     fuel_item_id
                                 )
-                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                act_fs_in, pay_fs_in = mp_proxy.build_fast_entity_split_action(
                                     into_entity=True
                                 )
                                 act_pip_o, pay_pip_o = mp_proxy.build_pipette_item_action(
                                     smelt_ore_id
                                 )
+
+                                # 2. Build offshore-pump, boiler (load coal), steam-engine,
+                                #    small-electric-pole, and assembling-machine-1 (configure recipe)
+                                act_pip_p, pay_pip_p = mp_proxy.build_pipette_item_action(
+                                    pump_item_id
+                                )
+                                act_bld_p, pay_bld_p = mp_proxy.build_place_entity_action(
+                                    site.pump_x, site.pump_y, direction=site.pump_dir
+                                )
+                                act_pip_b, pay_pip_b = mp_proxy.build_pipette_item_action(
+                                    boiler_item_id
+                                )
+                                act_bld_b, pay_bld_b = mp_proxy.build_place_entity_action(
+                                    site.boiler_x, site.boiler_y, direction=site.boiler_dir
+                                )
+                                act_sel_b, pay_sel_b = mp_proxy.build_selected_entity_action(
+                                    site.boiler_x, site.boiler_y
+                                )
+                                act_pip_e, pay_pip_e = mp_proxy.build_pipette_item_action(
+                                    engine_item_id
+                                )
+                                act_bld_e, pay_bld_e = mp_proxy.build_place_entity_action(
+                                    site.engine_x, site.engine_y, direction=site.engine_dir
+                                )
+                                act_pip_po, pay_pip_po = mp_proxy.build_pipette_item_action(
+                                    pole_item_id
+                                )
+                                act_bld_po, pay_bld_po = mp_proxy.build_place_entity_action(
+                                    site.pole_x, site.pole_y, direction=0
+                                )
+
                                 for act, pay in (
-                                    (act_sm, pay_sm),
+                                    (act_clr, pay_clr),
                                     (act_pip_f, pay_pip_f),
                                     (act_bld_f, pay_bld_f),
                                     (act_clr, pay_clr),
                                     (act_sel_f, pay_sel_f),
                                     (act_pip_c, pay_pip_c),
-                                    (act_ft_in, pay_ft_in),
+                                    (act_fs_in, pay_fs_in),
                                     (act_clr, pay_clr),
                                     (act_sel_f, pay_sel_f),
                                     (act_pip_o, pay_pip_o),
                                     (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_pip_p, pay_pip_p),
+                                    (act_bld_p, pay_bld_p),
+                                    (act_clr, pay_clr),
+                                    (act_pip_b, pay_pip_b),
+                                    (act_bld_b, pay_bld_b),
+                                    (act_clr, pay_clr),
+                                    (act_sel_b, pay_sel_b),
+                                    (act_pip_c, pay_pip_c),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                    (act_pip_e, pay_pip_e),
+                                    (act_bld_e, pay_bld_e),
+                                    (act_clr, pay_clr),
+                                    (act_pip_po, pay_pip_po),
+                                    (act_bld_po, pay_bld_po),
                                     (act_clr, pay_clr),
                                 ):
                                     proxy.queue_action(act, player_index=0, payload=pay)
@@ -802,12 +996,12 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                 smelt_queued
                                 and not extract_and_craft_queued
                                 and proxy.pending_action_count() == 0
-                                and (now - smelt_started_at) >= 8.0
+                                and (now - smelt_started_at) >= 14.0
                             ):
                                 extract_and_craft_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
                                 act_sel_f, pay_sel_f = mp_proxy.build_selected_entity_action(
-                                    furnace_x, furnace_y
+                                    site.furnace_x, site.furnace_y
                                 )
                                 act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
                                     into_entity=False
@@ -824,28 +1018,80 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                                     proxy.queue_action(act, player_index=0, payload=pay)
                             elif (
                                 extract_and_craft_queued
-                                and not build_queued
+                                and not machine_feed_queued
                                 and proxy.pending_action_count() == 0
                                 and state.hand_crafted_count >= 1
+                                and state.inventory.get(plate_item_name, 0) >= 2
                             ):
-                                build_queued = True
-                                act_pip, pay_pip = mp_proxy.build_pipette_item_action(
+                                machine_feed_queued = True
+                                act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
+                                act_pip_a, pay_pip_a = mp_proxy.build_pipette_item_action(
                                     target_item_id
                                 )
-                                act_bld, pay_bld = mp_proxy.build_place_entity_action(
-                                    state.player_x + 2.5,
-                                    state.player_y,
-                                    direction=0,
+                                act_bld_a, pay_bld_a = mp_proxy.build_place_entity_action(
+                                    site.asm_x, site.asm_y, direction=0
                                 )
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_opn_a, pay_opn_a = mp_proxy.build_open_gui_action()
+                                act_set_a, pay_set_a = (
+                                    mp_proxy.build_setup_assembling_machine_action(
+                                        craft_recipe_id, quality_id=normal_quality_id
+                                    )
+                                )
+                                act_cls_a, pay_cls_a = mp_proxy.build_close_gui_action()
+                                act_pip_pl, pay_pip_pl = mp_proxy.build_pipette_item_action(
+                                    plate_item_id
+                                )
+                                act_ft_in, pay_ft_in = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=True
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_pip_a, pay_pip_a),
+                                    (act_bld_a, pay_bld_a),
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_opn_a, pay_opn_a),
+                                    (act_set_a, pay_set_a),
+                                    (act_cls_a, pay_cls_a),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_pip_pl, pay_pip_pl),
+                                    (act_ft_in, pay_ft_in),
+                                    (act_clr, pay_clr),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
+                            elif (
+                                machine_feed_queued
+                                and not machine_extract_queued
+                                and proxy.pending_action_count() == 0
+                                and state.machine_crafted_count >= 1
+                            ):
+                                machine_extract_queued = True
                                 act_clr, pay_clr = mp_proxy.build_clear_cursor_action()
-                                proxy.queue_action(act_pip, player_index=0, payload=pay_pip)
-                                proxy.queue_action(act_bld, player_index=0, payload=pay_bld)
-                                proxy.queue_action(act_clr, player_index=0, payload=pay_clr)
+                                act_sel_a, pay_sel_a = mp_proxy.build_selected_entity_action(
+                                    site.asm_x, site.asm_y
+                                )
+                                act_ft_out, pay_ft_out = mp_proxy.build_fast_entity_transfer_action(
+                                    into_entity=False
+                                )
+                                for act, pay in (
+                                    (act_clr, pay_clr),
+                                    (act_sel_a, pay_sel_a),
+                                    (act_ft_out, pay_ft_out),
+                                ):
+                                    proxy.queue_action(act, player_index=0, payload=pay)
 
                     if (
                         mined_ore >= 1
                         and last_state is not None
                         and last_state.hand_crafted_count >= 1
+                        and last_state.machine_crafted_count >= 1
+                        and last_state.steam_energy_generated > 0.0
+                        and last_state.inventory.get(craft_recipe_name, 0) >= 2
+                        and machine_extract_queued
+                        and proxy.pending_action_count() == 0
                         and target_ach_id in proxy.stats.client_emitted_achievement_ids
                         and target_ach_id in proxy.stats.server_broadcast_achievement_ids
                     ):
@@ -899,6 +1145,11 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Telemetry did not report a nearest mineral patch.\n"
                     f"Last state: {last_state}\nServer log:\n{server_log}",
                 )
+                self.assertIsNotNone(
+                    site,
+                    f"Telemetry did not report a shoreline site.\n"
+                    f"Last state: {last_state}\nServer log:\n{server_log}",
+                )
                 self.assertGreaterEqual(
                     mined_ore,
                     1,
@@ -914,6 +1165,29 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                     f"Bot did not smelt iron-plate and hand-craft {craft_recipe_name}.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}",
                 )
+                self.assertGreaterEqual(
+                    last_state.machine_crafted_count,
+                    1,
+                    f"Steam-powered assembling-machine-1 did not craft {craft_recipe_name}.\n"
+                    f"Stages: walk_stage={walk_stage}, mining_phase={mining_phase}, "
+                    f"shore_stage={shore_stage}, shore_arrived={shore_arrived}, "
+                    f"smelt_queued={smelt_queued}, extract_and_craft={extract_and_craft_queued}, "
+                    f"machine_feed={machine_feed_queued}, machine_extract={machine_extract_queued}\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}\n"
+                    f"Server log:\n{server_log[-3000:]}\nClient log:\n{client_log[-3000:]}",
+                )
+                self.assertGreater(
+                    last_state.steam_energy_generated,
+                    0.0,
+                    f"Steam-engine did not generate electricity on the lakeside electric network.\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}",
+                )
+                self.assertGreaterEqual(
+                    last_state.inventory.get(craft_recipe_name, 0),
+                    2,
+                    f"Bot did not extract machine-crafted {craft_recipe_name} into inventory.\n"
+                    f"Last state: {last_state}\nStats: {proxy.stats}",
+                )
                 self.assertLessEqual(
                     last_state.hand_crafted_count,
                     max_hand_crafts,
@@ -927,8 +1201,10 @@ class TestPodmanMpProxyIntegration(unittest.TestCase):
                 self.assertEqual(proxy.stats.blocked_hand_craft_actions, 0)
                 self.assertTrue(
                     success,
-                    f"Client did not naturally emit AchievementGained ({target_ach_name}={target_ach_id}) "
-                    f"after finding/mining {res_name}, smelting, hand-crafting, and Pipette+Build actions.\n"
+                    f"Client did not complete lakeside steam-powered factory flow and unlock "
+                    f"{target_ach_name}={target_ach_id} after finding/mining {res_name}, "
+                    f"walking to shoreline {site}, smelting, hand-crafting, and powering "
+                    f"assembling-machine-1 with steam-engine.\n"
                     f"Last state: {last_state}\nStats: {proxy.stats}\n"
                     f"Client log:\n{client_log}\nServer log:\n{server_log}",
                 )

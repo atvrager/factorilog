@@ -61,8 +61,10 @@ ACTION_NOTHING = 0x0000
 ACTION_STOP_WALKING = 0x0001
 ACTION_BEGIN_MINING = 0x0002
 ACTION_STOP_MINING = 0x0003
+ACTION_OPEN_GUI = 0x0005
 ACTION_SELECTED_ENTITY_CLEARED = 0x0009
-ACTION_CLEAR_CURSOR = 0x000A
+ACTION_CLEAR_CURSOR = 0x000B
+ACTION_CLOSE_GUI = 0x003D
 ACTION_BUILD = 0x0045
 ACTION_START_WALKING = 0x0046
 ACTION_BEGIN_MINING_TERRAIN = 0x0047
@@ -87,8 +89,10 @@ KNOWN_ACTION_PAYLOAD_SIZES: dict[int, int] = {
     ACTION_STOP_WALKING: 0,
     ACTION_BEGIN_MINING: 0,
     ACTION_STOP_MINING: 0,
+    ACTION_OPEN_GUI: 0,
     ACTION_SELECTED_ENTITY_CLEARED: 0,
     ACTION_CLEAR_CURSOR: 0,
+    ACTION_CLOSE_GUI: 2,
     ACTION_BUILD: 12,
     ACTION_START_WALKING: 16,
     ACTION_BEGIN_MINING_TERRAIN: 8,
@@ -275,6 +279,16 @@ def build_clear_cursor_action() -> tuple[int, bytes]:
     return ACTION_CLEAR_CURSOR, b""
 
 
+def build_open_gui_action() -> tuple[int, bytes]:
+    """Build OpenGui (0x0005) InputAction to open the currently selected entity GUI."""
+    return ACTION_OPEN_GUI, b""
+
+
+def build_close_gui_action(flags: int = 0, play_sound: bool = False) -> tuple[int, bytes]:
+    """Build CloseGui (0x003d) InputAction to close the currently opened GUI."""
+    return ACTION_CLOSE_GUI, struct.pack("<BB", flags & 0xFF, int(play_sound))
+
+
 def build_start_walking_action(dx: float, dy: float) -> tuple[int, bytes]:
     """Build StartWalking (0x0046) InputAction with 2D movement vector."""
     return ACTION_START_WALKING, struct.pack("<dd", dx, dy)
@@ -300,7 +314,7 @@ def build_craft_action(recipe_id: int, count: int = 1) -> tuple[int, bytes]:
     return ACTION_CRAFT, struct.pack("<HI", recipe_id & UINT16_MASK, count & UINT32_MASK)
 
 
-def build_setup_assembling_machine_action(recipe_id: int, quality_id: int = 0) -> tuple[int, bytes]:
+def build_setup_assembling_machine_action(recipe_id: int, quality_id: int = 1) -> tuple[int, bytes]:
     """Build SetupAssemblingMachine (0x0059) InputAction."""
     return ACTION_SETUP_ASSEMBLING_MACHINE, struct.pack(
         "<HB", recipe_id & UINT16_MASK, quality_id & 0xFF
@@ -381,6 +395,7 @@ def _try_parse_id_mapping_table(
     if num_types == 0 or num_types > 512:
         return None
 
+    uint8_id_types = {"quality", "item-group", "airborne-pollutant"}
     pos = start_pos + 2
     table: dict[str, dict[str, int]] = {}
     total_entries = 0
@@ -402,13 +417,14 @@ def _try_parse_id_mapping_table(
         if num_protos > 8192:
             return None
 
+        id_bytes = 1 if t_name in uint8_id_types else 2
         proto_map: dict[str, int] = {}
         for _ in range(num_protos):
             try:
                 p_len, pos = decode_uint32v(buf, pos)
             except ValueError:
                 return None
-            if p_len == 0 or p_len > 256 or pos + p_len + 2 > len(buf):
+            if p_len == 0 or p_len > 256 or pos + p_len + id_bytes > len(buf):
                 return None
             p_bytes = buf[pos : pos + p_len]
             if not all(32 <= b <= 126 for b in p_bytes):
@@ -416,8 +432,12 @@ def _try_parse_id_mapping_table(
             p_name = p_bytes.decode("utf-8", errors="strict")
             pos += p_len
 
-            (proto_id,) = struct.unpack_from("<H", buf, pos)
-            pos += 2
+            if id_bytes == 1:
+                proto_id = buf[pos]
+                pos += 1
+            else:
+                (proto_id,) = struct.unpack_from("<H", buf, pos)
+                pos += 2
             if proto_id == 0:
                 return None
             proto_map[p_name] = proto_id
@@ -475,6 +495,29 @@ class ResourcePatchTile:
 
 
 @dataclass(frozen=True)
+class ShorelineSite:
+    """Validated lakeside placement coordinates for an offshore-pump steam factory complex."""
+
+    pump_x: float
+    pump_y: float
+    pump_dir: int
+    boiler_x: float
+    boiler_y: float
+    boiler_dir: int
+    engine_x: float
+    engine_y: float
+    engine_dir: int
+    pole_x: float
+    pole_y: float
+    asm_x: float
+    asm_y: float
+    furnace_x: float
+    furnace_y: float
+    stand_x: float
+    stand_y: float
+
+
+@dataclass(frozen=True)
 class PlayerWorldState:
     """Snapshot of player position, activity, selection, inventory, and nearest resource."""
 
@@ -489,8 +532,11 @@ class PlayerWorldState:
     inventory: dict[str, int]
     nearest_resource: ResourcePatchTile | None
     resources_by_name: dict[str, ResourcePatchTile] = field(default_factory=dict)
+    shoreline_site: ShorelineSite | None = None
     crafting_queue_size: int = 0
     hand_crafted_count: int = 0
+    machine_crafted_count: int = 0
+    steam_energy_generated: float = 0.0
 
 
 def read_world_state(state_path: Path) -> PlayerWorldState | None:
@@ -548,6 +594,29 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
                     amount=int(rval.get("amount", 0)),
                 )
 
+    shore_raw = payload.get("shoreline_site")
+    shoreline_site: ShorelineSite | None = None
+    if isinstance(shore_raw, dict) and "pump_x" in shore_raw and "stand_x" in shore_raw:
+        shoreline_site = ShorelineSite(
+            pump_x=float(shore_raw["pump_x"]),
+            pump_y=float(shore_raw["pump_y"]),
+            pump_dir=int(shore_raw.get("pump_dir", 0)),
+            boiler_x=float(shore_raw["boiler_x"]),
+            boiler_y=float(shore_raw["boiler_y"]),
+            boiler_dir=int(shore_raw.get("boiler_dir", 0)),
+            engine_x=float(shore_raw["engine_x"]),
+            engine_y=float(shore_raw["engine_y"]),
+            engine_dir=int(shore_raw.get("engine_dir", 0)),
+            pole_x=float(shore_raw["pole_x"]),
+            pole_y=float(shore_raw["pole_y"]),
+            asm_x=float(shore_raw["asm_x"]),
+            asm_y=float(shore_raw["asm_y"]),
+            furnace_x=float(shore_raw["furnace_x"]),
+            furnace_y=float(shore_raw["furnace_y"]),
+            stand_x=float(shore_raw["stand_x"]),
+            stand_y=float(shore_raw["stand_y"]),
+        )
+
     return PlayerWorldState(
         tick=int(payload.get("tick", 0)),
         player_x=float(player.get("x", 0.0)),
@@ -560,8 +629,11 @@ def read_world_state(state_path: Path) -> PlayerWorldState | None:
         inventory=inventory,
         nearest_resource=nearest,
         resources_by_name=resources_by_name,
+        shoreline_site=shoreline_site,
         crafting_queue_size=int(player.get("crafting_queue_size", 0)),
         hand_crafted_count=int(player.get("hand_crafted_count", 0)),
+        machine_crafted_count=int(player.get("machine_crafted_count", 0)),
+        steam_energy_generated=float(player.get("steam_energy_generated", 0.0)),
     )
 
 
@@ -673,6 +745,112 @@ def augment_save_freeplay_created_items(
             "      else\n"
             "        storage.nearest_resource.amount = storage.nearest_resource_entity.amount\n"
             "      end\n"
+            "      if storage.nearest_resource and not storage.shoreline_site then\n"
+            "        local ref_x = storage.nearest_resource.x\n"
+            "        local ref_y = storage.nearest_resource.y\n"
+            "        local ix0 = math.floor(ref_x)\n"
+            "        local iy0 = math.floor(ref_y)\n"
+            "        local best_site = nil\n"
+            "        local best_d2 = 1e18\n"
+            "        local rot = function(dx, dy, d)\n"
+            "          if d == 0 then return dx, dy\n"
+            "          elseif d == 1 then return -dy, dx\n"
+            "          elseif d == 2 then return -dx, -dy\n"
+            "          else return dy, -dx end\n"
+            "        end\n"
+            "        for dy_i = -96, 96 do\n"
+            "          for dx_i = -96, 96 do\n"
+            "            local d2 = dx_i * dx_i + dy_i * dy_i\n"
+            "            if d2 < best_d2 then\n"
+            "              local px = ix0 + dx_i + 0.5\n"
+            "              local py = iy0 + dy_i + 0.5\n"
+            "              for d = 0, 3 do\n"
+            "                local p_dir = (d * 4) % 16\n"
+            "                local w_dx, w_dy = rot(0.0, -1.5, d)\n"
+            "                local g_dx, g_dy = rot(0.0, 0.0, d)\n"
+            "                local wt = p.surface.get_tile(px + w_dx, py + w_dy)\n"
+            "                local gt = p.surface.get_tile(px + g_dx, py + g_dy)\n"
+            "                if wt and wt.valid and wt.collides_with('water_tile')\n"
+            "                  and gt and gt.valid and gt.collides_with('ground_tile')\n"
+            "                  and not gt.collides_with('water_tile')\n"
+            "                  and p.surface.can_place_entity({name = 'offshore-pump', position = {px, py}, direction = p_dir, force = p.force, build_check_type = defines.build_check_type.manual}) then\n"
+            "                  local b_dir = ((d + 1) * 4) % 16\n"
+            "                  local b_dx, b_dy = rot(0.5, 2.0, d)\n"
+            "                  local e_dx, e_dy = rot(4.0, 2.0, d)\n"
+            "                  local po_dx, po_dy = rot(2.0, 4.0, d)\n"
+            "                  local a_dx, a_dy = rot(2.0, 6.0, d)\n"
+            "                  local f_dx, f_dy = rot(-2.5, 5.5, d)\n"
+            "                  local s_dx, s_dy = rot(-1.5, 3.0, d)\n"
+            "                  local bx, by = px + b_dx, py + b_dy\n"
+            "                  local ex, ey = px + e_dx, py + e_dy\n"
+            "                  local pox, poy = px + po_dx, py + po_dy\n"
+            "                  local ax, ay = px + a_dx, py + a_dy\n"
+            "                  local fx, fy = px + f_dx, py + f_dy\n"
+            "                  local sx, sy = px + s_dx, py + s_dy\n"
+            "                  if p.surface.can_place_entity({name = 'boiler', position = {bx, by}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'steam-engine', position = {ex, ey}, direction = b_dir, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'small-electric-pole', position = {pox, poy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'assembling-machine-1', position = {ax, ay}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'stone-furnace', position = {fx, fy}, direction = 0, force = p.force, build_check_type = defines.build_check_type.manual})\n"
+            "                    and p.surface.can_place_entity({name = 'character', position = {sx, sy}, force = p.force}) then\n"
+            "                    local clear_path = true\n"
+            "                    local steps_x = math.max(1, math.ceil(math.abs(sx - ref_x)))\n"
+            "                    for i = 0, steps_x do\n"
+            "                      local tx = ref_x + (sx - ref_x) * (i / steps_x)\n"
+            "                      local tt = p.surface.get_tile(tx, ref_y)\n"
+            "                      if not tt or not tt.valid or tt.collides_with('water_tile') then clear_path = false break end\n"
+            "                    end\n"
+            "                    local steps_y = math.max(1, math.ceil(math.abs(sy - ref_y)))\n"
+            "                    if clear_path then\n"
+            "                      for i = 0, steps_y do\n"
+            "                        local ty = ref_y + (sy - ref_y) * (i / steps_y)\n"
+            "                        local tt = p.surface.get_tile(sx, ty)\n"
+            "                        if not tt or not tt.valid or tt.collides_with('water_tile') then clear_path = false break end\n"
+            "                      end\n"
+            "                    end\n"
+            "                    if clear_path then\n"
+            "                      best_d2 = d2\n"
+            "                      best_site = {\n"
+            "                        pump_x = px, pump_y = py, pump_dir = p_dir,\n"
+            "                        boiler_x = bx, boiler_y = by, boiler_dir = b_dir,\n"
+            "                        engine_x = ex, engine_y = ey, engine_dir = b_dir,\n"
+            "                        pole_x = pox, pole_y = poy,\n"
+            "                        asm_x = ax, asm_y = ay,\n"
+            "                        furnace_x = fx, furnace_y = fy,\n"
+            "                        stand_x = sx, stand_y = sy\n"
+            "                      }\n"
+            "                      break\n"
+            "                    end\n"
+            "                  end\n"
+            "                end\n"
+            "              end\n"
+            "            end\n"
+            "          end\n"
+            "        end\n"
+            "        if best_site then\n"
+            "          storage.shoreline_site = best_site\n"
+            "          local min_x = math.min(ref_x, best_site.stand_x) - 10\n"
+            "          local max_x = math.max(ref_x, best_site.stand_x) + 10\n"
+            "          local min_y = math.min(ref_y, best_site.stand_y) - 10\n"
+            "          local max_y = math.max(ref_y, best_site.stand_y) + 10\n"
+            "          local obs = p.surface.find_entities_filtered({type = {'tree', 'simple-entity'}, area = {{min_x, min_y}, {max_x, max_y}}})\n"
+            "          for _, o in ipairs(obs) do o.destroy() end\n"
+            "        end\n"
+            "      end\n"
+            "      local mc_count = 0\n"
+            "      local asms = p.surface.find_entities_filtered({name = 'assembling-machine-1', force = p.force})\n"
+            "      for _, am in ipairs(asms) do\n"
+            "        mc_count = mc_count + (am.products_finished or 0)\n"
+            "      end\n"
+            "      local steam_energy = 0\n"
+            "      local poles = p.surface.find_entities_filtered({type = 'electric-pole', force = p.force})\n"
+            "      for _, pole in ipairs(poles) do\n"
+            "        local stats = pole.electric_network_statistics\n"
+            "        if stats then\n"
+            "          local val = stats.get_output_count('steam-engine')\n"
+            "          if val and val > steam_energy then steam_energy = val end\n"
+            "        end\n"
+            "      end\n"
             "      local sel = nil\n"
             "      if p.selected and p.selected.valid then\n"
             "        sel = {\n"
@@ -691,10 +869,13 @@ def augment_save_freeplay_created_items(
             "          selected = sel,\n"
             "          inventory = contents,\n"
             "          crafting_queue_size = p.crafting_queue_size,\n"
-            "          hand_crafted_count = storage.hand_crafted_count or 0\n"
+            "          hand_crafted_count = storage.hand_crafted_count or 0,\n"
+            "          machine_crafted_count = mc_count,\n"
+            "          steam_energy_generated = steam_energy\n"
             "        },\n"
             "        nearest_resource = storage.nearest_resource,\n"
-            "        resources_by_name = storage.resources_by_name or {}\n"
+            "        resources_by_name = storage.resources_by_name or {},\n"
+            "        shoreline_site = storage.shoreline_site\n"
             "      }\n"
             "      helpers.write_file('factorilog_state.json', helpers.table_to_json(state) .. '\\n', false)\n"
             "    end"
