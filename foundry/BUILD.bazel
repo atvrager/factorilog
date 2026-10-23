@@ -55,6 +55,7 @@ py_library(
         "blueprint.py",
         "bp2save.py",
         "campaign/__init__.py",
+        "campaign/bot_agent.py",
         "campaign/cartographer.py",
         "chassis.py",
         "channel_router.py",

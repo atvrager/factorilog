@@ -142,6 +142,25 @@ def main() -> int:
             if base_entries:
                 proto[key] = base_entries
 
+    # Keep core character reach and movement parameters without animation sprites.
+    char_table = raw.get("character", {})
+    if isinstance(char_table, dict) and "character" in char_table:
+        char_src = char_table["character"]
+        if isinstance(char_src, dict):
+            kept_char_keys = (
+                "name",
+                "type",
+                "build_distance",
+                "reach_distance",
+                "reach_resource_distance",
+                "drop_item_distance",
+                "running_speed",
+                "collision_box",
+            )
+            proto["character"] = {
+                "character": {k: char_src[k] for k in kept_char_keys if k in char_src}
+            }
+
     Path(out).write_text(json.dumps(proto))
     print(
         f"fixture: {out} {Path(out).stat().st_size / BYTES_PER_KIB:.0f} KiB, "

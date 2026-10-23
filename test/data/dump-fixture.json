@@ -76890,5 +76890,26 @@
         "width": 64
       }
     }
+  },
+  "character": {
+    "character": {
+      "name": "character",
+      "type": "character",
+      "build_distance": 10,
+      "reach_distance": 10,
+      "reach_resource_distance": 2.70000000000000017763568394002504646778106689453125,
+      "drop_item_distance": 10,
+      "running_speed": 0.15,
+      "collision_box": [
+        [
+          -0.2,
+          -0.2
+        ],
+        [
+          0.2,
+          0.2
+        ]
+      ]
+    }
   }
 }
