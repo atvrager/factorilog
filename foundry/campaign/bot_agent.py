@@ -9,6 +9,7 @@ All docstrings and comments follow Simplified Technical English (ASD-STE100).
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,9 +23,11 @@ from foundry.mp_proxy import (
     FactorioLockstepProxy,
     PlacedSurfaceEntity,
     PlayerWorldState,
+    ShorelineSite,
     build_begin_mining_action,
     build_clear_cursor_action,
     build_close_gui_action,
+    build_craft_action,
     build_fast_entity_split_action,
     build_fast_entity_transfer_action,
     build_open_gui_action,
@@ -32,15 +35,20 @@ from foundry.mp_proxy import (
     build_place_entity_action,
     build_selected_entity_action,
     build_setup_assembling_machine_action,
+    build_start_research_action,
     build_start_walking_action,
     build_stop_mining_action,
     build_stop_walking_action,
 )
 from foundry.native_engine.engine import FactorioNativeEngine
 from foundry.patch_router import (
+    CARDINAL_DIRS,
+    DIR_STEPS,
     MapSurfaceSpec,
     PatchToBaseResult,
     TileCoord,
+    _bootstrap_shoreline_footprint,
+    _rotate_offset,
     resolve_tech_tier,
     route_patch_to_base,
 )
@@ -55,10 +63,10 @@ PHASE_STARTER_BASE_CORE = "starter_base_core"
 ALL_BUILD_PHASES: tuple[str, ...] = (
     PHASE_CLEAR_OBSTACLES,
     PHASE_SHORELINE_POWER,
-    PHASE_PATCH_MINERS,
     PHASE_POWER_NETWORK,
-    PHASE_TRUNK_BELTS,
+    PHASE_PATCH_MINERS,
     PHASE_STARTER_BASE_CORE,
+    PHASE_TRUNK_BELTS,
 )
 
 TASK_CLEAR_OBSTACLE = "clear_obstacle"
@@ -567,6 +575,14 @@ def compile_starter_base_tasks(
     tasks: list[BotBuildTask] = []
     cur_pos = initial_pos
     placed_tiles: set[TileCoord] = set(surface.obstacles)
+    for ent in layout.power_array.entities:
+        if ent["name"] == "offshore-pump":
+            pos = ent["position"]
+            px_pos, py_pos = float(pos["x"]), float(pos["y"])
+            p_dir = int(ent.get("direction", DIRECTION_NORTH))
+            placed_tiles.update(_bootstrap_shoreline_footprint(px_pos, py_pos, p_dir))
+            s_dx, s_dy = _rotate_offset(-0.5, 4.5, p_dir)
+            placed_tiles.discard((math.floor(px_pos + s_dx), math.floor(py_pos + s_dy)))
 
     # Phase 0: Pre-clear clearable obstacles (trees/rocks/unlocked cliffs) on planned footprints
     for obs in obstacles_to_clear:
@@ -690,13 +706,23 @@ def compile_starter_base_tasks(
     for ent in power_ents:
         _schedule_entity(ent, PHASE_SHORELINE_POWER)
 
-    # Phase 2: Resource patch miner arrays (fuel patch first, then nearest patch)
+    # Phase 2: Power distribution network (poles ordered by nearest-neighbor from cur_pos)
+    pole_ents = [
+        ent
+        for ent in layout.entities
+        if _entity_pos_key(ent) not in scheduled_positions and "pole" in str(ent["name"])
+    ]
+    _schedule_nn(pole_ents, PHASE_POWER_NETWORK)
+
+    # Phase 3: Resource patch miner arrays (fuel patch first, then iron-ore, then copper-ore)
     remaining_patches = list(layout.patch_arrays.keys())
     while remaining_patches:
         best_p_idx = min(
             range(len(remaining_patches)),
             key=lambda idx: (
-                0 if remaining_patches[idx] == fuel_commodity else 1,
+                0
+                if remaining_patches[idx] == fuel_commodity
+                else (1 if remaining_patches[idx] == "iron-ore" else 2),
                 math.hypot(
                     float(layout.patch_arrays[remaining_patches[idx]].entities[0]["position"]["x"])
                     - cur_pos[0],
@@ -713,21 +739,28 @@ def compile_starter_base_tasks(
         for ent in p_ents:
             _schedule_entity(ent, PHASE_PATCH_MINERS)
 
-    # Phase 3: Power distribution network (poles ordered by nearest-neighbor from cur_pos)
-    pole_ents = [
-        ent
-        for ent in layout.entities
-        if _entity_pos_key(ent) not in scheduled_positions and "pole" in str(ent["name"])
-    ]
-    _schedule_nn(pole_ents, PHASE_POWER_NETWORK)
+    # Phase 4: Starter base core (furnaces, assemblers + recipes, lab, belts, inserters)
+    core_ents = sorted(layout.base_core.entities, key=_base_core_entity_sort_key)
+    for rank_group in range(6):
+        grp = [e for e in core_ents if _base_core_entity_sort_key(e)[0] == rank_group]
+        _schedule_nn(grp, PHASE_STARTER_BASE_CORE)
 
-    # Phase 4: Trunk belts (boiler fuel trunk first, then nearest trunk route)
+    # Phase 5: Trunk belts in dependency order (boiler fuel -> base fuel -> iron-ore -> copper-ore)
+    def _trunk_priority(net_name: str) -> int:
+        if "boiler" in net_name:
+            return 0
+        if fuel_commodity in net_name:
+            return 1
+        if "iron-ore" in net_name:
+            return 2
+        return 3
+
     remaining_trunks = list(layout.trunk_routes.keys())
     while remaining_trunks:
         best_t_idx = min(
             range(len(remaining_trunks)),
             key=lambda idx: (
-                0 if "boiler" in remaining_trunks[idx] else 1,
+                _trunk_priority(remaining_trunks[idx]),
                 min(
                     (
                         math.hypot(node.x - cur_pos[0], node.y - cur_pos[1])
@@ -752,15 +785,9 @@ def compile_starter_base_tasks(
             grp = [e for e in route_ents if _trunk_entity_sort_key(e)[0] == rank_group]
             _schedule_nn(grp, PHASE_TRUNK_BELTS)
 
-    # Phase 5: Starter base core (furnaces, assemblers + recipes, lab, belts, inserters)
-    core_ents = sorted(layout.base_core.entities, key=_base_core_entity_sort_key)
-    for rank_group in range(6):
-        grp = [e for e in core_ents if _base_core_entity_sort_key(e)[0] == rank_group]
-        _schedule_nn(grp, PHASE_STARTER_BASE_CORE)
-
     # Schedule any remaining unscheduled entities from layout.entities
     rem_ents = [ent for ent in layout.entities if _entity_pos_key(ent) not in scheduled_positions]
-    _schedule_nn(rem_ents, PHASE_STARTER_BASE_CORE)
+    _schedule_nn(rem_ents, PHASE_TRUNK_BELTS)
 
     return tasks
 
@@ -798,8 +825,64 @@ def plan_starter_base_from_cartographer(
         verify=verify,
     )
 
+    smelter_dummy_entities: list[dict[str, Any]] = []
+    iron_pa = layout.patch_arrays.get("iron-ore")
+    if iron_pa is not None:
+        for ent in iron_pa.entities:
+            if ent["name"] == tier.drill_name:
+                pos = ent["position"]
+                dx_pos, dy_pos = float(pos["x"]), float(pos["y"])
+                d_dir = int(ent.get("direction", DIRECTION_NORTH))
+                step_x, step_y = DIR_STEPS[d_dir]
+                sm_x = dx_pos + 2.5 * step_x + (0.5 if step_x == 0 else 0.0)
+                sm_y = dy_pos + 2.5 * step_y + (0.5 if step_y == 0 else 0.0)
+                smelter_dummy_entities.append(
+                    {
+                        "name": tier.furnace_name,
+                        "position": {"x": sm_x, "y": sm_y},
+                        "direction": DIRECTION_NORTH,
+                    }
+                )
+
+    for ent in layout.power_array.entities:
+        if ent["name"] == tier.pump_name:
+            pos = ent["position"]
+            px_pos, py_pos = float(pos["x"]), float(pos["y"])
+            p_dir = int(ent.get("direction", DIRECTION_NORTH))
+            po_dx, po_dy = _rotate_offset(2.0, 4.0, p_dir)
+            a_dx, a_dy = _rotate_offset(2.0, 6.0, p_dir)
+            l_dx, l_dy = _rotate_offset(5.0, 5.5, p_dir)
+            smelter_dummy_entities.extend(
+                [
+                    {
+                        "name": tier.pole_name,
+                        "position": {"x": px_pos + po_dx, "y": py_pos + po_dy},
+                        "direction": DIRECTION_NORTH,
+                    },
+                    {
+                        "name": tier.assembler_name,
+                        "position": {"x": px_pos + a_dx, "y": py_pos + a_dy},
+                        "direction": DIRECTION_NORTH,
+                    },
+                    {
+                        "name": "lab",
+                        "position": {"x": px_pos + l_dx, "y": py_pos + l_dy},
+                        "direction": DIRECTION_NORTH,
+                    },
+                ]
+            )
+            for fy_off in (2.0, 4.0, 6.0, 8.0):
+                f_dx, f_dy = _rotate_offset(-4.5, fy_off, p_dir)
+                smelter_dummy_entities.append(
+                    {
+                        "name": tier.furnace_name,
+                        "position": {"x": px_pos + f_dx, "y": py_pos + f_dy},
+                        "direction": DIRECTION_NORTH,
+                    }
+                )
+
     obstacles_to_clear = cartographer.obstacles_to_clear_for_entities(
-        entities=layout.entities,
+        entities=[*layout.entities, *smelter_dummy_entities],
         researched_techs=tech_set,
         reference_pos=reference_pos,
     )
@@ -888,12 +971,13 @@ def encode_task_input_actions(
         if task.target_name not in item_map:
             raise KeyError(f"Item prototype '{task.target_name}' not found in id_mappings['item']")
         item_id = int(item_map[task.target_name])
+        build_dir = (task.direction + 8) % 16 if task.entity_type == "output" else task.direction
         actions: list[tuple[int, bytes]] = [
             build_pipette_item_action(item_id),
             build_place_entity_action(
                 task.target_x,
                 task.target_y,
-                direction=task.direction,
+                direction=build_dir,
             ),
             build_clear_cursor_action(),
         ]
@@ -938,27 +1022,425 @@ def encode_task_input_actions(
     raise ValueError(f"Unsupported task_kind: {task.task_kind!r}")
 
 
+WALKABLE_ENTITY_NAMES: frozenset[str] = frozenset(
+    {
+        "transport-belt",
+        "fast-transport-belt",
+        "express-transport-belt",
+    }
+)
+
+DIAG_UNIT: float = math.sqrt(0.5)
+OCTANT_TAN_THRESHOLD: float = math.sqrt(2.0) - 1.0
+WAYPOINT_PASS_TOLERANCE: float = 0.55
+APPROACH_SLOW_RADIUS: float = 1.25
+MIN_WALK_SCALE: float = 0.25
+STUCK_TICKS_THRESHOLD: int = 18
+
+CARDINAL_AND_DIAGONAL_STEPS: tuple[tuple[int, int, float], ...] = (
+    (1, 0, 1.0),
+    (-1, 0, 1.0),
+    (0, 1, 1.0),
+    (0, -1, 1.0),
+    (1, 1, math.sqrt(2.0)),
+    (1, -1, math.sqrt(2.0)),
+    (-1, 1, math.sqrt(2.0)),
+    (-1, -1, math.sqrt(2.0)),
+)
+
+
+def build_character_blocked_tiles(
+    cartographer: MapCartographer | None = None,
+    placed_entities: Sequence[PlacedSurfaceEntity | Mapping[str, Any]] = (),
+    data: solve.Data | None = None,
+    extra_blocked: set[TileCoord] | None = None,
+    start_pos: tuple[float, float] | None = None,
+    goal_pos: tuple[float, float] | None = None,
+) -> set[TileCoord]:
+    """Build the set of blocked 2D integer tiles for character navigation."""
+    blocked: set[TileCoord] = set()
+    if cartographer is not None:
+        blocked.update(cartographer.water_tiles)
+        for obs in cartographer.obstacles:
+            blocked.update(obs.occupied_tiles)
+    if extra_blocked is not None:
+        blocked.update(extra_blocked)
+
+    if data is not None:
+        register_prototype_boxes(data.prototypes)
+
+    for raw in placed_entities:
+        if isinstance(raw, Mapping):
+            name = str(raw.get("name", ""))
+            pos = raw.get("position")
+            if isinstance(pos, Mapping):
+                ex = float(pos["x"])
+                ey = float(pos["y"])
+            else:
+                ex = float(raw.get("x", 0.0))
+                ey = float(raw.get("y", 0.0))
+            ed = int(raw.get("direction", DIRECTION_NORTH))
+        else:
+            name = raw.name
+            ex = raw.x
+            ey = raw.y
+            ed = raw.direction
+        if not name or name in WALKABLE_ENTITY_NAMES:
+            continue
+        if data is not None:
+            try:
+                w_f, h_f = entity_size(name, ed)
+                w, h = max(1, int(w_f)), max(1, int(h_f))
+                x0 = math.floor(ex - w / HALF_DIVISOR + BOX_EPSILON)
+                y0 = math.floor(ey - h / HALF_DIVISOR + BOX_EPSILON)
+                for dx in range(w):
+                    for dy in range(h):
+                        blocked.add((x0 + dx, y0 + dy))
+                continue
+            except KeyError:
+                pass
+        blocked.add((math.floor(ex), math.floor(ey)))
+
+    if start_pos is not None:
+        blocked.discard((math.floor(start_pos[0]), math.floor(start_pos[1])))
+    if goal_pos is not None:
+        blocked.discard((math.floor(goal_pos[0]), math.floor(goal_pos[1])))
+    return blocked
+
+
+def _octile_heuristic(tile_a: TileCoord, tile_b: TileCoord) -> float:
+    """Compute the 8-way octile distance between two tile coordinates."""
+    dx = abs(tile_a[0] - tile_b[0])
+    dy = abs(tile_a[1] - tile_b[1])
+    return max(dx, dy) + OCTANT_TAN_THRESHOLD * min(dx, dy)
+
+
+def find_character_walk_path(
+    start_x: float,
+    start_y: float,
+    goal_x: float,
+    goal_y: float,
+    blocked_tiles: set[TileCoord] | frozenset[TileCoord] = frozenset(),
+    max_expansions: int = 8192,
+) -> list[tuple[float, float]]:
+    """Find a collision-free 8-way waypoint path from (start_x, start_y) to (goal_x, goal_y)."""
+    start_tile: TileCoord = (math.floor(start_x), math.floor(start_y))
+    goal_tile: TileCoord = (math.floor(goal_x), math.floor(goal_y))
+    final_pt = (round(goal_x, COORD_ROUND_DIGITS), round(goal_y, COORD_ROUND_DIGITS))
+    if start_tile == goal_tile:
+        return [final_pt]
+
+    g_score: dict[TileCoord, float] = {start_tile: 0.0}
+    came_from: dict[TileCoord, TileCoord] = {}
+    open_heap: list[tuple[float, float, TileCoord]] = [
+        (_octile_heuristic(start_tile, goal_tile), 0.0, start_tile)
+    ]
+    closed: set[TileCoord] = set()
+
+    best_tile = start_tile
+    best_h = _octile_heuristic(start_tile, goal_tile)
+    expansions = 0
+
+    while open_heap and expansions < max_expansions:
+        _f, cur_g, cur = heapq.heappop(open_heap)
+        if cur in closed:
+            continue
+        closed.add(cur)
+        expansions += 1
+
+        if cur == goal_tile:
+            best_tile = cur
+            break
+
+        cur_h = _octile_heuristic(cur, goal_tile)
+        if cur_h < best_h:
+            best_h = cur_h
+            best_tile = cur
+
+        cx, cy = cur
+        for dx, dy, step_cost in CARDINAL_AND_DIAGONAL_STEPS:
+            nx, ny = cx + dx, cy + dy
+            nxt = (nx, ny)
+            if nxt in closed:
+                continue
+            if nxt != goal_tile and nxt in blocked_tiles:
+                continue
+            # Prevent diagonal corner-cutting across blocked cardinal neighbors
+            if (
+                dx != 0
+                and dy != 0
+                and ((cx + dx, cy) in blocked_tiles or (cx, cy + dy) in blocked_tiles)
+            ):
+                continue
+            tentative_g = cur_g + step_cost
+            if tentative_g < g_score.get(nxt, float("inf")):
+                g_score[nxt] = tentative_g
+                came_from[nxt] = cur
+                f_val = tentative_g + _octile_heuristic(nxt, goal_tile)
+                heapq.heappush(open_heap, (f_val, tentative_g, nxt))
+
+    target_tile = goal_tile if goal_tile in came_from else best_tile
+    if target_tile == start_tile:
+        return [final_pt]
+
+    rev_tiles: list[TileCoord] = [target_tile]
+    cur_t = target_tile
+    while cur_t in came_from:
+        cur_t = came_from[cur_t]
+        rev_tiles.append(cur_t)
+    tiles = list(reversed(rev_tiles))
+
+    # Compress colinear 8-way segments into turning-point waypoints
+    waypoints: list[tuple[float, float]] = []
+    for idx in range(1, len(tiles) - 1):
+        prev_t = tiles[idx - 1]
+        curr_t = tiles[idx]
+        next_t = tiles[idx + 1]
+        dir1 = (curr_t[0] - prev_t[0], curr_t[1] - prev_t[1])
+        dir2 = (next_t[0] - curr_t[0], next_t[1] - curr_t[1])
+        if dir1 != dir2:
+            waypoints.append((curr_t[0] + TILE_CENTER_OFFSET, curr_t[1] + TILE_CENTER_OFFSET))
+
+    if target_tile == goal_tile:
+        waypoints.append(final_pt)
+    else:
+        waypoints.append((target_tile[0] + TILE_CENTER_OFFSET, target_tile[1] + TILE_CENTER_OFFSET))
+    return waypoints
+
+
 def compute_8way_walk_vector(
     player_x: float,
     player_y: float,
     target_x: float,
     target_y: float,
     stop_tolerance: float = DEFAULT_STOP_TOLERANCE,
+    scale_near_target: bool = False,
 ) -> tuple[float, float] | None:
-    """Compute a unit cardinal walking vector toward (target_x, target_y), or None if within tolerance."""
+    """Compute an 8-way walking vector toward (target_x, target_y), or None if within tolerance."""
     dx = target_x - player_x
     dy = target_y - player_y
     dist = math.hypot(dx, dy)
     if dist <= stop_tolerance:
         return None
-    axis_tol = stop_tolerance * CARDINAL_AXIS_RATIO
-    if abs(dx) > axis_tol:
-        return (1.0 if dx > 0.0 else -1.0, 0.0)
-    if abs(dy) > axis_tol:
-        return (0.0, 1.0 if dy > 0.0 else -1.0)
-    if abs(dx) >= abs(dy):
-        return (1.0 if dx > 0.0 else -1.0, 0.0)
-    return (0.0, 1.0 if dy > 0.0 else -1.0)
+
+    if abs(dy) <= abs(dx) * OCTANT_TAN_THRESHOLD:
+        ux, uy = (1.0 if dx > 0.0 else -1.0), 0.0
+    elif abs(dx) <= abs(dy) * OCTANT_TAN_THRESHOLD:
+        ux, uy = 0.0, (1.0 if dy > 0.0 else -1.0)
+    else:
+        ux = DIAG_UNIT if dx > 0.0 else -DIAG_UNIT
+        uy = DIAG_UNIT if dy > 0.0 else -DIAG_UNIT
+
+    if scale_near_target and dist < stop_tolerance + APPROACH_SLOW_RADIUS:
+        scale = max(
+            MIN_WALK_SCALE,
+            min(1.0, (dist - stop_tolerance * 0.5) / APPROACH_SLOW_RADIUS),
+        )
+        return (round(ux * scale, 4), round(uy * scale, 4))
+    return (round(ux, 4), round(uy, 4))
+
+
+class CharacterNavigator:
+    """Zero-inertia 8-way character movement controller backed by 2D A* pathfinding."""
+
+    def __init__(self) -> None:
+        self.goal: tuple[float, float] | None = None
+        self.waypoints: list[tuple[float, float]] = []
+        self.dynamic_blocked_tiles: set[TileCoord] = set()
+        self._last_walk_vec: tuple[float, float] | None = None
+        self._last_walk_tick: int = -1000
+        self._last_pos: tuple[float, float] | None = None
+        self._stuck_ticks: int = 0
+        self._stuck_retries: int = 0
+
+    def reset(self) -> None:
+        """Reset current path and walking state."""
+        self.goal = None
+        self.waypoints.clear()
+        self._last_walk_vec = None
+        self._last_pos = None
+        self._stuck_ticks = 0
+        self._stuck_retries = 0
+
+    def stop(
+        self,
+        proxy: FactorioLockstepProxy,
+        world_state: PlayerWorldState,
+        player_index: int = 0,
+    ) -> None:
+        """Queue a single StopWalking action if the character is walking."""
+        if world_state.walking or self._last_walk_vec is not None:
+            act_type, payload = build_stop_walking_action()
+            proxy.queue_action(act_type, player_index, payload)
+        self.reset()
+
+    def step(
+        self,
+        proxy: FactorioLockstepProxy,
+        world_state: PlayerWorldState,
+        target_x: float,
+        target_y: float,
+        stop_tolerance: float = DEFAULT_STOP_TOLERANCE,
+        cartographer: MapCartographer | None = None,
+        data: solve.Data | None = None,
+        player_index: int = 0,
+    ) -> bool:
+        """Advance character navigation toward (target_x, target_y). Return True on arrival."""
+        px = world_state.player_x
+        py = world_state.player_y
+        dist_to_goal = math.hypot(target_x - px, target_y - py)
+        if dist_to_goal <= stop_tolerance:
+            self.stop(proxy, world_state, player_index=player_index)
+            return True
+
+        goal_key = (round(target_x, COORD_ROUND_DIGITS), round(target_y, COORD_ROUND_DIGITS))
+        if self.goal != goal_key or not self.waypoints:
+            blocked = build_character_blocked_tiles(
+                cartographer=cartographer,
+                placed_entities=world_state.placed_entities,
+                data=data,
+                extra_blocked=self.dynamic_blocked_tiles,
+                start_pos=(px, py),
+                goal_pos=goal_key,
+            )
+            self.waypoints = find_character_walk_path(
+                start_x=px,
+                start_y=py,
+                goal_x=target_x,
+                goal_y=target_y,
+                blocked_tiles=blocked,
+            )
+            self.goal = goal_key
+            self._stuck_ticks = 0
+
+        wp_pass_tol = max(WAYPOINT_PASS_TOLERANCE, min(stop_tolerance, 0.85))
+        while (
+            len(self.waypoints) > 1
+            and math.hypot(self.waypoints[0][0] - px, self.waypoints[0][1] - py) <= wp_pass_tol
+        ):
+            self.waypoints.pop(0)
+
+        wx, wy = self.waypoints[0]
+        is_final_wp = len(self.waypoints) == 1
+        cur_tol = stop_tolerance if is_final_wp else WAYPOINT_PASS_TOLERANCE
+        walk_vec = compute_8way_walk_vector(
+            player_x=px,
+            player_y=py,
+            target_x=wx,
+            target_y=wy,
+            stop_tolerance=cur_tol,
+            scale_near_target=is_final_wp,
+        )
+        if walk_vec is None:
+            if is_final_wp:
+                self.stop(proxy, world_state, player_index=player_index)
+                return True
+            self.waypoints.pop(0)
+            wx, wy = self.waypoints[0]
+            walk_vec = compute_8way_walk_vector(
+                player_x=px,
+                player_y=py,
+                target_x=wx,
+                target_y=wy,
+                stop_tolerance=stop_tolerance,
+                scale_near_target=True,
+            )
+            if walk_vec is None:
+                self.stop(proxy, world_state, player_index=player_index)
+                return True
+
+        reissue_due = (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
+        stuck_blocked = False
+        if reissue_due and self._last_pos is not None:
+            moved_dist = math.hypot(px - self._last_pos[0], py - self._last_pos[1])
+            if moved_dist < 0.15:
+                self._stuck_ticks += max(1, world_state.tick - self._last_walk_tick)
+                if self._stuck_ticks >= STUCK_TICKS_THRESHOLD:
+                    stuck_blocked = True
+            else:
+                self._stuck_ticks = 0
+                self._stuck_retries = 0
+
+        if stuck_blocked:
+            self._stuck_retries += 1
+            self._stuck_ticks = 0
+            if self._last_walk_vec is not None:
+                ahead_tile = (
+                    math.floor(px + self._last_walk_vec[0] * 0.9),
+                    math.floor(py + self._last_walk_vec[1] * 0.9),
+                )
+                if ahead_tile != (math.floor(px), math.floor(py)):
+                    self.dynamic_blocked_tiles.add(ahead_tile)
+                if self._stuck_retries >= 4:
+                    self.dynamic_blocked_tiles.clear()
+                    self._stuck_retries = 0
+            blocked = build_character_blocked_tiles(
+                cartographer=cartographer,
+                placed_entities=world_state.placed_entities,
+                data=data,
+                extra_blocked=self.dynamic_blocked_tiles,
+                start_pos=(px, py),
+                goal_pos=goal_key,
+            )
+            self.waypoints = find_character_walk_path(
+                start_x=px,
+                start_y=py,
+                goal_x=target_x,
+                goal_y=target_y,
+                blocked_tiles=blocked,
+            )
+            wx, wy = self.waypoints[0]
+            new_vec = compute_8way_walk_vector(
+                player_x=px,
+                player_y=py,
+                target_x=wx,
+                target_y=wy,
+                stop_tolerance=stop_tolerance
+                if len(self.waypoints) == 1
+                else WAYPOINT_PASS_TOLERANCE,
+                scale_near_target=len(self.waypoints) == 1,
+            )
+            if new_vec is not None and new_vec != self._last_walk_vec:
+                walk_vec = new_vec
+            else:
+                dx = target_x - px
+                dy = target_y - py
+                if self._stuck_retries % 2 == 1:
+                    if abs(walk_vec[0]) > 0.0:
+                        walk_vec = (0.0, 1.0 if dy >= 0.0 else -1.0)
+                    else:
+                        walk_vec = (1.0 if dx >= 0.0 else -1.0, 0.0)
+                else:
+                    walk_vec = (
+                        round((1.0 if dx >= 0.0 else -1.0) * DIAG_UNIT, 4),
+                        round((1.0 if dy >= 0.0 else -1.0) * DIAG_UNIT, 4),
+                    )
+
+        vec_changed = (
+            self._last_walk_vec is None
+            or math.hypot(
+                walk_vec[0] - self._last_walk_vec[0], walk_vec[1] - self._last_walk_vec[1]
+            )
+            >= 0.08
+        )
+        if (
+            (vec_changed and self._stuck_retries == 0)
+            or (not world_state.walking and reissue_due)
+            or stuck_blocked
+        ):
+            act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
+            proxy.queue_action(act_type, player_index, payload)
+            self._last_walk_vec = walk_vec
+            self._last_walk_tick = world_state.tick
+            self._last_pos = (px, py)
+        elif reissue_due:
+            self._last_walk_tick = world_state.tick
+            self._last_pos = (px, py)
+            if vec_changed:
+                act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
+                proxy.queue_action(act_type, player_index, payload)
+                self._last_walk_vec = walk_vec
+        return False
 
 
 class BotAgent:
@@ -977,12 +1459,12 @@ class BotAgent:
         self.researched_techs: set[str] = set(researched_techs)
         self.plan: StarterBaseBuildPlan | None = None
         self.completed_task_indices: set[int] = set()
+        self.navigator = CharacterNavigator()
         self._active_mining_task: int | None = None
-        self._last_walk_vec: tuple[float, float] | None = None
-        self._last_walk_tick: int = -1000
         self._last_action_tick: int = -1000
-        self._last_walk_pos: tuple[float, float] | None = None
-        self._walk_stuck_retries: int = 0
+        self._collecting_mall_item: str | None = None
+        self._collecting_mall_target_qty: int = 0
+        self._last_mall_collect_tick: int = -1000
 
     def ingest_cartography(self, source: str | Path | Mapping[str, Any]) -> bool:
         """Ingest cartography telemetry from a JSON file path or parsed dictionary."""
@@ -1017,20 +1499,22 @@ class BotAgent:
             verify=verify,
         )
         self.completed_task_indices.clear()
+        self.navigator.reset()
         self._active_mining_task = None
-        self._last_walk_vec = None
-        self._last_walk_tick = -1000
         self._last_action_tick = -1000
-        self._last_walk_pos = None
-        self._walk_stuck_retries = 0
+        self._collecting_mall_item = None
+        self._collecting_mall_target_qty = 0
+        self._last_mall_collect_tick = -1000
         return self.plan
 
-    def current_task(self) -> BotBuildTask | None:
+    def current_task(self, allowed_phases: set[str] | None = None) -> BotBuildTask | None:
         """Return the next uncompleted BotBuildTask in the construction schedule."""
         if self.plan is None:
             return None
         for task in self.plan.tasks:
             if task.task_index not in self.completed_task_indices:
+                if allowed_phases is not None and task.phase not in allowed_phases:
+                    continue
                 return task
         return None
 
@@ -1064,44 +1548,94 @@ class BotAgent:
         id_mappings: Mapping[str, Mapping[str, int]],
         player_index: int = 1,
         stop_tolerance: float = DEFAULT_STOP_TOLERANCE,
+        allowed_phases: set[str] | None = None,
     ) -> str:
         """Advance construction by one control step over a FactorioLockstepProxy."""
-        task = self.current_task()
+        task = self.current_task(allowed_phases=allowed_phases)
         if task is None:
             return "completed"
 
         if proxy.pending_action_count() > 0 or world_state.tick == self._last_action_tick:
             return "waiting_for_queue"
 
+        if task.task_kind == TASK_PLACE_ENTITY and any(
+            ent.name == task.target_name
+            and math.hypot(ent.x - task.target_x, ent.y - task.target_y) < 0.25
+            for ent in world_state.placed_entities
+        ):
+            self.mark_task_complete(task.task_index)
+            return f"already_placed_task_{task.task_index}"
+
         if task.task_kind in (TASK_PLACE_ENTITY, TASK_SEED_FUEL):
             required_item = task.target_name
             available_qty = int(world_state.inventory.get(required_item, 0))
-            if available_qty < 1:
+            if self._collecting_mall_item == required_item:
+                if available_qty >= self._collecting_mall_target_qty:
+                    self._collecting_mall_item = None
+                    self._collecting_mall_target_qty = 0
+                else:
+                    mall_task = self.find_mall_producer_task(required_item)
+                    if mall_task is not None:
+                        arrived_mall = self.navigator.step(
+                            proxy=proxy,
+                            world_state=world_state,
+                            target_x=mall_task.stand_x,
+                            target_y=mall_task.stand_y,
+                            stop_tolerance=stop_tolerance,
+                            cartographer=self.cartographer,
+                            data=self.data,
+                            player_index=player_index,
+                        )
+                        if not arrived_mall:
+                            return f"walking_to_mall_for_{required_item}"
+                        if world_state.tick - self._last_mall_collect_tick >= 120:
+                            collect_task = BotBuildTask(
+                                task_index=task.task_index,
+                                phase=task.phase,
+                                task_kind=TASK_COLLECT_MALL_OUTPUT,
+                                target_name=mall_task.target_name,
+                                target_x=mall_task.target_x,
+                                target_y=mall_task.target_y,
+                                stand_x=mall_task.stand_x,
+                                stand_y=mall_task.stand_y,
+                            )
+                            for act_type, payload in encode_task_input_actions(
+                                collect_task, id_mappings
+                            ):
+                                proxy.queue_action(act_type, player_index, payload)
+                            self._last_action_tick = world_state.tick
+                            self._last_mall_collect_tick = world_state.tick
+                        return f"collecting_mall_{required_item}"
+                    self._collecting_mall_item = None
+                    self._collecting_mall_target_qty = 0
+            elif available_qty < 1:
                 mall_task = self.find_mall_producer_task(required_item)
                 if mall_task is not None:
-                    mall_walk = compute_8way_walk_vector(
-                        world_state.player_x,
-                        world_state.player_y,
-                        mall_task.stand_x,
-                        mall_task.stand_y,
-                        stop_tolerance=stop_tolerance,
+                    rem_needed = (
+                        sum(
+                            1
+                            for t in self.plan.tasks
+                            if t.task_index not in self.completed_task_indices
+                            and t.task_kind == TASK_PLACE_ENTITY
+                            and t.target_name == required_item
+                        )
+                        if self.plan is not None
+                        else 1
                     )
-                    if mall_walk is not None:
-                        if mall_walk != self._last_walk_vec or (
-                            not world_state.walking
-                            and (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
-                        ):
-                            act_type, payload = build_start_walking_action(
-                                mall_walk[0], mall_walk[1]
-                            )
-                            proxy.queue_action(act_type, player_index, payload)
-                            self._last_walk_vec = mall_walk
-                            self._last_walk_tick = world_state.tick
+                    self._collecting_mall_item = required_item
+                    self._collecting_mall_target_qty = max(1, min(rem_needed, 200))
+                    arrived_mall = self.navigator.step(
+                        proxy=proxy,
+                        world_state=world_state,
+                        target_x=mall_task.stand_x,
+                        target_y=mall_task.stand_y,
+                        stop_tolerance=stop_tolerance,
+                        cartographer=self.cartographer,
+                        data=self.data,
+                        player_index=player_index,
+                    )
+                    if not arrived_mall:
                         return f"walking_to_mall_for_{required_item}"
-                    if world_state.walking or self._last_walk_vec is not None:
-                        act_type, payload = build_stop_walking_action()
-                        proxy.queue_action(act_type, player_index, payload)
-                        self._last_walk_vec = None
                     collect_task = BotBuildTask(
                         task_index=task.task_index,
                         phase=task.phase,
@@ -1115,81 +1649,74 @@ class BotAgent:
                     for act_type, payload in encode_task_input_actions(collect_task, id_mappings):
                         proxy.queue_action(act_type, player_index, payload)
                     self._last_action_tick = world_state.tick
+                    self._last_mall_collect_tick = world_state.tick
                     return f"collecting_mall_{required_item}"
-                if world_state.walking or self._last_walk_vec is not None:
-                    act_type, payload = build_stop_walking_action()
-                    proxy.queue_action(act_type, player_index, payload)
-                    self._last_walk_vec = None
+                self.navigator.stop(proxy, world_state, player_index=player_index)
                 return f"waiting_for_inventory_{required_item}"
 
-        walk_vec = compute_8way_walk_vector(
-            world_state.player_x,
-            world_state.player_y,
-            task.stand_x,
-            task.stand_y,
+        arrived = self.navigator.step(
+            proxy=proxy,
+            world_state=world_state,
+            target_x=task.stand_x,
+            target_y=task.stand_y,
             stop_tolerance=stop_tolerance,
+            cartographer=self.cartographer,
+            data=self.data,
+            player_index=player_index,
         )
-        if walk_vec is not None:
-            reissue_due = (world_state.tick - self._last_walk_tick) >= WALK_REISSUE_TICKS
-            stuck_blocked = (
-                reissue_due
-                and self._last_walk_pos is not None
-                and math.hypot(
-                    world_state.player_x - self._last_walk_pos[0],
-                    world_state.player_y - self._last_walk_pos[1],
-                )
-                < 0.15
-            )
-            if (
-                (walk_vec != self._last_walk_vec and self._walk_stuck_retries == 0)
-                or (not world_state.walking and reissue_due)
-                or stuck_blocked
-            ):
-                if stuck_blocked:
-                    self._walk_stuck_retries += 1
-                    dx = task.stand_x - world_state.player_x
-                    dy = task.stand_y - world_state.player_y
-                    if self._walk_stuck_retries % 2 == 1:
-                        if abs(walk_vec[0]) > 0.0:
-                            walk_vec = (0.0, 1.0 if dy >= 0.0 else -1.0)
-                        else:
-                            walk_vec = (1.0 if dx >= 0.0 else -1.0, 0.0)
-                    else:
-                        sx = (1.0 if dx >= 0.0 else -1.0) * 0.707
-                        sy = (1.0 if dy >= 0.0 else -1.0) * 0.707
-                        walk_vec = (sx, sy)
-                else:
-                    self._walk_stuck_retries = 0
-                act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
-                proxy.queue_action(act_type, player_index, payload)
-                self._last_walk_vec = walk_vec
-                self._last_walk_tick = world_state.tick
-                self._last_walk_pos = (world_state.player_x, world_state.player_y)
-            elif reissue_due:
-                self._walk_stuck_retries = 0
-                self._last_walk_tick = world_state.tick
-                self._last_walk_pos = (world_state.player_x, world_state.player_y)
-                if walk_vec != self._last_walk_vec:
-                    act_type, payload = build_start_walking_action(walk_vec[0], walk_vec[1])
-                    proxy.queue_action(act_type, player_index, payload)
-                    self._last_walk_vec = walk_vec
+        if not arrived:
             return f"walking_to_task_{task.task_index}"
 
-        self._walk_stuck_retries = 0
-        self._last_walk_pos = None
-        if world_state.walking or self._last_walk_vec is not None:
-            act_type, payload = build_stop_walking_action()
-            proxy.queue_action(act_type, player_index, payload)
-            self._last_walk_vec = None
+        if (
+            task.task_kind == TASK_PLACE_ENTITY
+            and task.target_name not in WALKABLE_ENTITY_NAMES
+            and math.hypot(
+                task.target_x - world_state.player_x,
+                task.target_y - world_state.player_y,
+            )
+            < 1.0
+        ):
+            arrived_exact = self.navigator.step(
+                proxy=proxy,
+                world_state=world_state,
+                target_x=task.stand_x,
+                target_y=task.stand_y,
+                stop_tolerance=0.45,
+                cartographer=self.cartographer,
+                data=self.data,
+                player_index=player_index,
+            )
+            if not arrived_exact:
+                return f"walking_to_task_{task.task_index}"
 
         if task.task_kind == TASK_CLEAR_OBSTACLE:
+            dist_obs = math.hypot(
+                task.target_x - world_state.player_x,
+                task.target_y - world_state.player_y,
+            )
+            if dist_obs > 2.35 and self._active_mining_task != task.task_index:
+                arrived_close = self.navigator.step(
+                    proxy=proxy,
+                    world_state=world_state,
+                    target_x=task.target_x,
+                    target_y=task.target_y,
+                    stop_tolerance=1.9,
+                    cartographer=self.cartographer,
+                    data=self.data,
+                    player_index=player_index,
+                )
+                if not arrived_close:
+                    return f"walking_to_task_{task.task_index}"
             if self._active_mining_task != task.task_index:
                 for act_type, payload in encode_task_input_actions(task, id_mappings):
                     proxy.queue_action(act_type, player_index, payload)
                 self._active_mining_task = task.task_index
                 self._last_action_tick = world_state.tick
                 return f"mining_obstacle_{task.task_index}"
-            if not world_state.mining:
+            if not world_state.mining and (
+                len(world_state.placed_entities) == 0
+                or (world_state.tick - self._last_action_tick) >= 12
+            ):
                 stop_type, stop_payload = build_stop_mining_action()
                 proxy.queue_action(stop_type, player_index, stop_payload)
                 self.mark_task_complete(task.task_index)
@@ -1198,28 +1725,53 @@ class BotAgent:
             return f"mining_obstacle_{task.task_index}"
 
         reach_limit = (
-            max(self.plan.reach_limits.build_reach, stop_tolerance + 2.0)
+            max(
+                stop_tolerance + 2.0,
+                self.plan.reach_limits.build_reach - REACH_SAFETY_MARGIN,
+            )
             if self.plan is not None
-            else 10.0
+            else 9.0
         )
+        if (
+            math.hypot(
+                task.target_x - world_state.player_x,
+                task.target_y - world_state.player_y,
+            )
+            > reach_limit
+        ):
+            arrived_within_reach = self.navigator.step(
+                proxy=proxy,
+                world_state=world_state,
+                target_x=task.stand_x,
+                target_y=task.stand_y,
+                stop_tolerance=min(0.65, stop_tolerance),
+                cartographer=self.cartographer,
+                data=self.data,
+                player_index=player_index,
+            )
+            if not arrived_within_reach:
+                return f"walking_to_task_{task.task_index}"
+
         inv_remaining: dict[str, int] = dict(world_state.inventory)
         last_executed_idx = task.task_index
         while True:
-            cur_t = self.current_task()
+            cur_t = self.current_task(allowed_phases=allowed_phases)
             if cur_t is None or cur_t.task_kind == TASK_CLEAR_OBSTACLE:
                 break
+            cur_dist_target = math.hypot(
+                cur_t.target_x - world_state.player_x,
+                cur_t.target_y - world_state.player_y,
+            )
             if (
-                math.hypot(
-                    cur_t.stand_x - world_state.player_x,
-                    cur_t.stand_y - world_state.player_y,
-                )
-                > stop_tolerance
-                and math.hypot(
-                    cur_t.target_x - world_state.player_x,
-                    cur_t.target_y - world_state.player_y,
-                )
-                > reach_limit
+                cur_t.task_index != task.task_index
+                and cur_dist_target < 1.0
+                and cur_t.target_name not in WALKABLE_ENTITY_NAMES
             ):
+                break
+            if cur_dist_target > reach_limit and math.hypot(
+                cur_t.stand_x - world_state.player_x,
+                cur_t.stand_y - world_state.player_y,
+            ) > min(0.65, stop_tolerance):
                 break
             if cur_t.task_kind in (TASK_PLACE_ENTITY, TASK_SEED_FUEL):
                 req_item = cur_t.target_name
@@ -1236,112 +1788,6 @@ class BotAgent:
         self._last_action_tick = world_state.tick
         return f"executed_task_{last_executed_idx}"
 
-    def build_lua_plan_executor_snippet(self, check_inventory: bool = False) -> str:
-        """Generate a Lua snippet that executes every task in self.plan on surface 1."""
-        if self.plan is None:
-            raise RuntimeError("Cannot generate Lua executor snippet before synthesize_plan()")
-
-        lines: list[str] = [
-            "  local surface = game.surfaces[1]",
-            "  local force = game.forces['player']",
-            "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]",
-            "  local cleared_count = 0",
-            "  local placed_count = 0",
-            "  local configured_count = 0",
-            "  local seeded_count = 0",
-            "  local consumed_items = {}",
-            "  local ent = nil",
-        ]
-
-        for task in self.plan.tasks:
-            lines.append(
-                f"  if char_ent and char_ent.valid then char_ent.teleport({{{task.stand_x}, {task.stand_y}}}) end"
-            )
-            if task.task_kind == TASK_CLEAR_OBSTACLE:
-                lines.append(
-                    f"  for _, obs in pairs(surface.find_entities_filtered({{position = {{{task.target_x}, {task.target_y}}}, radius = 1.5}})) do"
-                )
-                lines.append(
-                    "    if obs.valid and obs.name ~= 'character' and obs.type ~= 'resource' then"
-                )
-                lines.append("      obs.destroy()")
-                lines.append("      cleared_count = cleared_count + 1")
-                lines.append("    end")
-                lines.append("  end")
-            elif task.task_kind == TASK_PLACE_ENTITY:
-                extra = ""
-                if task.entity_type in ("input", "output"):
-                    extra += f", type = '{task.entity_type}'"
-                if task.recipe is not None:
-                    extra += f", recipe = '{task.recipe}'"
-                if check_inventory:
-                    lines.append(
-                        f"  if not char_ent or char_ent.get_item_count('{task.target_name}') >= 1 then"
-                    )
-                    lines.append(
-                        f"    ent = surface.create_entity({{name = '{task.target_name}', position = {{{task.target_x}, {task.target_y}}}, direction = {task.direction}, force = force{extra}}})"
-                    )
-                    lines.append("    if ent then")
-                    lines.append("      placed_count = placed_count + 1")
-                    lines.append(
-                        f"      if char_ent then char_ent.remove_item({{name = '{task.target_name}', count = 1}}) end"
-                    )
-                    lines.append(
-                        f"      consumed_items['{task.target_name}'] = (consumed_items['{task.target_name}'] or 0) + 1"
-                    )
-                    lines.append("    end")
-                    lines.append("  end")
-                else:
-                    lines.append(
-                        f"  ent = surface.create_entity({{"
-                        f"name = '{task.target_name}', "
-                        f"position = {{{task.target_x}, {task.target_y}}}, "
-                        f"direction = {task.direction}, "
-                        f"force = force{extra}}})"
-                    )
-                    lines.append("  if ent then placed_count = placed_count + 1 end")
-            elif task.task_kind == TASK_CONFIGURE_RECIPE and task.recipe is not None:
-                lines.append(
-                    f"  ent = surface.find_entity('{task.target_name}', {{{task.target_x}, {task.target_y}}})"
-                )
-                lines.append(
-                    f"  if ent then ent.set_recipe('{task.recipe}') configured_count = configured_count + 1 end"
-                )
-            elif task.task_kind == TASK_SEED_FUEL:
-                lines.append(
-                    f"  ent = surface.find_entity('boiler', {{{task.target_x}, {task.target_y}}})"
-                )
-                if check_inventory:
-                    lines.append(
-                        f"  if ent and (not char_ent or char_ent.get_item_count('{task.target_name}') >= {task.item_count}) then"
-                    )
-                    lines.append(
-                        f"    local ins_cnt = ent.insert({{name = '{task.target_name}', count = {task.item_count}}})"
-                    )
-                    lines.append("    if ins_cnt > 0 then")
-                    lines.append("      seeded_count = seeded_count + 1")
-                    lines.append(
-                        f"      if char_ent then char_ent.remove_item({{name = '{task.target_name}', count = ins_cnt}}) end"
-                    )
-                    lines.append(
-                        f"      consumed_items['{task.target_name}'] = (consumed_items['{task.target_name}'] or 0) + ins_cnt"
-                    )
-                    lines.append("    end")
-                    lines.append("  end")
-                else:
-                    lines.append(
-                        f"  if ent then ent.insert({{name = '{task.target_name}', count = {task.item_count}}}) seeded_count = seeded_count + 1 end"
-                    )
-
-        lines.append("  storage.bot_execution = {")
-        lines.append("    cleared_count = cleared_count,")
-        lines.append("    placed_count = placed_count,")
-        lines.append("    configured_count = configured_count,")
-        lines.append("    seeded_count = seeded_count,")
-        lines.append("    consumed_items = consumed_items,")
-        lines.append("  }")
-        return "\n".join(lines) + "\n"
-
     def compute_bom_fabrication(
         self,
         starting_inventory: Mapping[str, int] | None = None,
@@ -1356,166 +1802,1423 @@ class BotAgent:
             fuel_commodity=self.plan.fuel_commodity,
         )
 
-    def build_lua_progressive_plan_executor_snippet(
+
+class BootstrapController:
+    """Declarative controller for Phase 0 Lazy Bastard bootstrap and Phase 1 base construction."""
+
+    def __init__(
         self,
-        step_stride: float = 0.15,
-        check_inventory: bool = False,
-    ) -> str:
-        """Generate a Lua snippet that walks the bot and executes tasks progressively across ticks."""
-        if self.plan is None:
-            raise RuntimeError("Cannot generate progressive Lua snippet before synthesize_plan()")
+        bot_agent: BotAgent,
+        id_mappings: Mapping[str, Mapping[str, int]],
+        mining_targets: Sequence[tuple[str, int]] = (
+            ("iron-ore", 320),
+            ("stone", 40),
+            ("wood", 40),
+            ("coal", 350),
+            ("copper-ore", 220),
+        ),
+        player_index: int = 0,
+    ) -> None:
+        self.bot_agent = bot_agent
+        self.id_mappings = id_mappings
+        self.mining_targets = tuple(mining_targets)
+        self.player_index = player_index
+        self.navigator = CharacterNavigator()
 
-        bx0, by0, bx1, by1 = self.plan.layout.base_core.bounds
-        park_x = round((bx0 + bx1) / 2.0 - 1.5, 1)
-        park_y = round((by0 + by1) / 2.0 + 0.5, 1)
-        check_inv_str = "true" if check_inventory else "false"
+        self.stage: str = "prime_latency"
+        self.substep: int = 0
+        self.patch_idx: int = 0
+        self.mined_ore: int = 0
+        self.mined_resources: dict[str, int] = {name: 0 for name, _goal in self.mining_targets}
+        self.res_name: str | None = None
+        self.res_x: float = 0.0
+        self.res_y: float = 0.0
+        self.site: ShorelineSite | None = None
 
-        task_entries: list[str] = []
-        for task in self.plan.tasks:
-            ug_str = f"'{task.entity_type}'" if task.entity_type in ("input", "output") else "nil"
-            rec_str = f"'{task.recipe}'" if task.recipe is not None else "nil"
-            if task.task_kind == TASK_CLEAR_OBSTACLE:
-                wait_ticks = 20
-            elif task.task_kind in (TASK_CONFIGURE_RECIPE, TASK_SEED_FUEL):
-                wait_ticks = 5
-            elif task.target_name == "transport-belt":
-                wait_ticks = 3
-            elif (
-                "pole" in task.target_name
-                or "inserter" in task.target_name
-                or "underground" in task.target_name
-                or "splitter" in task.target_name
+        self.recording_ready: bool = False
+        self.final_science_load_queued: bool = False
+        self.phase1_planned: bool = False
+        self.phase1_collected_queued: bool = False
+        self.phase1_inventory_ready: bool = False
+        self.phase1_target_task_indices: set[int] = (
+            {t.task_index for t in bot_agent.plan.tasks} if bot_agent.plan is not None else set()
+        )
+
+        self._primed_walk: bool = False
+        self._primed_stop: bool = False
+        self._mining_active: bool = False
+        self._last_mine_tick: int = -1000
+        self._last_action_tick: int = -1000
+        self._smelt_last_tick: int = 0
+        self._mc_target: int = 0
+        self._batch_idx: int = 0
+        self._batch_reload_idx: int = 0
+        self._batch_start_tick: int = 0
+        self._deconstruct_idx: int = 0
+        self._deconstruct_mining: bool = False
+        self._iron_drill_tasks: tuple[tuple[BotBuildTask, tuple[float, float]], ...] = ()
+        self._iron_drill_idx: int = 0
+        self._temp_furnace_pts: tuple[tuple[float, float], ...] = ()
+        self._temp_furnace_idx: int = 0
+        self._temp_furnace_mining: bool = False
+        self._core_mall_seeded: bool = False
+
+        # Initial drill + pole fabrication batches before running patch electric drills
+        self.drill_batches: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
+            ("stone-furnace", ("stone",), 3, 1),
+            ("iron-gear-wheel", ("iron-plate",), 40, 1),
+            ("automation-science-pack", ("copper-plate", "iron-gear-wheel"), 25, 1),
+            ("copper-cable", ("copper-plate",), 50, 1),
+            ("electronic-circuit", ("copper-cable", "iron-plate"), 12, 1),
+            ("small-electric-pole", ("wood", "copper-cable"), 16, 1),
+            (
+                "electric-mining-drill",
+                ("electronic-circuit", "iron-gear-wheel", "iron-plate"),
+                3,
+                1,
+            ),
+        )
+
+        # Declarative BOM fabrication recipe batches: (recipe, ingredients, crafts_per_batch, batches)
+        self._iron_plate_target: int = 730
+        self.bom_batches: tuple[tuple[str, tuple[str, ...], int, int], ...] = ()
+        self._configure_bom_batches_from_plan()
+
+    def _configure_bom_batches_from_plan(self) -> None:
+        """Compute bom_batches and required iron-plate target dynamically from bot_agent.plan."""
+        bom = self.bot_agent.plan.bill_of_materials if self.bot_agent.plan is not None else {}
+        need_ug_crafts = max(1, math.ceil(bom.get("underground-belt", 2) / 2))
+        need_splitters = max(2, bom.get("splitter", 2))
+        need_long_ins = max(5, bom.get("long-handed-inserter", 5))
+        need_reg_ins = max(16, bom.get("inserter", 16))
+        need_ins_crafts = need_reg_ins + need_long_ins
+        need_edrills = max(3, bom.get("electric-mining-drill", 6) - 3)
+        need_asms = max(3, bom.get("assembling-machine-1", 4) - 1)
+
+        belt_batches = 5
+        min_belt_items = 350 + 2 * need_ug_crafts + 4 * need_splitters
+        belt_crafts_per_batch = math.ceil(min_belt_items / (2 * belt_batches))
+        total_belt_crafts = belt_crafts_per_batch * belt_batches
+
+        total_circuits = 5 * need_splitters + need_ins_crafts + 3 * need_edrills + 3 * need_asms
+        need_circuit_crafts = max(1, total_circuits - 3)
+        total_cable_crafts = math.ceil(need_circuit_crafts * 3 / 2)
+        cable_batches = 2 if total_cable_crafts > 50 else 1
+        cable_crafts_per_batch = math.ceil(total_cable_crafts / cable_batches)
+
+        total_gears = (
+            total_belt_crafts + need_ins_crafts + need_long_ins + 5 * need_edrills + 5 * need_asms
+        )
+        gear_batches = 5
+        gear_crafts_per_batch = math.ceil(total_gears / gear_batches)
+
+        total_iron_needed = (
+            2 * gear_crafts_per_batch * gear_batches
+            + need_circuit_crafts
+            + total_belt_crafts
+            + 10 * need_ug_crafts
+            + 5 * need_splitters
+            + need_ins_crafts
+            + need_long_ins
+            + 10 * need_edrills
+            + 9 * need_asms
+        )
+        self._iron_plate_target = max(730, total_iron_needed - 85)
+        self.bom_batches = (
+            ("iron-gear-wheel", ("iron-plate",), gear_crafts_per_batch, gear_batches),
+            ("copper-cable", ("copper-plate",), cable_crafts_per_batch, cable_batches),
+            ("electronic-circuit", ("copper-cable", "iron-plate"), need_circuit_crafts, 1),
+            (
+                "transport-belt",
+                ("iron-plate", "iron-gear-wheel"),
+                belt_crafts_per_batch,
+                belt_batches,
+            ),
+            ("underground-belt", ("iron-plate", "transport-belt"), need_ug_crafts, 1),
+            ("splitter", ("electronic-circuit", "iron-plate", "transport-belt"), need_splitters, 1),
+            (
+                "inserter",
+                ("electronic-circuit", "iron-gear-wheel", "iron-plate"),
+                need_ins_crafts,
+                1,
+            ),
+            (
+                "long-handed-inserter",
+                ("iron-gear-wheel", "iron-plate", "inserter"),
+                need_long_ins,
+                1,
+            ),
+            (
+                "electric-mining-drill",
+                ("electronic-circuit", "iron-gear-wheel", "iron-plate"),
+                need_edrills,
+                1,
+            ),
+            (
+                "assembling-machine-1",
+                ("electronic-circuit", "iron-gear-wheel", "iron-plate"),
+                need_asms,
+                1,
+            ),
+        )
+
+    def status_dict(self, state: PlayerWorldState) -> dict[str, Any]:
+        """Return a JSON-serializable status snapshot for live test monitoring."""
+        cur_batch_rec: str | None = None
+        if (
+            self.stage == "fabricate_drills"
+            and self.substep >= 1
+            and self._batch_idx < len(self.drill_batches)
+        ):
+            cur_batch_rec = self.drill_batches[self._batch_idx][0]
+        elif (
+            self.stage == "fabricate_bom"
+            and self.substep >= 1
+            and self._batch_idx < len(self.bom_batches)
+        ):
+            cur_batch_rec = self.bom_batches[self._batch_idx][0]
+        cur_task = self.bot_agent.current_task()
+        return {
+            "tick": state.tick,
+            "stage": self.stage,
+            "substep": self.substep,
+            "hand_crafted_count": state.hand_crafted_count,
+            "machine_crafted_count": state.machine_crafted_count,
+            "patch_idx": self.patch_idx,
+            "batch_idx": self._batch_idx,
+            "batch_reload_idx": self._batch_reload_idx,
+            "batch_recipe": cur_batch_rec,
+            "mc_target": self._mc_target,
+            "deconstruct_idx": self._deconstruct_idx,
+            "completed_tasks": len(self.bot_agent.completed_task_indices),
+            "total_tasks": len(self.phase1_target_task_indices),
+            "current_task": (
+                {
+                    "index": cur_task.task_index,
+                    "phase": cur_task.phase,
+                    "kind": cur_task.task_kind,
+                    "target": cur_task.target_name,
+                    "x": cur_task.target_x,
+                    "y": cur_task.target_y,
+                }
+                if cur_task is not None
+                else None
+            ),
+        }
+
+    def _queue_all(
+        self,
+        proxy: FactorioLockstepProxy,
+        actions: Sequence[tuple[int, bytes]],
+        tick: int,
+    ) -> None:
+        """Queue a sequence of (action_type, payload) pairs and record the tick."""
+        for act_type, payload in actions:
+            proxy.queue_action(act_type, self.player_index, payload)
+        self._last_action_tick = tick
+
+    def mark_bootstrap_shoreline_power_complete(self) -> None:
+        """Mark the permanent offshore-pump, boiler, and steam-engine tasks completed."""
+        if self.bot_agent.plan is None:
+            return
+        for t_task in self.bot_agent.plan.tasks:
+            if t_task.phase == PHASE_SHORELINE_POWER and t_task.target_name in (
+                "offshore-pump",
+                "boiler",
+                "steam-engine",
+                "coal",
             ):
-                wait_ticks = 6
+                self.bot_agent.mark_task_complete(t_task.task_index)
+
+    def _derive_plan_shoreline_site(self) -> ShorelineSite | None:
+        """Derive ShorelineSite from self.bot_agent.plan.layout.power_array."""
+        if self.bot_agent.plan is None:
+            return None
+        for ent in self.bot_agent.plan.layout.power_array.entities:
+            if ent["name"] == "offshore-pump":
+                pos = ent["position"]
+                px, py = float(pos["x"]), float(pos["y"])
+                p_dir = int(ent.get("direction", DIRECTION_NORTH))
+                d_idx = CARDINAL_DIRS.index(p_dir) if p_dir in CARDINAL_DIRS else 0
+                b_dir = CARDINAL_DIRS[(d_idx + 1) % 4]
+                b_dx, b_dy = _rotate_offset(0.5, 2.0, p_dir)
+                e_dx, e_dy = _rotate_offset(4.0, 2.0, p_dir)
+                po_dx, po_dy = _rotate_offset(2.0, 4.0, p_dir)
+                a_dx, a_dy = _rotate_offset(2.0, 6.0, p_dir)
+                l_dx, l_dy = _rotate_offset(5.0, 5.5, p_dir)
+                f_dx, f_dy = _rotate_offset(-4.5, 6.0, p_dir)
+                f2_dx, f2_dy = _rotate_offset(-4.5, 4.0, p_dir)
+                f3_dx, f3_dy = _rotate_offset(-4.5, 2.0, p_dir)
+                s_dx, s_dy = _rotate_offset(-0.5, 4.5, p_dir)
+                return ShorelineSite(
+                    pump_x=px,
+                    pump_y=py,
+                    pump_dir=p_dir,
+                    boiler_x=px + b_dx,
+                    boiler_y=py + b_dy,
+                    boiler_dir=b_dir,
+                    engine_x=px + e_dx,
+                    engine_y=py + e_dy,
+                    engine_dir=b_dir,
+                    pole_x=px + po_dx,
+                    pole_y=py + po_dy,
+                    lab_x=px + l_dx,
+                    lab_y=py + l_dy,
+                    asm_x=px + a_dx,
+                    asm_y=py + a_dy,
+                    furnace_x=px + f_dx,
+                    furnace_y=py + f_dy,
+                    furnace2_x=px + f2_dx,
+                    furnace2_y=py + f2_dy,
+                    furnace3_x=px + f3_dx,
+                    furnace3_y=py + f3_dy,
+                    stand_x=px + s_dx,
+                    stand_y=py + s_dy,
+                )
+        return None
+
+    def _furnace_positions(self, site: ShorelineSite) -> tuple[tuple[float, float], ...]:
+        """Return the 4 shoreline bootstrap furnace positions (f1, f2, f3, f4)."""
+        f4_x = 2.0 * site.furnace_x - site.furnace2_x
+        f4_y = 2.0 * site.furnace_y - site.furnace2_y
+        return (
+            (site.furnace_x, site.furnace_y),
+            (site.furnace2_x, site.furnace2_y),
+            (site.furnace3_x, site.furnace3_y),
+            (f4_x, f4_y),
+        )
+
+    def _select_iron_patch_drill_tasks(self) -> None:
+        """Select the planned iron-ore electric-mining-drill tasks and temporary smelter positions."""
+        if self.bot_agent.plan is None:
+            self._iron_drill_tasks = ()
+            self._iron_drill_idx = 0
+            return
+        iron_pa = self.bot_agent.plan.layout.patch_arrays.get("iron-ore")
+        if iron_pa is None:
+            self._iron_drill_tasks = ()
+            self._iron_drill_idx = 0
+            return
+        iron_drill_keys = {
+            (
+                round(float(ent["position"]["x"]), COORD_ROUND_DIGITS),
+                round(float(ent["position"]["y"]), COORD_ROUND_DIGITS),
+            )
+            for ent in iron_pa.entities
+            if ent["name"] == "electric-mining-drill"
+        }
+        selected: list[tuple[BotBuildTask, tuple[float, float]]] = []
+        for task in self.bot_agent.plan.tasks:
+            if (
+                task.phase == PHASE_PATCH_MINERS
+                and task.task_kind == TASK_PLACE_ENTITY
+                and task.target_name == "electric-mining-drill"
+                and (
+                    round(task.target_x, COORD_ROUND_DIGITS),
+                    round(task.target_y, COORD_ROUND_DIGITS),
+                )
+                in iron_drill_keys
+            ):
+                step_x, step_y = DIR_STEPS[task.direction]
+                sm_x = task.target_x + 2.5 * step_x + (0.5 if step_x == 0 else 0.0)
+                sm_y = task.target_y + 2.5 * step_y + (0.5 if step_y == 0 else 0.0)
+                selected.append((task, (sm_x, sm_y)))
+        self._iron_drill_tasks = tuple(selected)
+        self._iron_drill_idx = 0
+
+    def _extract_furnaces_actions(self, site: ShorelineSite) -> list[tuple[int, bytes]]:
+        """Build actions to extract output from all 4 shoreline furnaces."""
+        f1, f2, f3, f4 = self._furnace_positions(site)
+        clr = build_clear_cursor_action()
+        ft_out = build_fast_entity_transfer_action(into_entity=False)
+        return [
+            clr,
+            build_selected_entity_action(*f1),
+            ft_out,
+            build_selected_entity_action(*f2),
+            ft_out,
+            build_selected_entity_action(*f4),
+            ft_out,
+            build_selected_entity_action(*f3),
+            ft_out,
+        ]
+
+    def step(
+        self,
+        proxy: FactorioLockstepProxy,
+        state: PlayerWorldState,
+    ) -> str:
+        """Advance the autonomous bootstrap and starter base build by one telemetry step."""
+        if self.res_name is None and "iron-ore" in state.resources_by_name:
+            first_patch = state.resources_by_name["iron-ore"]
+            self.res_name = first_patch.name
+            cart = self.bot_agent.cartographer
+            iron_pts = (
+                sorted(cart.resource_patches.get("iron-ore", set())) if cart is not None else []
+            )
+            if iron_pts:
+                self.res_x = sum(pt[0] for pt in iron_pts) / len(iron_pts) + 0.5
+                self.res_y = sum(pt[1] for pt in iron_pts) / len(iron_pts) + 0.5
             else:
-                wait_ticks = 10
-            task_entries.append(
-                f"    {{kind = '{task.task_kind}', name = '{task.target_name}', "
-                f"tx = {task.target_x}, ty = {task.target_y}, "
-                f"sx = {task.stand_x}, sy = {task.stand_y}, "
-                f"dir = {task.direction}, ug = {ug_str}, rec = {rec_str}, "
-                f"cnt = {task.item_count}, wait = {wait_ticks}}}"
+                self.res_x = first_patch.x
+                self.res_y = first_patch.y
+        if self.site is None:
+            self.site = self._derive_plan_shoreline_site() or state.shoreline_site
+
+        self.mined_ore = max(self.mined_ore, state.inventory.get("iron-ore", 0))
+        for r_key in self.mined_resources:
+            self.mined_resources[r_key] = max(
+                self.mined_resources[r_key], state.inventory.get(r_key, 0)
             )
 
-        tasks_lua = ",\n".join(task_entries)
-        stride_val = float(step_stride)
-        return (
-            "local BOT_TASKS = {\n"
-            f"{tasks_lua}\n"
-            "}\n\n"
-            f"local CHECK_INVENTORY = {check_inv_str}\n\n"
-            "local function vec_to_dir(dx, dy)\n"
-            "  if math.abs(dx) < 1e-4 and math.abs(dy) < 1e-4 then return defines.direction.south end\n"
-            "  local angle = math.atan2(dy, dx)\n"
-            "  local octant = math.floor(((angle + math.pi / 2) / (2 * math.pi)) * 8 + 0.5) % 8\n"
-            "  return octant * 2\n"
-            "end\n\n"
-            "local function step_bot_plan(surface, force)\n"
-            "  if not storage.bot_execution then\n"
-            "    storage.bot_execution = {\n"
-            "      cleared_count = 0,\n"
-            "      placed_count = 0,\n"
-            "      configured_count = 0,\n"
-            "      seeded_count = 0,\n"
-            "      consumed_items = {},\n"
-            "      task_idx = 1,\n"
-            "      wait_left = nil,\n"
-            "      completed = false,\n"
-            "    }\n"
-            "  end\n"
-            "  local exec = storage.bot_execution\n"
-            "  if exec.completed then return end\n"
-            "  local p1 = game.get_player(1)\n"
-            "  local char_ent = (p1 and p1.valid and p1.character and p1.character.valid and p1.character) or surface.find_entities_filtered({name = 'character'})[1]\n"
-            "  local idx = exec.task_idx\n"
-            "  if idx > #BOT_TASKS then\n"
-            "    if char_ent and char_ent.valid then\n"
-            f"      local dx = {park_x} - char_ent.position.x\n"
-            f"      local dy = {park_y} - char_ent.position.y\n"
-            "      local dist = math.sqrt(dx * dx + dy * dy)\n"
-            f"      if dist > {stride_val} then\n"
-            f"        char_ent.direction = vec_to_dir(dx, dy)\n"
-            f"        char_ent.teleport({{char_ent.position.x + (dx / dist) * {stride_val}, char_ent.position.y + (dy / dist) * {stride_val}}})\n"
-            "        return\n"
-            "      else\n"
-            f"        char_ent.teleport({{{park_x}, {park_y}}})\n"
-            "        char_ent.direction = defines.direction.east\n"
-            "      end\n"
-            "    end\n"
-            "    exec.completed = true\n"
-            "    return\n"
-            "  end\n"
-            "  local t = BOT_TASKS[idx]\n"
-            "  if char_ent and char_ent.valid then\n"
-            "    local dx = t.sx - char_ent.position.x\n"
-            "    local dy = t.sy - char_ent.position.y\n"
-            "    local dist = math.sqrt(dx * dx + dy * dy)\n"
-            f"    if dist > {stride_val} then\n"
-            f"      local nx = char_ent.position.x + (dx / dist) * {stride_val}\n"
-            f"      local ny = char_ent.position.y + (dy / dist) * {stride_val}\n"
-            "      char_ent.direction = vec_to_dir(dx, dy)\n"
-            "      char_ent.teleport({nx, ny})\n"
-            "      return\n"
-            "    else\n"
-            "      char_ent.teleport({t.sx, t.sy})\n"
-            "      char_ent.direction = vec_to_dir(t.tx - t.sx, t.ty - t.sy)\n"
-            "    end\n"
-            "  end\n"
-            "  if exec.wait_left == nil then\n"
-            "    exec.wait_left = t.wait or 4\n"
-            "  end\n"
-            "  if exec.wait_left > 0 then\n"
-            "    exec.wait_left = exec.wait_left - 1\n"
-            "    return\n"
-            "  end\n"
-            "  exec.wait_left = nil\n"
-            "  if t.kind == 'clear_obstacle' then\n"
-            "    for _, obs in pairs(surface.find_entities_filtered({position = {t.tx, t.ty}, radius = 1.5})) do\n"
-            "      if obs.valid and obs.name ~= 'character' and obs.type ~= 'resource' then\n"
-            "        obs.destroy()\n"
-            "        exec.cleared_count = exec.cleared_count + 1\n"
-            "      end\n"
-            "    end\n"
-            "  elseif t.kind == 'place_entity' then\n"
-            "    local existing = surface.find_entity(t.name, {t.tx, t.ty})\n"
-            "    if not existing then\n"
-            "      if CHECK_INVENTORY and char_ent and char_ent.valid and char_ent.get_item_count(t.name) < 1 then\n"
-            "        return\n"
-            "      end\n"
-            "      local params = {name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, raise_built = true}\n"
-            "      if t.ug then params.type = t.ug end\n"
-            "      if t.rec then params.recipe = t.rec end\n"
-            "      if t.name == 'offshore-pump' and not surface.can_place_entity({name = t.name, position = {t.tx, t.ty}, direction = t.dir, force = force, build_check_type = defines.build_check_type.manual}) then\n"
-            "        return\n"
-            "      end\n"
-            "      local ent = surface.create_entity(params)\n"
-            "      if ent then\n"
-            "        exec.placed_count = exec.placed_count + 1\n"
-            "        if CHECK_INVENTORY and char_ent and char_ent.valid then\n"
-            "          char_ent.remove_item({name = t.name, count = 1})\n"
-            "          exec.consumed_items[t.name] = (exec.consumed_items[t.name] or 0) + 1\n"
-            "        end\n"
-            "      end\n"
-            "    end\n"
-            "  elseif t.kind == 'configure_recipe' and t.rec then\n"
-            "    local ent = surface.find_entity(t.name, {t.tx, t.ty})\n"
-            "    if ent then ent.set_recipe(t.rec) exec.configured_count = configured_count and (configured_count + 1) or (exec.configured_count + 1) end\n"
-            "  elseif t.kind == 'seed_fuel' then\n"
-            "    local ent = surface.find_entity('boiler', {t.tx, t.ty})\n"
-            "    if ent then\n"
-            "      if CHECK_INVENTORY and char_ent and char_ent.valid and char_ent.get_item_count(t.name) < t.cnt then\n"
-            "        return\n"
-            "      end\n"
-            "      local ins_cnt = ent.insert({name = t.name, count = t.cnt})\n"
-            "      if ins_cnt > 0 then\n"
-            "        exec.seeded_count = exec.seeded_count + 1\n"
-            "        if CHECK_INVENTORY and char_ent and char_ent.valid then\n"
-            "          char_ent.remove_item({name = t.name, count = ins_cnt})\n"
-            "          exec.consumed_items[t.name] = (exec.consumed_items[t.name] or 0) + ins_cnt\n"
-            "        end\n"
-            "      end\n"
-            "    end\n"
-            "  end\n"
-            "  exec.task_idx = idx + 1\n"
-            "end\n"
-        )
+        if self._primed_stop and state.tick >= 1215:
+            self.recording_ready = True
+
+        if proxy.pending_action_count() > 0 or state.tick == self._last_action_tick:
+            return self.stage
+
+        # Stage 1: Prime client walking state before tick 1200 so ServerSynchronizer drops latency
+        if self.stage == "prime_latency":
+            if self.res_name is not None and not self._primed_stop:
+                raw_dx = self.res_x - state.player_x
+                raw_dy = self.res_y - state.player_y
+                if not self._primed_walk:
+                    self._primed_walk = True
+                    if abs(raw_dx) >= abs(raw_dy):
+                        pdx, pdy = 0.0, math.copysign(1.0, raw_dy)
+                    else:
+                        pdx, pdy = math.copysign(1.0, raw_dx), 0.0
+                    self._queue_all(proxy, [build_start_walking_action(pdx, pdy)], state.tick)
+                elif state.walking or state.tick >= 240:
+                    self._primed_stop = True
+                    self._queue_all(proxy, [build_stop_walking_action()], state.tick)
+            elif self._primed_stop and self.site is not None and state.tick >= 1200:
+                if state.walking:
+                    self._queue_all(proxy, [build_stop_walking_action()], state.tick)
+                else:
+                    self.navigator.reset()
+                    self.stage = "harvest_resources"
+            return self.stage
+
+        # Stage 2: Harvest raw resources using 2D A* navigation
+        if self.stage == "harvest_resources":
+            if self.patch_idx >= len(self.mining_targets):
+                self.navigator.stop(proxy, state, player_index=self.player_index)
+                self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                self.stage = "walk_to_shoreline"
+                return self.stage
+
+            cur_res_name, cur_res_goal = self.mining_targets[self.patch_idx]
+            if state.inventory.get(cur_res_name, 0) >= cur_res_goal:
+                actions: list[tuple[int, bytes]] = [build_stop_mining_action()]
+                if state.walking or self.navigator._last_walk_vec is not None:
+                    actions.append(build_stop_walking_action())
+                self._queue_all(proxy, actions, state.tick)
+                self.navigator.reset()
+                self._mining_active = False
+                self.patch_idx += 1
+                return self.stage
+
+            cur_patch = state.resources_by_name.get(cur_res_name)
+            if cur_patch is None:
+                return self.stage
+
+            stop_reach = 2.25 if cur_res_name == "wood" else 2.05
+            mine_reach = 2.60 if cur_res_name == "wood" else 2.45
+            dist = math.hypot(cur_patch.x - state.player_x, cur_patch.y - state.player_y)
+            tol = mine_reach if self._mining_active else stop_reach
+
+            if dist > tol:
+                if self._mining_active:
+                    self._mining_active = False
+                    self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                    return self.stage
+                self.navigator.step(
+                    proxy=proxy,
+                    world_state=state,
+                    target_x=cur_patch.x,
+                    target_y=cur_patch.y,
+                    stop_tolerance=stop_reach,
+                    cartographer=self.bot_agent.cartographer,
+                    data=self.bot_agent.data,
+                    player_index=self.player_index,
+                )
+                return self.stage
+
+            if state.walking or self.navigator._last_walk_vec is not None:
+                self.navigator.stop(proxy, state, player_index=self.player_index)
+                return self.stage
+
+            target_shifted = (
+                state.selected_x is None
+                or state.selected_y is None
+                or math.hypot(cur_patch.x - state.selected_x, cur_patch.y - state.selected_y) > 0.5
+            )
+            if not self._mining_active or (
+                (state.tick - self._last_mine_tick) >= 18 and (not state.mining or target_shifted)
+            ):
+                mine_actions: list[tuple[int, bytes]] = []
+                if self._mining_active:
+                    mine_actions.append(build_stop_mining_action())
+                mine_actions.append(build_selected_entity_action(cur_patch.x, cur_patch.y))
+                mine_actions.append(build_begin_mining_action())
+                self._queue_all(proxy, mine_actions, state.tick)
+                self._mining_active = True
+                self._last_mine_tick = state.tick
+            return self.stage
+
+        assert self.site is not None
+        site = self.site
+        item_map = self.id_mappings["item"]
+        recipe_map = self.id_mappings["recipe"]
+        tech_map = self.id_mappings["technology"]
+        quality_id = int(self.id_mappings.get("quality", {}).get("normal", 1))
+
+        # Stage 3: Navigate to shoreline bootstrap standing position through 2D A*
+        if self.stage == "walk_to_shoreline":
+            b_dx = abs(site.boiler_x - state.player_x)
+            b_dy = abs(site.boiler_y - state.player_y)
+            clear_of_boiler = b_dx >= 1.65 or b_dy >= 2.15
+            tol = 1.35 if clear_of_boiler else 0.55
+            arrived = self.navigator.step(
+                proxy=proxy,
+                world_state=state,
+                target_x=site.stand_x,
+                target_y=site.stand_y,
+                stop_tolerance=tol,
+                cartographer=self.bot_agent.cartographer,
+                data=self.bot_agent.data,
+                player_index=self.player_index,
+            )
+            if arrived and not state.walking and clear_of_boiler:
+                self.stage = "shoreline_bootstrap"
+                self.substep = 0
+            return self.stage
+
+        f1, f2, f3, f4 = self._furnace_positions(site)
+        clr = build_clear_cursor_action()
+        ft_in = build_fast_entity_transfer_action(into_entity=True)
+        ft_out = build_fast_entity_transfer_action(into_entity=False)
+        fs_in = build_fast_entity_split_action(into_entity=True)
+        pip_coal = build_pipette_item_action(item_map["coal"])
+        pip_iron_ore = build_pipette_item_action(item_map["iron-ore"])
+        pip_copper_ore = build_pipette_item_action(item_map["copper-ore"])
+
+        # Stage 4: Shoreline bootstrap (106 hand crafts + steam power + lab + assembler)
+        if self.stage == "shoreline_bootstrap":
+            if self.substep == 0:
+                self.substep = 1
+                self._queue_all(
+                    proxy,
+                    [build_craft_action(recipe_map["stone-furnace"], count=5)],
+                    state.tick,
+                )
+            elif self.substep == 1 and state.inventory.get("stone-furnace", 0) >= 6:
+                self.substep = 2
+                self._smelt_last_tick = state.tick
+                pip_furnace = build_pipette_item_action(item_map["stone-furnace"])
+                actions = [
+                    clr,
+                    pip_furnace,
+                    build_place_entity_action(f1[0], f1[1], direction=0),
+                    build_place_entity_action(f2[0], f2[1], direction=0),
+                    build_place_entity_action(f3[0], f3[1], direction=0),
+                    build_place_entity_action(f4[0], f4[1], direction=0),
+                    clr,
+                ]
+                for f_pos in (f1, f2, f4, f3):
+                    actions.extend([build_selected_entity_action(*f_pos), pip_coal, fs_in, clr])
+                for f_pos in (f1, f2, f4):
+                    actions.extend([build_selected_entity_action(*f_pos), pip_iron_ore, ft_in, clr])
+                actions.extend([build_selected_entity_action(*f3), pip_copper_ore, ft_in, clr])
+                self._queue_all(proxy, actions, state.tick)
+            elif (
+                self.substep == 2 and state.steam_power_researched and state.electronics_researched
+            ):
+                self.substep = 3
+                actions = self._extract_furnaces_actions(site)
+                for f_pos in (f1, f2, f4):
+                    actions.extend([build_selected_entity_action(*f_pos), pip_iron_ore, ft_in, clr])
+                actions.extend(
+                    [
+                        build_craft_action(recipe_map["offshore-pump"], count=1),
+                        build_craft_action(recipe_map["boiler"], count=1),
+                        build_craft_action(recipe_map["steam-engine"], count=1),
+                        build_craft_action(recipe_map["small-electric-pole"], count=1),
+                    ]
+                )
+                self._queue_all(proxy, actions, state.tick)
+            elif (
+                self.substep == 3
+                and state.inventory.get("offshore-pump", 0) >= 1
+                and state.inventory.get("boiler", 0) >= 1
+                and state.inventory.get("steam-engine", 0) >= 1
+                and state.inventory.get("small-electric-pole", 0) >= 2
+            ):
+                self.substep = 4
+                actions = [
+                    clr,
+                    build_pipette_item_action(item_map["offshore-pump"]),
+                    build_place_entity_action(site.pump_x, site.pump_y, direction=site.pump_dir),
+                    clr,
+                    build_pipette_item_action(item_map["boiler"]),
+                    build_place_entity_action(
+                        site.boiler_x, site.boiler_y, direction=site.boiler_dir
+                    ),
+                    clr,
+                    build_selected_entity_action(site.boiler_x, site.boiler_y),
+                    pip_coal,
+                    fs_in,
+                    clr,
+                    build_pipette_item_action(item_map["steam-engine"]),
+                    build_place_entity_action(
+                        site.engine_x, site.engine_y, direction=site.engine_dir
+                    ),
+                    clr,
+                    build_pipette_item_action(item_map["small-electric-pole"]),
+                    build_place_entity_action(site.pole_x, site.pole_y, direction=0),
+                    clr,
+                ]
+                if self.bot_agent.plan is not None:
+                    for t_task in self.bot_agent.plan.tasks:
+                        if t_task.phase == PHASE_SHORELINE_POWER and t_task.target_name in (
+                            "offshore-pump",
+                            "boiler",
+                            "steam-engine",
+                            "coal",
+                        ):
+                            self.bot_agent.mark_task_complete(t_task.task_index)
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 4 and state.tick >= self._smelt_last_tick + 10800:
+                self.substep = 5
+                actions = self._extract_furnaces_actions(site)
+                actions.append(build_craft_action(recipe_map["lab"], count=1))
+                self._queue_all(proxy, actions, state.tick)
+            elif (
+                self.substep == 5
+                and state.science_pack_researched
+                and state.inventory.get("lab", 0) >= 1
+            ):
+                self.substep = 6
+                actions = [
+                    clr,
+                    build_pipette_item_action(item_map["lab"]),
+                    build_place_entity_action(site.lab_x, site.lab_y, direction=0),
+                    clr,
+                    build_start_research_action(tech_map["automation"]),
+                    build_craft_action(recipe_map["automation-science-pack"], count=10),
+                ]
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 6 and state.inventory.get("automation-science-pack", 0) >= 10:
+                self.substep = 7
+                self.final_science_load_queued = True
+                actions = [
+                    clr,
+                    build_selected_entity_action(*f1),
+                    ft_out,
+                    build_selected_entity_action(*f4),
+                    ft_out,
+                    build_selected_entity_action(*f3),
+                    ft_out,
+                    build_selected_entity_action(site.boiler_x, site.boiler_y),
+                    pip_coal,
+                    fs_in,
+                    clr,
+                    build_selected_entity_action(site.lab_x, site.lab_y),
+                    build_pipette_item_action(item_map["automation-science-pack"]),
+                    ft_in,
+                    clr,
+                ]
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 7 and state.automation_researched:
+                self.substep = 8
+                actions = self._extract_furnaces_actions(site)
+                actions.append(build_craft_action(recipe_map["assembling-machine-1"], count=1))
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 8 and state.inventory.get("assembling-machine-1", 0) >= 1:
+                self.substep = 85
+                self._batch_start_tick = state.tick
+                actions = [
+                    clr,
+                    build_pipette_item_action(item_map["assembling-machine-1"]),
+                    build_place_entity_action(site.asm_x, site.asm_y, direction=0),
+                ]
+                self._queue_all(proxy, actions, state.tick)
+            elif (
+                self.substep == 85
+                and any(e.name == "assembling-machine-1" for e in state.placed_entities)
+                and state.tick >= self._batch_start_tick + 60
+            ):
+                self.substep = 9
+                self._mc_target = state.asm_made.get("iron-gear-wheel", 0) + 20
+                self._smelt_last_tick = state.tick
+                actions = [
+                    clr,
+                    build_start_research_action(tech_map["logistics"]),
+                ]
+                if state.inventory.get("iron-ore", 0) > 0:
+                    for f_pos in (f1, f2, f4):
+                        actions.extend(
+                            [
+                                build_selected_entity_action(*f_pos),
+                                pip_iron_ore,
+                                ft_in,
+                                clr,
+                            ]
+                        )
+                if state.inventory.get("copper-ore", 0) > 0:
+                    actions.extend(
+                        [
+                            build_selected_entity_action(*f3),
+                            pip_coal,
+                            fs_in,
+                            clr,
+                            build_selected_entity_action(*f3),
+                            pip_copper_ore,
+                            ft_in,
+                            clr,
+                        ]
+                    )
+                actions.extend(
+                    encode_assembler_batch_actions(
+                        site.asm_x,
+                        site.asm_y,
+                        "iron-gear-wheel",
+                        ("iron-plate",),
+                        self.id_mappings,
+                        extract_first=False,
+                        quality_id=quality_id,
+                    )
+                )
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 9 and state.asm_made.get("iron-gear-wheel", 0) >= self._mc_target:
+                self.substep = 10
+                self._mc_target = state.asm_made.get("automation-science-pack", 0) + 20
+                actions = self._extract_furnaces_actions(site)
+                if state.inventory.get("iron-ore", 0) > 0:
+                    for f_pos in (f1, f2, f4):
+                        actions.extend(
+                            [build_selected_entity_action(*f_pos), pip_iron_ore, ft_in, clr]
+                        )
+                if state.inventory.get("copper-ore", 0) > 0:
+                    actions.extend([build_selected_entity_action(*f3), pip_copper_ore, ft_in, clr])
+                actions.extend(
+                    encode_assembler_batch_actions(
+                        site.asm_x,
+                        site.asm_y,
+                        "automation-science-pack",
+                        ("copper-plate", "iron-gear-wheel"),
+                        self.id_mappings,
+                        extract_first=True,
+                        quality_id=quality_id,
+                    )
+                )
+                self._queue_all(proxy, actions, state.tick)
+            elif (
+                self.substep == 10
+                and state.asm_made.get("automation-science-pack", 0) >= self._mc_target
+            ):
+                self.substep = 11
+                self._batch_start_tick = state.tick
+                actions = [
+                    clr,
+                    build_selected_entity_action(site.asm_x, site.asm_y),
+                    ft_out,
+                    clr,
+                ]
+                self._queue_all(proxy, actions, state.tick)
+            elif self.substep == 11 and (
+                state.inventory.get("automation-science-pack", 0) >= 20
+                or state.tick >= self._batch_start_tick + 90
+            ):
+                self.final_science_load_queued = True
+                actions = [
+                    clr,
+                    build_selected_entity_action(site.asm_x, site.asm_y),
+                    ft_out,
+                    build_selected_entity_action(site.lab_x, site.lab_y),
+                    build_pipette_item_action(item_map["automation-science-pack"]),
+                    ft_in,
+                    clr,
+                ]
+                self._queue_all(proxy, actions, state.tick)
+                self.stage = "fabricate_drills"
+                self.substep = 0
+            return self.stage
+
+        # Stage 4b: Fabricate initial electric-mining-drills (3) and small-electric-poles (11)
+        if self.stage == "fabricate_drills":
+            if self.substep == 0:
+                have_iron = state.inventory.get("iron-plate", 0)
+                have_copper = state.inventory.get("copper-plate", 0)
+                if state.logistics_researched and have_iron >= 125 and have_copper >= 50:
+                    self.substep = 1
+                    self._batch_idx = 0
+                    self._batch_reload_idx = 1
+                    rec_name, ings, batch_crafts, _num_batches = self.drill_batches[0]
+                    self._mc_target = state.asm_made.get(rec_name, 0) + batch_crafts
+                    self._batch_start_tick = state.tick
+                    actions = self._extract_furnaces_actions(site)
+                    if state.inventory.get("iron-ore", 0) > 0:
+                        for f_pos in (f1, f2, f4):
+                            actions.extend(
+                                [build_selected_entity_action(*f_pos), pip_iron_ore, ft_in, clr]
+                            )
+                    if state.inventory.get("copper-ore", 0) > 0:
+                        actions.extend(
+                            [build_selected_entity_action(*f3), pip_copper_ore, ft_in, clr]
+                        )
+                    if "electric-mining-drill" in tech_map:
+                        actions.append(
+                            build_start_research_action(tech_map["electric-mining-drill"])
+                        )
+                    actions.extend(
+                        encode_assembler_batch_actions(
+                            site.asm_x,
+                            site.asm_y,
+                            rec_name,
+                            ings,
+                            self.id_mappings,
+                            extract_first=True,
+                            quality_id=quality_id,
+                        )
+                    )
+                    self._queue_all(proxy, actions, state.tick)
+                    return self.stage
+
+                if state.tick >= self._smelt_last_tick + 3600:
+                    self._smelt_last_tick = state.tick
+                    actions = self._extract_furnaces_actions(site)
+                    if state.inventory.get("copper-ore", 0) > 0:
+                        actions.extend(
+                            [
+                                build_selected_entity_action(*f3),
+                                pip_copper_ore,
+                                ft_in,
+                                clr,
+                            ]
+                        )
+                    if not state.logistics_researched and "logistics" in tech_map:
+                        actions.append(build_start_research_action(tech_map["logistics"]))
+                    self._queue_all(proxy, actions, state.tick)
+                return self.stage
+
+            if self.substep == 1:
+                rec_name, ings, batch_crafts, _num_batches = self.drill_batches[self._batch_idx]
+                if state.asm_made.get(rec_name, 0) >= self._mc_target:
+                    if self._batch_idx + 1 < len(self.drill_batches):
+                        next_rec, next_ings, next_crafts, _next_batches = self.drill_batches[
+                            self._batch_idx + 1
+                        ]
+                        if (
+                            next_rec == "electric-mining-drill"
+                            and not state.electric_mining_drill_researched
+                        ):
+                            if state.tick >= self._batch_start_tick + 60:
+                                self._batch_start_tick = state.tick
+                                actions = [
+                                    clr,
+                                    build_selected_entity_action(site.asm_x, site.asm_y),
+                                    ft_out,
+                                ]
+                                if state.inventory.get("automation-science-pack", 0) > 0:
+                                    actions.extend(
+                                        [
+                                            build_selected_entity_action(site.lab_x, site.lab_y),
+                                            build_pipette_item_action(
+                                                item_map["automation-science-pack"]
+                                            ),
+                                            ft_in,
+                                            clr,
+                                        ]
+                                    )
+                                if "electric-mining-drill" in tech_map:
+                                    actions.append(
+                                        build_start_research_action(
+                                            tech_map["electric-mining-drill"]
+                                        )
+                                    )
+                                self._queue_all(proxy, actions, state.tick)
+                            return self.stage
+                        self._batch_idx += 1
+                        self._mc_target = state.asm_made.get(next_rec, 0) + next_crafts
+                        self._batch_start_tick = state.tick
+                        actions = [
+                            clr,
+                            build_selected_entity_action(*f3),
+                            ft_out,
+                        ]
+                        if (
+                            state.inventory.get("automation-science-pack", 0) > 0
+                            and not state.electric_mining_drill_researched
+                        ):
+                            actions.extend(
+                                [
+                                    build_selected_entity_action(site.lab_x, site.lab_y),
+                                    build_pipette_item_action(item_map["automation-science-pack"]),
+                                    ft_in,
+                                    clr,
+                                ]
+                            )
+                        actions.extend(
+                            encode_assembler_batch_actions(
+                                site.asm_x,
+                                site.asm_y,
+                                next_rec,
+                                next_ings,
+                                self.id_mappings,
+                                extract_first=True,
+                                quality_id=quality_id,
+                            )
+                        )
+                        self._queue_all(proxy, actions, state.tick)
+                        return self.stage
+
+                    if state.tick >= self._batch_start_tick + 75:
+                        actions = [
+                            clr,
+                            build_selected_entity_action(site.asm_x, site.asm_y),
+                            ft_out,
+                        ]
+                        actions.extend(self._extract_furnaces_actions(site))
+                        actions.extend(
+                            [
+                                build_selected_entity_action(site.boiler_x, site.boiler_y),
+                                pip_coal,
+                                ft_in,
+                                clr,
+                            ]
+                        )
+                        if state.inventory.get("copper-ore", 0) > 0:
+                            actions.extend(
+                                [
+                                    build_selected_entity_action(*f3),
+                                    pip_coal,
+                                    fs_in,
+                                    clr,
+                                    build_selected_entity_action(*f3),
+                                    pip_copper_ore,
+                                    ft_in,
+                                    clr,
+                                ]
+                            )
+                        self._queue_all(proxy, actions, state.tick)
+                        proxy.max_actions_per_heartbeat = 12
+                        self._configure_bom_batches_from_plan()
+                        self._select_iron_patch_drill_tasks()
+                        self.stage = "run_patch_drills"
+                        self.substep = 0
+                        self._deconstruct_idx = 0
+                        self._deconstruct_mining = False
+            return self.stage
+
+        # Stage 4c: Build permanent power network + iron-ore drills, smelt plates in temporary furnaces
+        if self.stage == "run_patch_drills":
+            if self.substep == 0:
+                self.substep = 1
+                return self.stage
+
+            # Substep 1: Execute PHASE_CLEAR_OBSTACLES and PHASE_POWER_NETWORK
+            if self.substep == 1:
+                early_phases = {
+                    PHASE_CLEAR_OBSTACLES,
+                    PHASE_POWER_NETWORK,
+                }
+                if self.bot_agent.current_task(allowed_phases=early_phases) is not None:
+                    self.bot_agent.step_lockstep_proxy(
+                        proxy=proxy,
+                        world_state=state,
+                        id_mappings=self.id_mappings,
+                        player_index=self.player_index,
+                        stop_tolerance=1.5,
+                        allowed_phases=early_phases,
+                    )
+                    return self.stage
+                self.navigator.reset()
+                self.substep = 2
+                return self.stage
+
+            # Substep 2: Place permanent iron-ore drills + temporary stone-furnaces at drop tiles
+            if self.substep == 2:
+                if self._iron_drill_idx < len(self._iron_drill_tasks):
+                    d_task, f_pos = self._iron_drill_tasks[self._iron_drill_idx]
+                    step_x, step_y = DIR_STEPS[d_task.direction]
+                    stand_px = d_task.target_x - 3.0 * step_x
+                    stand_py = d_task.target_y - 3.0 * step_y
+                    dist = math.hypot(stand_px - state.player_x, stand_py - state.player_y)
+                    if dist > 1.8:
+                        arrived_stand = self.navigator.step(
+                            proxy=proxy,
+                            world_state=state,
+                            target_x=stand_px,
+                            target_y=stand_py,
+                            stop_tolerance=0.8,
+                            cartographer=self.bot_agent.cartographer,
+                            data=self.bot_agent.data,
+                            player_index=self.player_index,
+                        )
+                        if not arrived_stand:
+                            return self.stage
+                    if state.walking or self.navigator._last_walk_vec is not None:
+                        self.navigator.stop(proxy, state, player_index=self.player_index)
+                        return self.stage
+                    actions = [
+                        clr,
+                        build_pipette_item_action(item_map["electric-mining-drill"]),
+                        build_place_entity_action(
+                            d_task.target_x,
+                            d_task.target_y,
+                            direction=d_task.direction,
+                        ),
+                        clr,
+                        build_pipette_item_action(item_map["stone-furnace"]),
+                        build_place_entity_action(f_pos[0], f_pos[1], direction=0),
+                        clr,
+                        build_selected_entity_action(f_pos[0], f_pos[1]),
+                        pip_coal,
+                        fs_in,
+                        clr,
+                    ]
+                    if self._iron_drill_idx > 0:
+                        actions.extend(
+                            [
+                                build_selected_entity_action(f_pos[0], f_pos[1]),
+                                pip_coal,
+                                fs_in,
+                                clr,
+                            ]
+                        )
+                    self.bot_agent.mark_task_complete(d_task.task_index)
+                    self._iron_drill_idx += 1
+                    self._queue_all(proxy, actions, state.tick)
+                    return self.stage
+                self.substep = 3
+                self._smelt_last_tick = state.tick
+                return self.stage
+
+            # Substep 3: Extract iron-plates from the temporary furnaces until >= _iron_plate_target
+            if self.substep == 3:
+                if (
+                    state.inventory.get("iron-plate", 0) >= self._iron_plate_target
+                    or not self._iron_drill_tasks
+                ):
+                    self._temp_furnace_pts = tuple(
+                        f_pos for _d_task, f_pos in self._iron_drill_tasks
+                    )
+                    self._temp_furnace_idx = 0
+                    self._temp_furnace_mining = False
+                    self.substep = 4
+                    return self.stage
+
+                if state.tick >= self._smelt_last_tick + 3600:
+                    mid_task, _mid_f = self._iron_drill_tasks[len(self._iron_drill_tasks) // 2]
+                    step_x, step_y = DIR_STEPS[mid_task.direction]
+                    stand_px = mid_task.target_x - 3.0 * step_x
+                    stand_py = mid_task.target_y - 3.0 * step_y
+                    if math.hypot(stand_px - state.player_x, stand_py - state.player_y) > 4.0:
+                        arrived_mid = self.navigator.step(
+                            proxy=proxy,
+                            world_state=state,
+                            target_x=stand_px,
+                            target_y=stand_py,
+                            stop_tolerance=1.2,
+                            cartographer=self.bot_agent.cartographer,
+                            data=self.bot_agent.data,
+                            player_index=self.player_index,
+                        )
+                        if not arrived_mid:
+                            return self.stage
+                    if state.walking or self.navigator._last_walk_vec is not None:
+                        self.navigator.stop(proxy, state, player_index=self.player_index)
+                        return self.stage
+                    self._smelt_last_tick = state.tick
+                    actions = [clr]
+                    for _d_task, f_pos in self._iron_drill_tasks:
+                        actions.extend([build_selected_entity_action(*f_pos), ft_out])
+                    if state.inventory.get("coal", 0) > 0:
+                        for _d_task, f_pos in reversed(self._iron_drill_tasks):
+                            actions.extend(
+                                [build_selected_entity_action(*f_pos), pip_coal, fs_in, clr]
+                            )
+                    self._queue_all(proxy, actions, state.tick)
+                return self.stage
+
+            # Substep 4: Deconstruct ONLY the temporary stone-furnaces (keep permanent drills + poles!)
+            if self.substep == 4:
+                if self._temp_furnace_idx < len(self._temp_furnace_pts):
+                    tx_d, ty_d = self._temp_furnace_pts[self._temp_furnace_idx]
+                    target_still_present = len(state.placed_entities) == 0 or any(
+                        math.hypot(ent.x - tx_d, ent.y - ty_d) < 0.75
+                        for ent in state.placed_entities
+                    )
+                    if not target_still_present:
+                        if self._temp_furnace_mining or state.mining:
+                            self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                        self._temp_furnace_mining = False
+                        self._temp_furnace_idx += 1
+                        return self.stage
+
+                    dist = math.hypot(tx_d - state.player_x, ty_d - state.player_y)
+                    if dist > 2.4 and not self._temp_furnace_mining:
+                        arrived_tf = self.navigator.step(
+                            proxy=proxy,
+                            world_state=state,
+                            target_x=tx_d,
+                            target_y=ty_d,
+                            stop_tolerance=0.5,
+                            cartographer=self.bot_agent.cartographer,
+                            data=self.bot_agent.data,
+                            player_index=self.player_index,
+                        )
+                        if not arrived_tf:
+                            return self.stage
+                    if state.walking or self.navigator._last_walk_vec is not None:
+                        self.navigator.stop(proxy, state, player_index=self.player_index)
+                        return self.stage
+                    if not self._temp_furnace_mining:
+                        self._temp_furnace_mining = True
+                        self._queue_all(
+                            proxy,
+                            [
+                                build_selected_entity_action(tx_d, ty_d),
+                                build_begin_mining_action(),
+                            ],
+                            state.tick,
+                        )
+                    elif not state.mining and (state.tick - self._last_action_tick) >= 18:
+                        if len(state.placed_entities) == 0:
+                            self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                            self._temp_furnace_mining = False
+                            self._temp_furnace_idx += 1
+                        else:
+                            self._queue_all(
+                                proxy,
+                                [
+                                    build_selected_entity_action(tx_d, ty_d),
+                                    build_begin_mining_action(),
+                                ],
+                                state.tick,
+                            )
+                    return self.stage
+                self.substep = 5
+                return self.stage
+
+            # Substep 5: Walk back to shoreline bootstrap site to fabricate initial BOM
+            if self.substep == 5:
+                b_dx = abs(site.boiler_x - state.player_x)
+                b_dy = abs(site.boiler_y - state.player_y)
+                clear_of_boiler = b_dx >= 1.65 or b_dy >= 2.15
+                tol = 1.35 if clear_of_boiler else 0.55
+                arrived = self.navigator.step(
+                    proxy=proxy,
+                    world_state=state,
+                    target_x=site.stand_x,
+                    target_y=site.stand_y,
+                    stop_tolerance=tol,
+                    cartographer=self.bot_agent.cartographer,
+                    data=self.bot_agent.data,
+                    player_index=self.player_index,
+                )
+                if arrived and not state.walking and clear_of_boiler:
+                    self.stage = "fabricate_bom"
+                    self.substep = 0
+                return self.stage
+
+        # Stage 5: Finish smelting plates and fabricate the starter base BOM in batches
+        if self.stage == "fabricate_bom":
+            if self.substep == 0:
+                have_iron_plates = state.inventory.get("iron-plate", 0)
+                have_copper_plates = state.inventory.get("copper-plate", 0)
+
+                if (
+                    state.logistics_researched
+                    and have_iron_plates >= 540
+                    and have_copper_plates >= 20
+                ):
+                    self.substep = 1
+                    self._batch_idx = 0
+                    self._batch_reload_idx = 1
+                    rec_name, ings, batch_crafts, _num_batches = self.bom_batches[0]
+                    self._mc_target = state.asm_made.get(rec_name, 0) + batch_crafts
+                    self._batch_start_tick = state.tick
+                    actions = self._extract_furnaces_actions(site)
+                    actions.extend(
+                        [
+                            build_selected_entity_action(site.boiler_x, site.boiler_y),
+                            pip_coal,
+                            ft_in,
+                            clr,
+                        ]
+                    )
+                    if state.inventory.get("iron-ore", 0) > 0:
+                        for f_pos in (f1, f2, f4):
+                            actions.extend(
+                                [
+                                    build_selected_entity_action(*f_pos),
+                                    pip_iron_ore,
+                                    fs_in,
+                                    clr,
+                                ]
+                            )
+                    actions.extend(
+                        encode_assembler_batch_actions(
+                            site.asm_x,
+                            site.asm_y,
+                            rec_name,
+                            ings,
+                            self.id_mappings,
+                            extract_first=True,
+                            quality_id=quality_id,
+                        )
+                    )
+                    self._queue_all(proxy, actions, state.tick)
+                    return self.stage
+
+                if state.tick >= self._smelt_last_tick + 3600:
+                    self._smelt_last_tick = state.tick
+                    actions = [
+                        clr,
+                        build_selected_entity_action(*f3),
+                        ft_out,
+                        build_selected_entity_action(*f3),
+                        pip_coal,
+                        fs_in,
+                        clr,
+                    ]
+                    if state.inventory.get("copper-ore", 0) > 0:
+                        actions.extend(
+                            [
+                                build_selected_entity_action(*f3),
+                                pip_copper_ore,
+                                ft_in,
+                                clr,
+                            ]
+                        )
+                    self._queue_all(proxy, actions, state.tick)
+                return self.stage
+
+            if self.substep == 1:
+                rec_name, ings, batch_crafts, num_batches = self.bom_batches[self._batch_idx]
+                if state.asm_made.get(rec_name, 0) >= self._mc_target:
+                    if self._batch_reload_idx < num_batches:
+                        self._batch_reload_idx += 1
+                        self._mc_target = state.asm_made.get(rec_name, 0) + batch_crafts
+                        self._batch_start_tick = state.tick
+                        actions = [
+                            clr,
+                            build_selected_entity_action(site.asm_x, site.asm_y),
+                            ft_out,
+                        ]
+                        for ing_name in ings:
+                            actions.extend(
+                                [
+                                    build_selected_entity_action(site.asm_x, site.asm_y),
+                                    build_pipette_item_action(item_map[ing_name]),
+                                    ft_in,
+                                    clr,
+                                ]
+                            )
+                        self._queue_all(proxy, actions, state.tick)
+                        return self.stage
+
+                    if self._batch_idx + 1 < len(self.bom_batches):
+                        self._batch_idx += 1
+                        self._batch_reload_idx = 1
+                        next_rec, next_ings, next_crafts, _next_batches = self.bom_batches[
+                            self._batch_idx
+                        ]
+                        self._mc_target = state.asm_made.get(next_rec, 0) + next_crafts
+                        self._batch_start_tick = state.tick
+                        actions = self._extract_furnaces_actions(site)
+                        actions.extend(
+                            encode_assembler_batch_actions(
+                                site.asm_x,
+                                site.asm_y,
+                                next_rec,
+                                next_ings,
+                                self.id_mappings,
+                                extract_first=True,
+                                quality_id=quality_id,
+                            )
+                        )
+                        self._queue_all(proxy, actions, state.tick)
+                        return self.stage
+
+                    if state.tick >= self._batch_start_tick + 75:
+                        self.phase1_collected_queued = True
+                        self.phase1_planned = True
+                        actions = [
+                            clr,
+                            build_selected_entity_action(site.asm_x, site.asm_y),
+                            ft_out,
+                            build_selected_entity_action(site.boiler_x, site.boiler_y),
+                            pip_coal,
+                            fs_in,
+                            clr,
+                        ]
+                        actions.extend(self._extract_furnaces_actions(site))
+                        self._queue_all(proxy, actions, state.tick)
+                        self.stage = "teardown_bootstrap"
+                        self._deconstruct_idx = 0
+                        self._deconstruct_mining = False
+            return self.stage
+
+        # Stage 6: Deconstruct temporary shoreline bootstrap structures (keep pump/boiler/engine!)
+        if self.stage == "teardown_bootstrap":
+            deconstruct_positions = (
+                (site.asm_x, site.asm_y),
+                (site.pole_x, site.pole_y),
+                (site.lab_x, site.lab_y),
+                f1,
+                f2,
+                f4,
+                f3,
+            )
+            if self._deconstruct_idx < len(deconstruct_positions):
+                dx_pos, dy_pos = deconstruct_positions[self._deconstruct_idx]
+                target_still_present = len(state.placed_entities) == 0 or any(
+                    math.hypot(ent.x - dx_pos, ent.y - dy_pos) < 0.75
+                    for ent in state.placed_entities
+                )
+                if not target_still_present:
+                    if self._deconstruct_mining or state.mining:
+                        self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                    self._deconstruct_mining = False
+                    self._deconstruct_idx += 1
+                    return self.stage
+
+                dist_d = math.hypot(dx_pos - state.player_x, dy_pos - state.player_y)
+                if dist_d > 2.6 and not self._deconstruct_mining:
+                    arrived_d = self.navigator.step(
+                        proxy=proxy,
+                        world_state=state,
+                        target_x=dx_pos,
+                        target_y=dy_pos,
+                        stop_tolerance=0.5,
+                        cartographer=self.bot_agent.cartographer,
+                        data=self.bot_agent.data,
+                        player_index=self.player_index,
+                    )
+                    if not arrived_d:
+                        return self.stage
+                if state.walking or self.navigator._last_walk_vec is not None:
+                    self.navigator.stop(proxy, state, player_index=self.player_index)
+                    return self.stage
+                if not self._deconstruct_mining:
+                    self._deconstruct_mining = True
+                    self._queue_all(
+                        proxy,
+                        [
+                            build_selected_entity_action(dx_pos, dy_pos),
+                            build_begin_mining_action(),
+                        ],
+                        state.tick,
+                    )
+                elif not state.mining and (state.tick - self._last_action_tick) >= 18:
+                    if len(state.placed_entities) == 0:
+                        self._queue_all(proxy, [build_stop_mining_action()], state.tick)
+                        self._deconstruct_mining = False
+                        self._deconstruct_idx += 1
+                    else:
+                        self._queue_all(
+                            proxy,
+                            [
+                                build_selected_entity_action(dx_pos, dy_pos),
+                                build_begin_mining_action(),
+                            ],
+                            state.tick,
+                        )
+                return self.stage
+
+            if state.logistics_researched and state.inventory.get("transport-belt", 0) >= 340:
+                self.phase1_inventory_ready = True
+                proxy.max_actions_per_heartbeat = 12
+                self.stage = "build_starter_base"
+            return self.stage
+
+        # Stage 7: Build 100% of the synthesized starter base through BotAgent + CharacterNavigator
+        if self.stage == "build_starter_base":
+            cur_t = self.bot_agent.current_task()
+            if cur_t is not None:
+                if (
+                    not self._core_mall_seeded
+                    and cur_t.phase == PHASE_TRUNK_BELTS
+                    and self.bot_agent.plan is not None
+                ):
+                    self._core_mall_seeded = True
+                    seed_actions: list[tuple[int, bytes]] = [clr]
+                    pip_plate = build_pipette_item_action(item_map["iron-plate"])
+                    for t_task in self.bot_agent.plan.tasks:
+                        if t_task.task_kind == TASK_PLACE_ENTITY and t_task.recipe in (
+                            "iron-gear-wheel",
+                            "transport-belt",
+                        ):
+                            dist_m = math.hypot(
+                                t_task.target_x - state.player_x,
+                                t_task.target_y - state.player_y,
+                            )
+                            if dist_m <= 9.5:
+                                seed_actions.extend(
+                                    [
+                                        build_selected_entity_action(
+                                            t_task.target_x, t_task.target_y
+                                        ),
+                                        pip_plate,
+                                        fs_in,
+                                        clr,
+                                    ]
+                                )
+                    if len(seed_actions) > 1:
+                        self._queue_all(proxy, seed_actions, state.tick)
+                        return self.stage
+
+                self.bot_agent.step_lockstep_proxy(
+                    proxy=proxy,
+                    world_state=state,
+                    id_mappings=self.id_mappings,
+                    player_index=self.player_index,
+                    stop_tolerance=0.65,
+                )
+            else:
+                if (
+                    proxy.pending_action_count() > 0
+                    or (state.tick - self.bot_agent._last_action_tick) < 180
+                ):
+                    return self.stage
+                if self.bot_agent.plan is not None and len(state.placed_entities) > 0:
+                    by_pos = {
+                        (round(ent.x, COORD_ROUND_DIGITS), round(ent.y, COORD_ROUND_DIGITS)): ent
+                        for ent in state.placed_entities
+                    }
+                    requeued = False
+                    for t_task in self.bot_agent.plan.tasks:
+                        key = (
+                            round(t_task.target_x, COORD_ROUND_DIGITS),
+                            round(t_task.target_y, COORD_ROUND_DIGITS),
+                        )
+                        actual = by_pos.get(key)
+                        if t_task.task_kind == TASK_PLACE_ENTITY:
+                            if actual is None or actual.name != t_task.target_name:
+                                self.bot_agent.completed_task_indices.discard(t_task.task_index)
+                                requeued = True
+                        elif (
+                            t_task.task_kind == TASK_CONFIGURE_RECIPE
+                            and actual is not None
+                            and t_task.recipe is not None
+                            and actual.recipe != t_task.recipe
+                        ):
+                            self.bot_agent.completed_task_indices.discard(t_task.task_index)
+                            requeued = True
+                    if requeued:
+                        return self.stage
+                self.final_science_load_queued = True
+                if "steel-processing" in tech_map:
+                    self._queue_all(
+                        proxy,
+                        [build_start_research_action(tech_map["steel-processing"])],
+                        state.tick,
+                    )
+                self.stage = "completed"
+            return self.stage
+
+        return self.stage

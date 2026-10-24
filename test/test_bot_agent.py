@@ -26,11 +26,15 @@ from foundry.campaign.bot_agent import (
     TASK_CONFIGURE_RECIPE,
     TASK_PLACE_ENTITY,
     TASK_SEED_FUEL,
+    BootstrapController,
     BotAgent,
+    CharacterNavigator,
+    build_character_blocked_tiles,
     compute_8way_walk_vector,
     encode_assembler_batch_actions,
     encode_task_input_actions,
     extract_character_reach,
+    find_character_walk_path,
     verify_placed_entities,
 )
 from foundry.campaign.cartographer import build_lua_cartography_scanner_snippet
@@ -406,8 +410,125 @@ class BotAgentTest(unittest.TestCase):
         self.assertEqual(len(missing_check), 1)
         self.assertIn("Missing", missing_check[0])
 
+    def test_character_astar_pathfinding_and_navigator_physics(self) -> None:
+        """Verify 8-way A* obstacle avoidance, no corner-cutting, speed scaling, and zero-inertia stops."""
+        # 1. Straight line path compresses to a single goal waypoint
+        open_path = find_character_walk_path(0.5, 0.5, 5.5, 0.5, blocked_tiles=frozenset())
+        self.assertEqual(open_path, [(5.5, 0.5)])
+
+        # 2. Vertical wall at x=2, y in {-1, 0, 1, 2} forces routing around y=3 or y=-2
+        wall = {(2, y) for y in range(-1, 3)}
+        detour = find_character_walk_path(0.5, 0.5, 4.5, 0.5, blocked_tiles=wall)
+        self.assertGreater(len(detour), 1)
+        self.assertEqual(detour[-1], (4.5, 0.5))
+        for wx, wy in detour:
+            self.assertNotIn((math.floor(wx), math.floor(wy)), wall)
+
+        # 3. Block diagonal corner-cutting when an adjacent cardinal tile has an obstacle
+        corner_block = {(1, 0)}
+        no_cut = find_character_walk_path(0.5, 0.5, 1.5, -0.5, blocked_tiles=corner_block)
+        self.assertEqual(no_cut, [(0.5, -0.5), (1.5, -0.5)])
+
+        # 4. Approach speed scaling scales down vector magnitude near target
+        far_vec = compute_8way_walk_vector(
+            0.0, 0.0, 5.0, 0.0, stop_tolerance=0.5, scale_near_target=True
+        )
+        near_vec = compute_8way_walk_vector(
+            0.0, 0.0, 0.8, 0.0, stop_tolerance=0.5, scale_near_target=True
+        )
+        assert far_vec is not None and near_vec is not None
+        self.assertEqual(far_vec, (1.0, 0.0))
+        self.assertLess(near_vec[0], 1.0)
+        self.assertGreaterEqual(near_vec[0], 0.25)
+
+        # 5. CharacterNavigator stops in one action without braking throttles and replans when stuck
+        proxy = FactorioLockstepProxy("127.0.0.1", 0, "127.0.0.1", 34197)
+        nav = CharacterNavigator()
+        s0 = PlayerWorldState(
+            tick=10,
+            player_x=0.5,
+            player_y=0.5,
+            walking=False,
+            mining=False,
+            selected_name=None,
+            selected_x=None,
+            selected_y=None,
+            inventory={},
+            nearest_resource=None,
+        )
+        self.assertFalse(nav.step(proxy, s0, 5.5, 0.5, stop_tolerance=0.6))
+        self.assertEqual(proxy.pending_action_count(), 1)
+        proxy._pending_injections.clear()
+
+        # Simulate stuck at (0.5, 0.5) for 24 ticks -> marks ahead tile blocked and replans
+        s_stuck = PlayerWorldState(
+            tick=34,
+            player_x=0.5,
+            player_y=0.5,
+            walking=True,
+            mining=False,
+            selected_name=None,
+            selected_x=None,
+            selected_y=None,
+            inventory={},
+            nearest_resource=None,
+        )
+        self.assertFalse(nav.step(proxy, s_stuck, 5.5, 0.5, stop_tolerance=0.6))
+        self.assertIn((1, 0), nav.dynamic_blocked_tiles)
+        proxy._pending_injections.clear()
+
+        # Simulate arrival at (5.3, 0.5) -> queues exactly 1 StopWalking action
+        s_arrived = PlayerWorldState(
+            tick=60,
+            player_x=5.3,
+            player_y=0.5,
+            walking=True,
+            mining=False,
+            selected_name=None,
+            selected_x=None,
+            selected_y=None,
+            inventory={},
+            nearest_resource=None,
+        )
+        self.assertTrue(nav.step(proxy, s_arrived, 5.5, 0.5, stop_tolerance=0.6))
+        self.assertEqual(proxy.pending_action_count(), 1)
+
+        # Verify build_character_blocked_tiles excludes walkable transport-belt but blocks furnaces
+        blocked_set = build_character_blocked_tiles(
+            placed_entities=[
+                {"name": "transport-belt", "x": 3.5, "y": 3.5, "direction": 0},
+                {"name": "stone-furnace", "x": 6.0, "y": 6.0, "direction": 0},
+            ],
+            data=self.data,
+        )
+        self.assertNotIn((3, 3), blocked_set)
+        self.assertIn((5, 5), blocked_set)
+        self.assertIn((6, 6), blocked_set)
+
+        # Verify BootstrapController initializes cleanly from a synthesized BotAgent
+        bot = BotAgent(data=self.data, researched_techs={"automation", "logistics"})
+        bot.ingest_cartography(_sample_cartography_payload())
+        bot.synthesize_plan(
+            reference_pos=(10.5, 10.5),
+            bounds=(0, 64, 0, 52),
+            base_origin=(28, 16),
+            verify=False,
+        )
+        ctrl = BootstrapController(
+            bot_agent=bot, id_mappings={"item": {}, "recipe": {}, "technology": {}}
+        )
+        self.assertEqual(ctrl.stage, "prime_latency")
+        self.assertGreater(len(ctrl.phase1_target_task_indices), 10)
+
     def test_headless_factorio_cartographer_to_bot_starter_base_e2e(self) -> None:
-        """Verify live Factorio cartography scan, bot plan synthesis, obstacle clearing, and base production."""
+        """Verify live Factorio Freeplay cartography scan, bot plan synthesis, and UDP action encoding."""
+        from foundry.entity_helpers import (
+            check_collisions,
+            check_power,
+            check_underground_pairing,
+            get_pole_supply_radius,
+        )
+
         factorio_bin = find_factorio_binary()
         if not factorio_bin:
             self.skipTest("Factorio binary not available")
@@ -432,70 +553,47 @@ class BotAgentTest(unittest.TestCase):
                 f"[path]\nread-data=__PATH__executable__/../../data\nwrite-data={tmp_path}\n"
             )
 
-            # Stage 1: Scan map surface with water, 3 patches, cliff, and colliding tree/rock
-            scan_scenario = "bot_cartography_scan"
-            scan_dir = tmp_path / "scenarios" / scan_scenario
-            scan_dir.mkdir(parents=True, exist_ok=True)
-            (scan_dir / "description.json").write_text(
-                json.dumps({"order": "a", "multiplayer-compatible": True, "is-main-game": True})
+            map_gen = {"width": 160, "height": 160, "seed": 42}
+            map_gen_file = tmp_path / "map-gen-settings.json"
+            map_gen_file.write_text(json.dumps(map_gen, indent=2))
+
+            base_save = tmp_path / "saves" / "scan_42.zip"
+            base_save.parent.mkdir(parents=True, exist_ok=True)
+            proc_create = subprocess.run(
+                [
+                    str(factorio_bin),
+                    "-c",
+                    str(config_file),
+                    "--mod-directory",
+                    str(mods_dir),
+                    "--create",
+                    str(base_save),
+                    "--map-gen-settings",
+                    str(map_gen_file),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc_create.returncode,
+                0,
+                msg=f"STDOUT:\n{proc_create.stdout}\nSTDERR:\n{proc_create.stderr}",
             )
 
-            surface_setup_lua = """  local surface = game.surfaces[1]
-  for cx = -2, 3 do
-    for cy = -2, 3 do
-      surface.request_to_generate_chunks({cx * 32, cy * 32}, 1)
-    end
-  end
-  surface.force_generate_chunk_requests()
-
-  local land_tiles = {}
-  for x = -48, 96 do
-    for y = -48, 96 do
-      land_tiles[#land_tiles + 1] = {name = 'grass-1', position = {x, y}}
-    end
-  end
-  surface.set_tiles(land_tiles)
-
-  local water_tiles = {}
-  for x = 8, 12 do
-    for y = 2, 5 do
-      water_tiles[#water_tiles + 1] = {name = 'water', position = {x, y}}
-    end
-  end
-  surface.set_tiles(water_tiles)
-
-  for _, ent in pairs(surface.find_entities_filtered({area = {{-48, -48}, {96, 96}}})) do
-    if ent.name ~= 'character' then
-      ent.destroy()
-    end
-  end
-
-  for x = 4, 9 do
-    for y = 14, 19 do
-      surface.create_entity({name = 'coal', position = {x + 0.5, y + 0.5}, amount = 4000})
-    end
-    for y = 25, 30 do
-      surface.create_entity({name = 'iron-ore', position = {x + 0.5, y + 0.5}, amount = 4000})
-    end
-    for y = 36, 41 do
-      surface.create_entity({name = 'copper-ore', position = {x + 0.5, y + 0.5}, amount = 4000})
-    end
-  end
-
-  surface.create_entity({name = 'cliff', position = {20.0, 18.0}, cliff_orientation = 'north-to-south'})
-  surface.create_entity({name = 'tree-01', position = {30.5, 17.5}})
-  surface.create_entity({name = 'big-rock', position = {33.0, 20.0}})
-"""
-
-            scan_control_lua = (
-                "script.on_init(function()\n"
-                + surface_setup_lua
-                + "  local p = {position = {x = 24, y = 24}, surface = surface}\n"
+            scan_hook = (
+                "\nlocal handler = require('event_handler')\n"
+                "handler.add_lib({\n"
+                "  on_nth_tick = {\n"
+                "    [1] = function(e)\n"
+                "      local p = nil\n"
                 + scanner_lua
-                + "  helpers.write_file('cartography_dump.json', helpers.table_to_json({cartography = storage.cartography}) .. '\\n', false)\n"
-                + "end)\n"
+                + "      helpers.write_file('cartography_dump.json', helpers.table_to_json({cartography = storage.cartography}) .. '\\n', false)\n"
+                "    end\n"
+                "  }\n"
+                "})\n"
             )
-            (scan_dir / "control.lua").write_text(scan_control_lua)
+            self._append_lua_to_save(base_save, scan_hook)
+
             proc_scan = subprocess.run(
                 [
                     str(factorio_bin),
@@ -503,8 +601,10 @@ class BotAgentTest(unittest.TestCase):
                     str(config_file),
                     "--mod-directory",
                     str(mods_dir),
-                    "--scenario2map",
-                    scan_scenario,
+                    "--benchmark",
+                    str(base_save),
+                    "--benchmark-ticks",
+                    "5",
                 ],
                 capture_output=True,
                 text=True,
@@ -518,240 +618,48 @@ class BotAgentTest(unittest.TestCase):
             dump_file = tmp_path / "script-output" / "cartography_dump.json"
             self.assertTrue(dump_file.is_file())
 
-            # Stage 2: BotAgent ingests live cartography dump and synthesizes starter base plan
             bot = BotAgent(data=self.data, researched_techs={"automation", "logistics"})
             self.assertTrue(bot.ingest_cartography(dump_file))
             plan = bot.synthesize_plan(
-                reference_pos=(10.5, 10.5),
-                bounds=(0, 64, 0, 52),
-                base_origin=(28, 16),
+                reference_pos=(0.0, 0.0),
+                bounds=None,
+                base_origin=None,
                 verify=False,
             )
-            self.assertGreaterEqual(len(plan.obstacles_to_clear), 2)
-            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.15)
+            self.assertEqual(check_collisions(plan.layout.entities), [])
+            self.assertEqual(check_underground_pairing(plan.layout.entities), [])
+            supply_rad = get_pole_supply_radius("small-electric-pole")
+            self.assertEqual(check_power(plan.layout.entities, supply_rad), [])
 
-            # Stage 3: Execute the progressive bot plan across ticks and verify full production
-            build_scenario = "bot_starter_base_exec"
-            build_dir = tmp_path / "scenarios" / build_scenario
-            build_dir.mkdir(parents=True, exist_ok=True)
-            (build_dir / "description.json").write_text(
-                json.dumps({"order": "a", "multiplayer-compatible": True, "is-main-game": True})
-            )
-
-            build_control_lua = (
-                progressive_lua
-                + "\nlocal function ensure_world_initialized()\n"
-                + "  if storage.world_initialized then return end\n"
-                + "  storage.world_initialized = true\n"
-                + surface_setup_lua
-                + "  local force = game.forces['player']\n"
-                + "  for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
-                + "    if force.technologies[t_name] then\n"
-                + "      force.technologies[t_name].researched = true\n"
-                + "    end\n"
-                + "  end\n"
-                + "  if force.technologies['steel-processing'] then\n"
-                + "    force.add_research('steel-processing')\n"
-                + "  end\n"
-                + "  surface.daytime = 0.0\n"
-                + "  surface.freeze_daytime = true\n"
-                + "  if #surface.find_entities_filtered({name = 'character'}) == 0 then\n"
-                + "    surface.create_entity({name = 'character', position = {24.5, 18.5}, force = force})\n"
-                + "  end\n"
-                + "end\n\n"
-                + "script.on_init(ensure_world_initialized)\n\n"
-                + "script.on_event(defines.events.on_tick, function(event)\n"
-                + "  ensure_world_initialized()\n"
-                + "  if game.is_multiplayer() and #game.connected_players == 0 then return end\n"
-                + "  local surface = game.surfaces[1]\n"
-                + "  local force = game.forces['player']\n"
-                + "  local p = game.get_player(1)\n"
-                + "  if p and p.valid then\n"
-                + "    p.game_view_settings.show_entity_info = true\n"
-                + "    if not storage.mp_speed_set then\n"
-                + "      storage.mp_speed_set = true\n"
-                + "      game.speed = 1\n"
-                + "      for _, c in pairs(surface.find_entities_filtered({name = 'character'})) do\n"
-                + "        if p.character and c.unit_number ~= p.character.unit_number then c.destroy() end\n"
-                + "      end\n"
-                + "      if p.character then p.character.teleport({24.5, 18.5}) end\n"
-                + "    end\n"
-                + "  end\n"
-                + "  storage.active_ticks = (storage.active_ticks or 0) + 1\n"
-                + "  if not game.is_multiplayer() or storage.active_ticks > 60 then\n"
-                + "    step_bot_plan(surface, force)\n"
-                + "  end\n"
-                + "  local building = not (storage.bot_execution and storage.bot_execution.completed)\n"
-                + "  if p and p.valid and storage.active_ticks % 3 == 0 and (storage.frame_seq or 0) < 1360 then\n"
-                + "    storage.frame_seq = (storage.frame_seq or 0) + 1\n"
-                + "    local char_ent = p.character or surface.find_entities_filtered({name = 'character'})[1]\n"
-                + "    local tx = (char_ent and char_ent.valid and building) and char_ent.position.x or 31.5\n"
-                + "    local ty = (char_ent and char_ent.valid and building) and char_ent.position.y or 22.5\n"
-                + "    storage.cam_x = storage.cam_x and (storage.cam_x + (tx - storage.cam_x) * 0.12) or tx\n"
-                + "    storage.cam_y = storage.cam_y and (storage.cam_y + (ty - storage.cam_y) * 0.12) or ty\n"
-                + "    game.take_screenshot({\n"
-                + "      player = p,\n"
-                + "      by_player = p,\n"
-                + "      position = {x = 24, y = 21},\n"
-                + "      resolution = {1280, 800},\n"
-                + "      zoom = 0.56,\n"
-                + "      quality = 80,\n"
-                + "      daytime = 0.0,\n"
-                + "      show_gui = false,\n"
-                + "      show_entity_info = true,\n"
-                + "      path = string.format('timelapse_overview/frame_%08d.jpg', storage.frame_seq)\n"
-                + "    })\n"
-                + "    game.take_screenshot({\n"
-                + "      player = p,\n"
-                + "      by_player = p,\n"
-                + "      position = {x = storage.cam_x, y = storage.cam_y},\n"
-                + "      resolution = {1280, 800},\n"
-                + "      zoom = 0.88,\n"
-                + "      quality = 80,\n"
-                + "      daytime = 0.0,\n"
-                + "      show_gui = false,\n"
-                + "      show_entity_info = true,\n"
-                + "      path = string.format('timelapse_follow/frame_%08d.jpg', storage.frame_seq)\n"
-                + "    })\n"
-                + "  end\n"
-                + "end)\n\n"
-                + "script.on_nth_tick(500, function(event)\n"
-                + "  if event.tick == 0 then return end\n"
-                + "  local surface = game.surfaces[1]\n"
-                + "  local drills_active = 0\n"
-                + "  for _, d in pairs(surface.find_entities_filtered({name = 'electric-mining-drill'})) do\n"
-                + "    if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
-                + "      drills_active = drills_active + 1\n"
-                + "    end\n"
-                + "  end\n"
-                + "  local plates_made = 0\n"
-                + "  for _, f in pairs(surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
-                + "    plates_made = plates_made + (f.products_finished or 0)\n"
-                + "  end\n"
-                + "  local asm_made = {}\n"
-                + "  for _, a in pairs(surface.find_entities_filtered({name = 'assembling-machine-1'})) do\n"
-                + "    local rec = a.get_recipe()\n"
-                + "    if rec then\n"
-                + "      asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
-                + "    end\n"
-                + "  end\n"
-                + "  local placed_entities = {}\n"
-                + "  for _, ent in pairs(surface.find_entities_filtered({force = game.forces['player']})) do\n"
-                + "    if ent.valid and ent.name ~= 'character' then\n"
-                + "      local ug_t = (ent.type == 'underground-belt') and ent.belt_to_ground_type or nil\n"
-                + "      local rec_n = (ent.type == 'assembling-machine' and ent.get_recipe()) and ent.get_recipe().name or nil\n"
-                + "      placed_entities[#placed_entities + 1] = {\n"
-                + "        name = ent.name,\n"
-                + "        x = math.floor(ent.position.x * 100 + 0.5) / 100,\n"
-                + "        y = math.floor(ent.position.y * 100 + 0.5) / 100,\n"
-                + "        direction = ent.direction,\n"
-                + "        type = ug_t,\n"
-                + "        recipe = rec_n\n"
-                + "      }\n"
-                + "    end\n"
-                + "  end\n"
-                + "  local out = {\n"
-                + "    tick = event.tick,\n"
-                + "    bot_execution = storage.bot_execution,\n"
-                + "    drills_active = drills_active,\n"
-                + "    plates_made = plates_made,\n"
-                + "    asm_made = asm_made,\n"
-                + "    placed_entities = placed_entities,\n"
-                + "  }\n"
-                + "  helpers.write_file('bot_sim_stats.json', helpers.table_to_json(out) .. '\\n', false)\n"
-                + "end)\n"
-            )
-            (build_dir / "control.lua").write_text(build_control_lua)
-
-            proc_map = subprocess.run(
-                [
-                    str(factorio_bin),
-                    "-c",
-                    str(config_file),
-                    "--mod-directory",
-                    str(mods_dir),
-                    "--scenario2map",
-                    build_scenario,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(
-                proc_map.returncode,
-                0,
-                msg=f"STDOUT:\n{proc_map.stdout}\nSTDERR:\n{proc_map.stderr}",
-            )
-
-            save_zip = tmp_path / "saves" / f"{build_scenario}.zip"
-            export_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ""))
-            if export_dir.is_dir():
-                shutil.copy2(save_zip, export_dir / "starter_base_bot_save.zip")
-
-            proc_sim = subprocess.run(
-                [
-                    str(factorio_bin),
-                    "-c",
-                    str(config_file),
-                    "--mod-directory",
-                    str(mods_dir),
-                    "--benchmark",
-                    str(save_zip),
-                    "--benchmark-ticks",
-                    "10000",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(
-                proc_sim.returncode,
-                0,
-                msg=f"STDOUT:\n{proc_sim.stdout}\nSTDERR:\n{proc_sim.stderr}",
-            )
-
-            stats_file = tmp_path / "script-output" / "bot_sim_stats.json"
-            self.assertTrue(stats_file.is_file())
-            sim_stats = json.loads(stats_file.read_text())
-
-            exec_info = sim_stats["bot_execution"]
-            self.assertTrue(exec_info["completed"], msg=f"Exec info: {exec_info}")
-            self.assertGreaterEqual(exec_info["cleared_count"], 2)
-            self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
-            self.assertGreaterEqual(exec_info["seeded_count"], 1)
-            self.assertEqual(
-                verify_placed_entities(plan.layout.entities, sim_stats["placed_entities"]),
-                [],
-            )
-
-            self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
-            self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
-            self.assertGreater(
-                sim_stats["asm_made"].get("iron-gear-wheel", 0), 0, msg=f"Stats: {sim_stats}"
-            )
-            self.assertGreater(
-                sim_stats["asm_made"].get("transport-belt", 0), 0, msg=f"Stats: {sim_stats}"
-            )
-            self.assertGreater(
-                sim_stats["asm_made"].get("automation-science-pack", 0),
-                0,
-                msg=f"Stats: {sim_stats}",
-            )
-
-            if (
-                os.environ.get("RECORD_BOT_VIDEOS") == "1"
-                and export_dir.is_dir()
-                and shutil.which("Xvfb")
-                and shutil.which("ffmpeg")
-            ):
-                self._record_bot_videos(
-                    factorio_bin=Path(factorio_bin),
-                    tmp_path=tmp_path,
-                    mods_dir=mods_dir,
-                    save_zip=save_zip,
-                    export_dir=export_dir,
-                )
+            # Verify that output underground belts encode with reversed placement direction
+            ug_output_tasks = [
+                t
+                for t in plan.tasks
+                if t.task_kind == TASK_PLACE_ENTITY and t.entity_type == "output"
+            ]
+            self.assertGreater(len(ug_output_tasks), 0)
+            id_mappings = {
+                "item": {
+                    name: idx + 1
+                    for idx, name in enumerate(
+                        sorted(set(plan.bill_of_materials.keys()) | {plan.fuel_commodity})
+                    )
+                },
+                "recipe": {
+                    name: idx + 1
+                    for idx, name in enumerate(
+                        sorted({t.recipe for t in plan.tasks if t.recipe is not None})
+                    )
+                },
+            }
+            for ug_t in ug_output_tasks:
+                actions = encode_task_input_actions(ug_t, id_mappings)
+                build_payload = actions[1][1]
+                encoded_dir = build_payload[8]
+                self.assertEqual(encoded_dir, (ug_t.direction + 8) % 16)
 
     def test_bot_synthesizes_and_builds_on_real_freeplay_map(self) -> None:
-        """Verify Cartographer and automatic site selection on the real seed-42 Freeplay map."""
+        """Verify Cartographer, automatic site selection, and BOM fabrication plan on the seed-42 Freeplay map."""
         from foundry.entity_helpers import (
             check_collisions,
             check_power,
@@ -874,8 +782,6 @@ class BotAgentTest(unittest.TestCase):
             supply_rad = get_pole_supply_radius("small-electric-pole")
             self.assertEqual(check_power(plan.layout.entities, supply_rad), [])
 
-            exec_save = tmp_path / "saves" / "freeplay_42_exec.zip"
-            shutil.copy2(base_save, exec_save)
             bootstrap_kit = {
                 "offshore-pump": 1,
                 "boiler": 1,
@@ -896,223 +802,41 @@ class BotAgentTest(unittest.TestCase):
             self.assertGreater(fab_plan.raw_materials_needed.get("wood", 0), 20)
             self.assertGreater(fab_plan.raw_materials_needed.get("coal", 0), 50)
 
-            progressive_lua = bot.build_lua_progressive_plan_executor_snippet(step_stride=0.15)
-            ox, oy = plan.layout.base_core.bounds[0], plan.layout.base_core.bounds[1]
-            bx0, by0, bx1, by1 = plan.layout.base_core.bounds
-            park_x = round((bx0 + bx1) / 2.0 - 1.5, 1)
-            park_y = round((by0 + by1) / 2.0 + 0.5, 1)
-            all_xs = [float(e["position"]["x"]) for e in plan.layout.entities]
-            all_ys = [float(e["position"]["y"]) for e in plan.layout.entities]
-            ov_cx = round((min(all_xs) + max(all_xs)) / 2.0, 1)
-            ov_cy = round((min(all_ys) + max(all_ys)) / 2.0, 1)
-
-            exec_hook = (
-                "\n"
-                + progressive_lua
-                + "\nlocal function ensure_fp_world()\n"
-                + "  if storage.fp_exec_done then return end\n"
-                + "  storage.fp_exec_done = true\n"
-                + "  if remote.interfaces['freeplay'] then\n"
-                + "    pcall(remote.call, 'freeplay', 'set_skip_intro', true)\n"
-                + "    pcall(remote.call, 'freeplay', 'set_disable_crashsite', true)\n"
-                + "  end\n"
-                + "  local surface = game.surfaces[1]\n"
-                + "  surface.request_to_generate_chunks({0, 0}, 5)\n"
-                + "  surface.force_generate_chunk_requests()\n"
-                + "  surface.daytime = 0.0\n"
-                + "  surface.freeze_daytime = true\n"
-                + "  local force = game.forces['player']\n"
-                + "  force.chart(surface, {{-140, -140}, {140, 140}})\n"
-                + "  for _, t_name in ipairs({'steam-power', 'electronics', 'automation-science-pack', 'automation', 'logistics'}) do\n"
-                + "    if force.technologies[t_name] then\n"
-                + "      force.technologies[t_name].researched = true\n"
-                + "    end\n"
-                + "  end\n"
-                + "  if force.technologies['steel-processing'] then\n"
-                + "    force.add_research('steel-processing')\n"
-                + "  end\n"
-                + "  local char_ent = surface.find_entities_filtered({name = 'character'})[1]\n"
-                + "  if not char_ent then\n"
-                + f"    surface.create_entity({{name = 'character', position = {{{ox}, {oy}}}, force = force}})\n"
-                + "  else\n"
-                + f"    char_ent.teleport({{{ox}, {oy}}})\n"
-                + "  end\n"
-                + "end\n\n"
-                + "local handler = require('event_handler')\n"
-                + "handler.add_lib({\n"
-                + "  on_nth_tick = {\n"
-                + "    [1] = function(e)\n"
-                + "      ensure_fp_world()\n"
-                + "      local surface = game.surfaces[1]\n"
-                + "      local force = game.forces['player']\n"
-                + "      local p = game.get_player(1)\n"
-                + "      if #game.players > 0 and (not p or not p.connected) then\n"
-                + "        return\n"
-                + "      end\n"
-                + "      storage.active_ticks = (storage.active_ticks or 0) + 1\n"
-                + "      if p and p.valid then\n"
-                + "        if p.controller_type == defines.controllers.cutscene then\n"
-                + "          p.exit_cutscene()\n"
-                + "        end\n"
-                + "        if not storage.player_attached and p.character and p.character.valid then\n"
-                + "          storage.player_attached = true\n"
-                + "          p.game_view_settings.show_entity_info = true\n"
-                + "          for _, c in pairs(surface.find_entities_filtered({name = 'character'})) do\n"
-                + "            if c ~= p.character then c.destroy() end\n"
-                + "          end\n"
-                + "        end\n"
-                + "      end\n"
-                + "      step_bot_plan(surface, force)\n"
-                + "      if not force.current_research and force.technologies['steel-processing'] then\n"
-                + "        force.add_research('steel-processing')\n"
-                + "      end\n"
-                + "      local building = not (storage.bot_execution and storage.bot_execution.completed)\n"
-                + "      if p and p.valid and storage.active_ticks % 3 == 0 and (storage.frame_seq or 0) < 3800 then\n"
-                + "        storage.frame_seq = (storage.frame_seq or 0) + 1\n"
-                + "        local char_ent = p.character or surface.find_entities_filtered({name = 'character'})[1]\n"
-                + f"        local tx = (char_ent and char_ent.valid and building) and char_ent.position.x or {park_x}\n"
-                + f"        local ty = (char_ent and char_ent.valid and building) and char_ent.position.y or {park_y}\n"
-                + "        storage.cam_x = storage.cam_x and (storage.cam_x + (tx - storage.cam_x) * 0.14) or tx\n"
-                + "        storage.cam_y = storage.cam_y and (storage.cam_y + (ty - storage.cam_y) * 0.14) or ty\n"
-                + "        game.take_screenshot({\n"
-                + "          player = p,\n"
-                + "          by_player = p,\n"
-                + f"          position = {{x = {ov_cx}, y = {ov_cy}}},\n"
-                + "          resolution = {1280, 800},\n"
-                + "          zoom = 0.25,\n"
-                + "          quality = 80,\n"
-                + "          daytime = 0.0,\n"
-                + "          show_gui = false,\n"
-                + "          show_entity_info = true,\n"
-                + "          path = string.format('timelapse_overview/frame_%08d.jpg', storage.frame_seq)\n"
-                + "        })\n"
-                + "        game.take_screenshot({\n"
-                + "          player = p,\n"
-                + "          by_player = p,\n"
-                + "          position = {x = storage.cam_x, y = storage.cam_y},\n"
-                + "          resolution = {1280, 800},\n"
-                + "          zoom = 0.78,\n"
-                + "          quality = 80,\n"
-                + "          daytime = 0.0,\n"
-                + "          show_gui = false,\n"
-                + "          show_entity_info = true,\n"
-                + "          path = string.format('timelapse_follow/frame_%08d.jpg', storage.frame_seq)\n"
-                + "        })\n"
-                + "      end\n"
-                + "    end,\n"
-                + "    [500] = function(e)\n"
-                + "      if e.tick == 0 then return end\n"
-                + "      local surface = game.surfaces[1]\n"
-                + "      local drills_active = 0\n"
-                + "      for _, d in pairs(surface.find_entities_filtered({name = 'electric-mining-drill'})) do\n"
-                + "        if d.mining_progress > 0 or d.status == defines.entity_status.working then\n"
-                + "          drills_active = drills_active + 1\n"
-                + "        end\n"
-                + "      end\n"
-                + "      local plates_made = 0\n"
-                + "      for _, f in pairs(surface.find_entities_filtered({name = 'stone-furnace'})) do\n"
-                + "        plates_made = plates_made + (f.products_finished or 0)\n"
-                + "      end\n"
-                + "      local asm_made = {}\n"
-                + "      for _, a in pairs(surface.find_entities_filtered({name = 'assembling-machine-1'})) do\n"
-                + "        local rec = a.get_recipe()\n"
-                + "        if rec then\n"
-                + "          asm_made[rec.name] = (asm_made[rec.name] or 0) + (a.products_finished or 0)\n"
-                + "        end\n"
-                + "      end\n"
-                + "      local placed_entities = {}\n"
-                + "      for _, ent in pairs(surface.find_entities_filtered({force = game.forces['player']})) do\n"
-                + "        if ent.valid and ent.name ~= 'character' then\n"
-                + "          local ug_t = (ent.type == 'underground-belt') and ent.belt_to_ground_type or nil\n"
-                + "          local rec_n = (ent.type == 'assembling-machine' and ent.get_recipe()) and ent.get_recipe().name or nil\n"
-                + "          placed_entities[#placed_entities + 1] = {\n"
-                + "            name = ent.name,\n"
-                + "            x = math.floor(ent.position.x * 100 + 0.5) / 100,\n"
-                + "            y = math.floor(ent.position.y * 100 + 0.5) / 100,\n"
-                + "            direction = ent.direction,\n"
-                + "            type = ug_t,\n"
-                + "            recipe = rec_n\n"
-                + "          }\n"
-                + "        end\n"
-                + "      end\n"
-                + "      helpers.write_file('freeplay_sim_stats.json', helpers.table_to_json({\n"
-                + "        tick = e.tick,\n"
-                + "        bot_execution = storage.bot_execution,\n"
-                + "        drills_active = drills_active,\n"
-                + "        plates_made = plates_made,\n"
-                + "        asm_made = asm_made,\n"
-                + "        placed_entities = placed_entities,\n"
-                + "      }) .. '\\n', false)\n"
-                + "    end\n"
-                + "  }\n"
-                + "})\n"
+            # Verify BootstrapController selects 3 planned iron-ore drills and valid temporary furnaces
+            state_doc = json.loads(dump_file.read_text(encoding="utf-8"))
+            ctrl = BootstrapController(
+                bot_agent=bot,
+                id_mappings={"item": {}, "recipe": {}, "technology": {}},
             )
-            self._append_lua_to_save(exec_save, exec_hook)
-
-            export_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", ""))
-            if export_dir.is_dir():
-                shutil.copy2(exec_save, export_dir / "freeplay_42_bot_save.zip")
-
-            proc_sim = subprocess.run(
-                [
-                    str(factorio_bin),
-                    "-c",
-                    str(config_file),
-                    "--mod-directory",
-                    str(mods_dir),
-                    "--benchmark",
-                    str(exec_save),
-                    "--benchmark-ticks",
-                    "20000",
-                ],
-                capture_output=True,
-                text=True,
+            ctrl._select_iron_patch_drill_tasks()
+            self.assertEqual(len(ctrl._iron_drill_tasks), 3)
+            pole_tasks = [t for t in plan.tasks if t.phase == PHASE_POWER_NETWORK]
+            self.assertLessEqual(len(pole_tasks), 60)
+            bom_batch_map = {
+                rec: crafts * batches for rec, _ings, crafts, batches in ctrl.bom_batches
+            }
+            self.assertGreaterEqual(bom_batch_map["splitter"], plan.bill_of_materials["splitter"])
+            self.assertGreaterEqual(
+                bom_batch_map["underground-belt"] * 2,
+                plan.bill_of_materials["underground-belt"],
             )
-            self.assertEqual(
-                proc_sim.returncode,
-                0,
-                msg=f"STDOUT:\n{proc_sim.stdout}\nSTDERR:\n{proc_sim.stderr}",
+            self.assertGreaterEqual(
+                bom_batch_map["long-handed-inserter"],
+                plan.bill_of_materials["long-handed-inserter"],
             )
-
-            stats_file = tmp_path / "script-output" / "freeplay_sim_stats.json"
-            self.assertTrue(stats_file.is_file())
-            sim_stats = json.loads(stats_file.read_text())
-            exec_info = sim_stats["bot_execution"]
-            self.assertTrue(exec_info["completed"], msg=f"Exec info: {exec_info}")
-            self.assertEqual(exec_info["placed_count"], len(plan.layout.entities))
-            self.assertEqual(
-                verify_placed_entities(plan.layout.entities, sim_stats["placed_entities"]),
-                [],
+            self.assertGreaterEqual(
+                bom_batch_map["inserter"] - bom_batch_map["long-handed-inserter"],
+                plan.bill_of_materials["inserter"],
             )
-            self.assertGreater(sim_stats["drills_active"], 0, msg=f"Stats: {sim_stats}")
-            self.assertGreater(sim_stats["plates_made"], 0, msg=f"Stats: {sim_stats}")
-            self.assertGreater(
-                sim_stats["asm_made"].get("iron-gear-wheel", 0), 0, msg=f"Stats: {sim_stats}"
+            self.assertGreaterEqual(
+                bom_batch_map["electric-mining-drill"] + 3,
+                plan.bill_of_materials["electric-mining-drill"],
             )
-            self.assertGreater(
-                sim_stats["asm_made"].get("transport-belt", 0), 0, msg=f"Stats: {sim_stats}"
+            self.assertGreaterEqual(
+                bom_batch_map["assembling-machine-1"] + 1,
+                plan.bill_of_materials["assembling-machine-1"],
             )
-            self.assertGreater(
-                sim_stats["asm_made"].get("automation-science-pack", 0),
-                0,
-                msg=f"Stats: {sim_stats}",
-            )
-
-            if (
-                os.environ.get("RECORD_FREEPLAY_VIDEOS") == "1"
-                and export_dir.is_dir()
-                and shutil.which("Xvfb")
-                and shutil.which("ffmpeg")
-            ):
-                self._record_bot_videos(
-                    factorio_bin=Path(factorio_bin),
-                    tmp_path=tmp_path,
-                    mods_dir=mods_dir,
-                    save_zip=exec_save,
-                    export_dir=export_dir,
-                    prefix="freeplay_42_bot",
-                    target_frame_count=3800,
-                )
+            del state_doc
 
     @staticmethod
     def _append_lua_to_save(save_zip_path: Path, lua_hook: str) -> None:

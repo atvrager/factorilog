@@ -171,6 +171,26 @@ py_test(
     main = "test_check_no_hardcoded_prototypes.py",
 )
 
+py_binary(
+    name = "check_no_bot_cheats",
+    srcs = ["check_no_bot_cheats.py"],
+    main = "check_no_bot_cheats.py",
+)
+
+py_test(
+    name = "no_bot_cheats_test",
+    size = "small",
+    srcs = [
+        "check_no_bot_cheats.py",
+        "test_check_no_bot_cheats.py",
+    ],
+    data = [
+        "//foundry:py_srcs",
+        "//test:py_srcs",
+    ],
+    main = "test_check_no_bot_cheats.py",
+)
+
 sh_test(
     name = "ruff_test",
     size = "small",

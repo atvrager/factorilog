@@ -477,31 +477,41 @@ def _try_build_patch_row(
     occupied: set[TileCoord] = set()
     drop_along_coords: list[int] = []
 
-    for a0 in slot_starts:
+    if is_horiz:
+        sides = (
+            (-dh / HALF_DIVISOR, DIRECTION_SOUTH),
+            (1.0 + dh / HALF_DIVISOR, DIRECTION_NORTH),
+        )
+    else:
+        sides = (
+            (-dw / HALF_DIVISOR, DIRECTION_EAST),
+            (1.0 + dw / HALF_DIVISOR, DIRECTION_WEST),
+        )
+
+    for side_off, d_dir in sides:
         if len(placed_drills) >= required_drills:
             break
-        if is_horiz:
-            side_specs = (
-                (a0 + dw / HALF_DIVISOR, belt_line_coord - dh / HALF_DIVISOR, DIRECTION_SOUTH),
-                (
-                    a0 + dw / HALF_DIVISOR,
-                    belt_line_coord + 1.0 + dh / HALF_DIVISOR,
-                    DIRECTION_NORTH,
-                ),
-            )
-        else:
-            side_specs = (
-                (belt_line_coord - dw / HALF_DIVISOR, a0 + dh / HALF_DIVISOR, DIRECTION_EAST),
-                (belt_line_coord + 1.0 + dw / HALF_DIVISOR, a0 + dh / HALF_DIVISOR, DIRECTION_WEST),
-            )
-        for cx, cy, d_dir in side_specs:
+        step_x, step_y = DIR_STEPS[d_dir]
+        for a0 in slot_starts:
             if len(placed_drills) >= required_drills:
                 break
+            if is_horiz:
+                cx = a0 + dw / HALF_DIVISOR
+                cy = belt_line_coord + side_off
+            else:
+                cx = belt_line_coord + side_off
+                cy = a0 + dh / HALF_DIVISOR
             fp = _footprint_tiles(cx, cy, dw, dh)
             if fp & obstacles or fp & occupied:
                 continue
             if not (fp & patch_tiles):
                 continue
+            if commodity == "iron-ore":
+                sm_x = cx + 2.5 * step_x + (0.5 if step_x == 0 else 0.0)
+                sm_y = cy + 2.5 * step_y + (0.5 if step_y == 0 else 0.0)
+                sm_fp = _footprint_tiles(sm_x, sm_y, 2, 2)
+                if sm_fp & obstacles or sm_fp & occupied:
+                    continue
             placed_drills.append(
                 {
                     "name": tier.drill_name,
@@ -655,6 +665,24 @@ def synthesize_patch_miner_array(
     return best_result
 
 
+def _bootstrap_shoreline_footprint(px: float, py: float, p_dir: int) -> set[TileCoord]:
+    """Return the temporary shoreline bootstrap footprint tiles around offshore-pump (px, py)."""
+    po_dx, po_dy = _rotate_offset(2.0, 4.0, p_dir)
+    a_dx, a_dy = _rotate_offset(2.0, 6.0, p_dir)
+    l_dx, l_dy = _rotate_offset(5.0, 5.5, p_dir)
+    s_dx, s_dy = _rotate_offset(-0.5, 4.5, p_dir)
+    fp: set[TileCoord] = {
+        (math.floor(px + po_dx), math.floor(py + po_dy)),
+        (math.floor(px + s_dx), math.floor(py + s_dy)),
+    }
+    fp |= _footprint_tiles(px + a_dx, py + a_dy, 3, 3)
+    fp |= _footprint_tiles(px + l_dx, py + l_dy, 3, 3)
+    for fy_off in (2.0, 4.0, 6.0, 8.0):
+        f_dx, f_dy = _rotate_offset(-4.5, fy_off, p_dir)
+        fp |= _footprint_tiles(px + f_dx, py + f_dy, 2, 2)
+    return fp
+
+
 def synthesize_shoreline_power_array(
     water_tiles: set[TileCoord],
     required_power_watts: float,
@@ -670,7 +698,7 @@ def synthesize_shoreline_power_array(
     boiler_count = max(1, math.ceil(engine_count / 2))
 
     best_res: ShorelinePowerResult | None = None
-    best_dist = math.inf
+    best_score: tuple[int, float] = (-1, -math.inf)
 
     for wx, wy in sorted(water_tiles):
         for d_idx, p_dir in enumerate(CARDINAL_DIRS):
@@ -701,7 +729,10 @@ def synthesize_shoreline_power_array(
                 continue
 
             dist = math.hypot(pump_tile[0] - reference_pos[0], pump_tile[1] - reference_pos[1])
-            if dist >= best_dist:
+            boot_fp = _bootstrap_shoreline_footprint(px, py, p_dir)
+            boot_ok = 1 if not (boot_fp & water_tiles or boot_fp & obstacles) else 0
+            cand_score = (boot_ok, -dist)
+            if cand_score <= best_score:
                 continue
 
             b_dir = CARDINAL_DIRS[(d_idx + 1) % 4]
@@ -778,7 +809,7 @@ def synthesize_shoreline_power_array(
                     )
                     all_fp |= e2_fp
 
-            best_dist = dist
+            best_score = cand_score
             best_res = ShorelinePowerResult(
                 entities=entities,
                 occupied_tiles=all_fp,
@@ -1212,7 +1243,7 @@ def route_patch_to_base(
     power_obstacles = surface.obstacles | all_patch_tiles
     power_array = synthesize_shoreline_power_array(
         water_tiles=surface.water_tiles,
-        required_power_watts=base_power_watts + 4.0 * tier.drill_watts,
+        required_power_watts=base_power_watts + 6.0 * tier.drill_watts,
         reference_pos=ref_pt,
         obstacles=power_obstacles,
         data=data,
@@ -1248,7 +1279,8 @@ def route_patch_to_base(
             raise ValueError(f"Required resource patch '{comm}' not present on map surface")
         is_fuel = comm == tier.fuel_commodity
         fanout = 2 if is_fuel else 1
-        target_rate = max(15.0, float(raw.get(comm, 15.0)))
+        min_rate = 90.0 if comm == "iron-ore" else (60.0 if is_fuel else 30.0)
+        target_rate = max(min_rate, float(raw.get(comm, min_rate)))
         p_array = synthesize_patch_miner_array(
             commodity=comm,
             patch_tiles=primary_patches[comm],
@@ -1363,6 +1395,39 @@ def route_patch_to_base(
             pdn_occupied.add(
                 (round(tx + TILE_HALF, COORD_PRECISION), round(ty + TILE_HALF, COORD_PRECISION))
             )
+
+    # Reserve the 2x2 burner smelter footprints in front of iron-ore drills so PDN poles never collide
+    iron_pa = patch_arrays.get("iron-ore")
+    if iron_pa is not None:
+        for ent in iron_pa.entities:
+            if ent["name"] == tier.drill_name:
+                pos = ent["position"]
+                dx_pos, dy_pos = float(pos["x"]), float(pos["y"])
+                d_dir = int(ent.get("direction", DIRECTION_NORTH))
+                step_x, step_y = DIR_STEPS[d_dir]
+                sm_x = dx_pos + 2.5 * step_x + (0.5 if step_x == 0 else 0.0)
+                sm_y = dy_pos + 2.5 * step_y + (0.5 if step_y == 0 else 0.0)
+                for tx, ty in _footprint_tiles(sm_x, sm_y, 2, 2):
+                    pdn_occupied.add(
+                        (
+                            round(tx + TILE_HALF, COORD_PRECISION),
+                            round(ty + TILE_HALF, COORD_PRECISION),
+                        )
+                    )
+
+    # Reserve the temporary shoreline bootstrap footprint so PDN poles never collide with lab/asm/f1..f4
+    for ent in power_array.entities:
+        if ent["name"] == tier.pump_name:
+            pos = ent["position"]
+            px_pos, py_pos = float(pos["x"]), float(pos["y"])
+            p_dir = int(ent.get("direction", DIRECTION_NORTH))
+            for tx, ty in _bootstrap_shoreline_footprint(px_pos, py_pos, p_dir):
+                pdn_occupied.add(
+                    (
+                        round(tx + TILE_HALF, COORD_PRECISION),
+                        round(ty + TILE_HALF, COORD_PRECISION),
+                    )
+                )
 
     pdn_cfg = make_pdn_config(tier.pole_name)
     pole_entities, mst_edges = generate_pdn(
