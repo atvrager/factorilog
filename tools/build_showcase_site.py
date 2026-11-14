@@ -253,53 +253,11 @@ def build_showcase_site(workspace: Path) -> None:
     )
 
     # 3. Generate deterministic pipeline vector SVGs from compiled flow artifacts
-    logistic_netlist = json.loads(
-        (flow_bin / "logistic_science_netlist.json").read_text(encoding="utf-8")
-    )
-    (assets_dir / "pipeline_lp_dag.svg").write_text(
-        build_lp_dag_treemap_svg(logistic_netlist, science_netlist),
-        encoding="utf-8",
-    )
-
-    chem_def = parse_def(
-        (flow_bin / "automation_logistic_military_chemical_chassis.def").read_text(encoding="utf-8")
-    )
-    chem_netlist = json.loads(
-        (flow_bin / "automation_logistic_military_chemical_chassis_netlist.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    (assets_dir / "pipeline_placement.svg").write_text(
-        build_placement_comparison_svg(chem_def, chem_netlist),
-        encoding="utf-8",
-    )
-
-    auto_log_def = parse_def(
-        (flow_bin / "automation_logistic_chassis.def").read_text(encoding="utf-8")
-    )
-    auto_log_bp_doc = decode(
-        (flow_bin / "automation_logistic_chassis.blueprint").read_text(encoding="utf-8").strip()
-    )
-    netlist_spans = {
-        str(k): int(v) for k, v in science_netlist.get("underground_spans", ug_spans).items()
-    }
-    (assets_dir / "pipeline_router_3d.svg").write_text(
-        build_router_3d_svg(
-            auto_log_def,
-            auto_log_bp_doc.get("blueprint", auto_log_bp_doc),
-            cat_map,
-            netlist_spans,
-        ),
-        encoding="utf-8",
-    )
-
-    verilog_src = (workspace / "flow" / "controllers" / "power_sequencer.v").read_text(
-        encoding="utf-8"
-    )
-    synth_res = synthesize_power_sequencer()
-    (assets_dir / "pipeline_verilog_campaign.svg").write_text(
-        build_verilog_campaign_svg(synth_res, verilog_src),
-        encoding="utf-8",
+    refresh_pipeline_svgs(
+        workspace,
+        cat_map=cat_map,
+        ug_spans=ug_spans,
+        science_netlist=science_netlist,
     )
 
     # 4. Copy downloadable blueprint exchange strings
@@ -331,6 +289,77 @@ def _add_bytes_to_tar(tf: tarfile.TarFile, arcname: str, payload: bytes) -> None
     info.mtime = 0
     info.mode = TAR_FILE_MODE
     tf.addfile(info, io.BytesIO(payload))
+
+
+def refresh_pipeline_svgs(
+    workspace: Path,
+    *,
+    cat_map: Mapping[str, str] | None = None,
+    ug_spans: Mapping[str, int] | None = None,
+    science_netlist: Mapping[str, Any] | None = None,
+) -> None:
+    """Regenerate all four pipeline SVGs without changing WebPs or benchmark provenance."""
+    flow_bin = workspace / "bazel-bin" / "flow"
+    dump_path = workspace / "test" / "data" / "dump-fixture.json"
+    assets_dir = workspace / "site" / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    if cat_map is None or ug_spans is None:
+        _prototypes, loaded_cats, loaded_spans = load_prototype_catalog(dump_path)
+        cat_map = cat_map or loaded_cats
+        ug_spans = ug_spans or loaded_spans
+
+    if science_netlist is None:
+        science_netlist = json.loads(
+            (flow_bin / "science_chassis_netlist.json").read_text(encoding="utf-8")
+        )
+
+    logistic_netlist = json.loads(
+        (flow_bin / "logistic_science_netlist.json").read_text(encoding="utf-8")
+    )
+    (assets_dir / "pipeline_lp_dag.svg").write_text(
+        build_lp_dag_treemap_svg(logistic_netlist, science_netlist),
+        encoding="utf-8",
+    )
+
+    chem_def = parse_def(
+        (flow_bin / "automation_logistic_military_chemical_chassis.def").read_text(encoding="utf-8")
+    )
+    chem_netlist = json.loads(
+        (flow_bin / "automation_logistic_military_chemical_chassis_netlist.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    (assets_dir / "pipeline_placement.svg").write_text(
+        build_placement_comparison_svg(chem_def, chem_netlist),
+        encoding="utf-8",
+    )
+
+    router_target = "automation_logistic_military_chemical_chassis"
+    if not (flow_bin / f"{router_target}.blueprint").is_file():
+        router_target = "automation_logistic_chassis"
+    router_def = parse_def((flow_bin / f"{router_target}.def").read_text(encoding="utf-8"))
+    router_bp_doc = decode(
+        (flow_bin / f"{router_target}.blueprint").read_text(encoding="utf-8").strip()
+    )
+    netlist_spans = {
+        str(k): int(v) for k, v in science_netlist.get("underground_spans", ug_spans).items()
+    }
+    (assets_dir / "pipeline_router_3d.svg").write_text(
+        build_router_3d_svg(
+            router_def,
+            router_bp_doc.get("blueprint", router_bp_doc),
+            cat_map,
+            netlist_spans,
+        ),
+        encoding="utf-8",
+    )
+
+    verilog_path = workspace / "flow" / "controllers" / "power_sequencer.v"
+    (assets_dir / "pipeline_verilog_campaign.svg").write_text(
+        _synthesize_fresh_verilog_svg(verilog_path),
+        encoding="utf-8",
+    )
 
 
 def _synthesize_fresh_verilog_svg(verilog_path: Path) -> str:
@@ -432,6 +461,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Regenerate index.html and the Verilog SVG without full builds.",
     )
     parser.add_argument(
+        "--refresh-svgs",
+        action="store_true",
+        help="Regenerate pipeline SVGs without changing WebPs or benchmarks.json.",
+    )
+    parser.add_argument(
         "--stamp-git",
         action="store_true",
         help="Refresh commit and CPU provenance during --refresh-hermetic.",
@@ -451,6 +485,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     workspace = _resolve_workspace(args.workspace)
+    if args.refresh_svgs:
+        refresh_pipeline_svgs(workspace)
+        print(f"factorilog: pipeline SVGs refreshed in {workspace / 'site' / 'assets'}")
+        return 0
     if args.refresh_hermetic:
         refresh_hermetic_site(workspace, stamp_git=args.stamp_git)
         print(f"factorilog: hermetic site refreshed in {workspace / 'site'}")

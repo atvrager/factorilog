@@ -7,6 +7,7 @@ routed blueprints, and synthesized SystemVerilog controllers.
 from __future__ import annotations
 
 import collections
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -14,8 +15,12 @@ from xml.sax.saxutils import escape
 
 from foundry.entity_helpers import (
     DEFAULT_DEF_UNITS,
+    DIR_STEPS,
+    DIRECTION_NORTH,
+    entity_size,
 )
 from tools.showcase_data import (
+    MACHINE_CATEGORY_KEYS,
     extract_geometry_layers,
     naive_rank_hpwl,
     select_street_straddle_window,
@@ -26,6 +31,22 @@ SVG_H_TALL = 560
 SVG_H_STD = 540
 ROUTER_WIN_W = 48
 ROUTER_WIN_H = 36
+ROUTER_VP_X = 30
+ROUTER_VP_Y = 100
+ROUTER_VP_W = 586
+ROUTER_VP_H = 390
+PLACEMENT_PANEL_W = 572
+PLACEMENT_MAP_SIZE = 412.0
+PLACEMENT_MAP_Y_OFFSET = 38.0
+BELT_EXTEND_TILES = 0.38
+PIPE_ISOLATED_HALF_TILES = 0.3
+UG_ENDPOINT_MARGIN_TILES = 0.4
+CLIP_T_EPS = 1e-6
+CLIP_MIN_WORLD_LEN = 1e-3
+MIN_BELT_PX_LEN = 2.0
+MIN_ARROW_PX_LEN = 5.0
+MIN_PIPE_PX_LEN = 1.0
+STACK_DESC_MAX_CHARS = 68
 MIN_TREEMAP_LABEL_W = 68.0
 MIN_TREEMAP_LABEL_H = 32.0
 MAX_FLYLINES = 260
@@ -61,15 +82,23 @@ MACHINE_COLORS: tuple[str, ...] = (
 )
 
 
-def _svg_open(width: int, height: int, title: str, subtitle: str) -> list[str]:
+def _svg_open(
+    width: int,
+    height: int,
+    title: str,
+    subtitle: str,
+    extra_defs: Sequence[str] = (),
+) -> list[str]:
     """Return opening SVG tags, dark theme styles, and top header banner."""
     return [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="{escape(title)}">',
         "<defs>",
         '<marker id="arr-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#38bdf8"/></marker>',
         '<marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f59e0b"/></marker>',
+        '<marker id="arr-belt" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="3.6" markerHeight="3.6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f59e0b"/></marker>',
         '<marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#34d399"/></marker>',
         '<marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f472b6"/></marker>',
+        *extra_defs,
         "</defs>",
         f'<rect width="{width}" height="{height}" rx="10" fill="{PALETTE["bg"]}" stroke="{PALETTE["border"]}"/>',
         '<style>text{font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;fill:#e2e8f0;}.title{font-size:15px;font-weight:700;fill:#f8fafc;}.sub{font-size:11px;fill:#94a3b8;}.hdr{font-size:12px;font-weight:700;fill:#38bdf8;}.lbl{font-size:10px;fill:#e2e8f0;}.dim{font-size:9px;fill:#94a3b8;}.badge{font-size:10px;font-weight:700;}</style>',
@@ -402,11 +431,19 @@ def build_placement_comparison_svg(
     naive_xy, hpwl_naive, hpwl_legal = naive_rank_hpwl(def_data, netlist_data)
     reduction_pct = ((hpwl_naive - hpwl_legal) / hpwl_naive * 100.0) if hpwl_naive > 0 else 0.0
 
+    ox_left = 16 + (PLACEMENT_PANEL_W - PLACEMENT_MAP_SIZE) * 0.5
+    ox_right = 612 + (PLACEMENT_PANEL_W - PLACEMENT_MAP_SIZE) * 0.5
+    oy_map = 64 + PLACEMENT_MAP_Y_OFFSET
+    clip_defs = (
+        f'<clipPath id="place-left-clip"><rect x="{ox_left:.1f}" y="{oy_map:.1f}" width="{PLACEMENT_MAP_SIZE:.1f}" height="{PLACEMENT_MAP_SIZE:.1f}"/></clipPath>',
+        f'<clipPath id="place-right-clip"><rect x="{ox_right:.1f}" y="{oy_map:.1f}" width="{PLACEMENT_MAP_SIZE:.1f}" height="{PLACEMENT_MAP_SIZE:.1f}"/></clipPath>',
+    )
     lines = _svg_open(
         SVG_W,
         SVG_H_TALL,
         "Stage 2: Analytical Quadratic Placement, SCC Condensation, and City-Block Legalization",
         f"4-Science Chassis ({die_w:.0f}x{die_h:.0f} die, {len(def_data['components'])} instances, {len(def_data['nets'])} nets) | HPWL drops {reduction_pct:.1f}%",
+        extra_defs=clip_defs,
     )
 
     inst_meta = {
@@ -430,7 +467,7 @@ def build_placement_comparison_svg(
         title=f"Uncondensed Rank Columns (HPWL: {hpwl_naive:,.0f} tiles)",
         panel_x=16,
         panel_y=64,
-        panel_w=572,
+        panel_w=PLACEMENT_PANEL_W,
         panel_h=480,
         die_w=die_w,
         die_h=die_h,
@@ -443,14 +480,15 @@ def build_placement_comparison_svg(
         draw_streets=False,
         badge_text=f"HPWL {hpwl_naive:,.0f}",
         badge_color=PALETTE["amber"],
+        clip_id="place-left-clip",
     )
 
     _append_placement_panel(
         lines,
-        title=f"Quadratic + SCC + 94x94 Legalized (HPWL: {hpwl_legal:,.0f} tiles, -{reduction_pct:.1f}%)",
+        title=f"Quadratic + SCC + 94x94 Legalized (HPWL: {hpwl_legal:,.0f} tiles)",
         panel_x=612,
         panel_y=64,
-        panel_w=572,
+        panel_w=PLACEMENT_PANEL_W,
         panel_h=480,
         die_w=die_w,
         die_h=die_h,
@@ -463,6 +501,7 @@ def build_placement_comparison_svg(
         draw_streets=True,
         badge_text=f"-{reduction_pct:.1f}% HPWL",
         badge_color=PALETTE["emerald"],
+        clip_id="place-right-clip",
     )
 
     lines.append("</svg>")
@@ -488,6 +527,7 @@ def _append_placement_panel(
     draw_streets: bool,
     badge_text: str,
     badge_color: str,
+    clip_id: str,
 ) -> None:
     """Render one die placement scatter panel with net flylines and macro blocks."""
     lines.append(
@@ -501,15 +541,16 @@ def _append_placement_panel(
         f'<text x="{panel_x + panel_w - 110}" y="{panel_y + 22}" class="badge" style="fill:{badge_color}">{escape(badge_text)}</text>'
     )
 
-    map_size = 412.0
+    map_size = PLACEMENT_MAP_SIZE
     ox = panel_x + (panel_w - map_size) * 0.5
-    oy = panel_y + 38.0
+    oy = panel_y + PLACEMENT_MAP_Y_OFFSET
     sx = map_size / max(die_w, 1.0)
     sy = map_size / max(die_h, 1.0)
 
     lines.append(
         f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{map_size:.1f}" height="{map_size:.1f}" fill="{PALETTE["bg"]}" stroke="{PALETTE["border"]}"/>'
     )
+    lines.append(f'<g clip-path="url(#{clip_id})">')
 
     units = float(def_data.get("units", DEFAULT_DEF_UNITS))
     if draw_streets:
@@ -518,9 +559,14 @@ def _append_placement_panel(
             by1 = oy + (float(blk["y1"]) / units) * sy
             bw = ((float(blk["x2"]) - float(blk["x1"])) / units) * sx
             bh = ((float(blk["y2"]) - float(blk["y1"])) / units) * sy
-            lines.append(
-                f'<rect x="{bx1:.1f}" y="{by1:.1f}" width="{max(bw, 1.0):.1f}" height="{max(bh, 1.0):.1f}" fill="#1e293b" fill-opacity="0.7"/>'
-            )
+            rx0 = max(ox, bx1)
+            ry0 = max(oy, by1)
+            rx1 = min(ox + map_size, bx1 + max(bw, 1.0))
+            ry1 = min(oy + map_size, by1 + max(bh, 1.0))
+            if rx1 > rx0 and ry1 > ry0:
+                lines.append(
+                    f'<rect x="{rx0:.1f}" y="{ry0:.1f}" width="{rx1 - rx0:.1f}" height="{ry1 - ry0:.1f}" fill="#1e293b" fill-opacity="0.7"/>'
+                )
 
     # Draw a deterministic sample of net flylines
     drawn_lines = 0
@@ -536,8 +582,12 @@ def _append_placement_panel(
             continue
         x0, y0 = pts[0]
         for tx, ty in pts[1:]:
+            clipped = _clip_segment_to_box(x0, y0, tx, ty, ox, oy, ox + map_size, oy + map_size)
+            if clipped is None:
+                continue
+            cx1, cy1, cx2, cy2, _s_in, _e_in = clipped
             lines.append(
-                f'<line x1="{x0:.1f}" y1="{y0:.1f}" x2="{tx:.1f}" y2="{ty:.1f}" stroke="#64748b" stroke-width="0.6" stroke-opacity="0.22"/>'
+                f'<line x1="{cx1:.1f}" y1="{cy1:.1f}" x2="{cx2:.1f}" y2="{cy2:.1f}" stroke="#64748b" stroke-width="0.6" stroke-opacity="0.22"/>'
             )
         drawn_lines += 1
 
@@ -551,11 +601,19 @@ def _append_placement_panel(
         cell = cells.get(str(inst.get("cell", comp.get("macro", ""))), {})
         mw = max(float(cell.get("width", 2)) * sx, 2.2)
         mh = max(float(cell.get("height", 2)) * sy, 2.2)
+        rx0 = max(ox, ox + pt[0] * sx)
+        ry0 = max(oy, oy + pt[1] * sy)
+        rx1 = min(ox + map_size, ox + pt[0] * sx + mw)
+        ry1 = min(oy + map_size, oy + pt[1] * sy + mh)
+        if rx1 <= rx0 or ry1 <= ry0:
+            continue
         rank = int(inst.get("rank", 0))
         color = _lerp_rank_color(rank / max_rank)
         lines.append(
-            f'<rect x="{ox + pt[0] * sx:.1f}" y="{oy + pt[1] * sy:.1f}" width="{mw:.1f}" height="{mh:.1f}" fill="{color}" fill-opacity="0.88"/>'
+            f'<rect x="{rx0:.1f}" y="{ry0:.1f}" width="{rx1 - rx0:.1f}" height="{ry1 - ry0:.1f}" fill="{color}" fill-opacity="0.88"/>'
         )
+
+    lines.append("</g>")
 
     # Draw I/O pins along perimeter
     for px, py in pin_xy.values():
@@ -566,6 +624,174 @@ def _append_placement_panel(
     lines.append(
         f'<text x="{panel_x + 14}" y="{panel_y + panel_h - 10}" class="dim">Rank gradient: West inputs (cyan) -> East science outputs (rose) | Street width: 6 tiles</text>'
     )
+
+
+def _router_to_svg_coords(
+    wx: float,
+    wy: float,
+    wx0: int,
+    wy0: int,
+    scale_x: float,
+    scale_y: float,
+) -> tuple[float, float]:
+    """Map world tile coordinates into router viewport pixel coordinates."""
+    return ROUTER_VP_X + (wx - wx0) * scale_x, ROUTER_VP_Y + (wy - wy0) * scale_y
+
+
+def _append_routed_entities(
+    lines: list[str],
+    entities: Sequence[Mapping[str, Any]],
+    cat_map: Mapping[str, str],
+    wx0: int,
+    wy0: int,
+    wx1: int,
+    wy1: int,
+    scale_x: float,
+    scale_y: float,
+) -> None:
+    """Append clipped production machine and splitter footprints in the router window."""
+    for ent in entities:
+        pos = ent.get("position", {})
+        if not isinstance(pos, Mapping):
+            continue
+        name = str(ent.get("name", ""))
+        cat = cat_map.get(name, "")
+        if cat not in MACHINE_CATEGORY_KEYS and cat != "splitter":
+            continue
+        ex, ey = float(pos.get("x", 0.0)), float(pos.get("y", 0.0))
+        direction = int(ent.get("direction", DIRECTION_NORTH))
+        ew, eh = entity_size(name, direction)
+        ix1 = max(ex - ew * 0.5, float(wx0))
+        iy1 = max(ey - eh * 0.5, float(wy0))
+        ix2 = min(ex + ew * 0.5, float(wx1))
+        iy2 = min(ey + eh * 0.5, float(wy1))
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        rx, ry = _router_to_svg_coords(ix1, iy1, wx0, wy0, scale_x, scale_y)
+        rw_px = (ix2 - ix1) * scale_x
+        rh_px = (iy2 - iy1) * scale_y
+        if rw_px < MIN_PIPE_PX_LEN or rh_px < MIN_PIPE_PX_LEN:
+            continue
+        if cat in MACHINE_CATEGORY_KEYS:
+            lines.append(
+                f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{rw_px:.1f}" height="{rh_px:.1f}" rx="3" fill="#1e293b" stroke="{PALETTE["teal"]}" stroke-width="1.2"/>'
+            )
+        else:
+            lines.append(
+                f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{rw_px:.1f}" height="{rh_px:.1f}" rx="2" fill="#334155" stroke="{PALETTE["amber"]}" stroke-width="1.0"/>'
+            )
+
+
+def _append_routed_pipes(
+    lines: list[str],
+    pipes: Sequence[Sequence[float]],
+    wx0: int,
+    wy0: int,
+    wx1: int,
+    wy1: int,
+    scale_x: float,
+    scale_y: float,
+) -> None:
+    """Append clipped M3 fluid pipe segments in the router window."""
+    for x1, y1, x2, y2, is_ug in pipes:
+        sx1, sx2 = x1, x2
+        if math.hypot(x2 - x1, y2 - y1) < CLIP_MIN_WORLD_LEN:
+            sx1 = x1 - PIPE_ISOLATED_HALF_TILES
+            sx2 = x1 + PIPE_ISOLATED_HALF_TILES
+        clipped = _clip_segment_to_box(
+            sx1, y1, sx2, y2, float(wx0), float(wy0), float(wx1), float(wy1)
+        )
+        if clipped is None:
+            continue
+        cx1, cy1, cx2, cy2, _s_in, _e_in = clipped
+        px1, py1 = _router_to_svg_coords(cx1, cy1, wx0, wy0, scale_x, scale_y)
+        px2, py2 = _router_to_svg_coords(cx2, cy2, wx0, wy0, scale_x, scale_y)
+        if math.hypot(px2 - px1, py2 - py1) < MIN_PIPE_PX_LEN:
+            continue
+        dash = ' stroke-dasharray="4 3"' if is_ug else ""
+        lines.append(
+            f'<line x1="{px1:.1f}" y1="{py1:.1f}" x2="{px2:.1f}" y2="{py2:.1f}" stroke="{PALETTE["violet"]}" stroke-width="2.2"{dash}/>'
+        )
+
+
+def _append_routed_belts(
+    lines: list[str],
+    belts: Sequence[Sequence[float]],
+    wx0: int,
+    wy0: int,
+    wx1: int,
+    wy1: int,
+    scale_x: float,
+    scale_y: float,
+) -> None:
+    """Extend, clip, and append M1 surface belt segments in the router window."""
+    for x1, y1, x2, y2, raw_dir in belts:
+        dx, dy = DIR_STEPS.get(int(raw_dir), (0, -1))
+        seg_dx, seg_dy = x2 - x1, y2 - y1
+        has_span = abs(seg_dx) > CLIP_MIN_WORLD_LEN or abs(seg_dy) > CLIP_MIN_WORLD_LEN
+        if has_span and abs(seg_dx * dx + seg_dy * dy) < CLIP_MIN_WORLD_LEN:
+            # Skip perpendicular splitter bars because splitters render as boxes
+            continue
+        bx1, by1 = x1 - BELT_EXTEND_TILES * dx, y1 - BELT_EXTEND_TILES * dy
+        bx2, by2 = x2 + BELT_EXTEND_TILES * dx, y2 + BELT_EXTEND_TILES * dy
+        clipped = _clip_segment_to_box(
+            bx1, by1, bx2, by2, float(wx0), float(wy0), float(wx1), float(wy1)
+        )
+        if clipped is None:
+            continue
+        cx1, cy1, cx2, cy2, _s_in, end_in = clipped
+        px1, py1 = _router_to_svg_coords(cx1, cy1, wx0, wy0, scale_x, scale_y)
+        px2, py2 = _router_to_svg_coords(cx2, cy2, wx0, wy0, scale_x, scale_y)
+        px_len = math.hypot(px2 - px1, py2 - py1)
+        if px_len < MIN_BELT_PX_LEN:
+            continue
+        marker = ' marker-end="url(#arr-belt)"' if (end_in and px_len >= MIN_ARROW_PX_LEN) else ""
+        lines.append(
+            f'<line x1="{px1:.1f}" y1="{py1:.1f}" x2="{px2:.1f}" y2="{py2:.1f}" stroke="{PALETTE["amber"]}" stroke-width="2.2"{marker}/>'
+        )
+
+
+def _append_routed_underground(
+    lines: list[str],
+    underground: Sequence[Sequence[float]],
+    wx0: int,
+    wy0: int,
+    wx1: int,
+    wy1: int,
+    scale_x: float,
+    scale_y: float,
+) -> None:
+    """Clip and append M2 underground tunnel spans and interior endpoint markers."""
+    for x1, y1, x2, y2 in underground:
+        clipped = _clip_segment_to_box(
+            x1, y1, x2, y2, float(wx0), float(wy0), float(wx1), float(wy1)
+        )
+        if clipped is None:
+            continue
+        cx1, cy1, cx2, cy2, start_in, end_in = clipped
+        px1, py1 = _router_to_svg_coords(cx1, cy1, wx0, wy0, scale_x, scale_y)
+        px2, py2 = _router_to_svg_coords(cx2, cy2, wx0, wy0, scale_x, scale_y)
+        if math.hypot(px2 - px1, py2 - py1) < MIN_PIPE_PX_LEN:
+            continue
+        lines.append(
+            f'<line x1="{px1:.1f}" y1="{py1:.1f}" x2="{px2:.1f}" y2="{py2:.1f}" stroke="{PALETTE["cyan"]}" stroke-width="2.2" stroke-dasharray="5 3"/>'
+        )
+        if (
+            start_in
+            and (wx0 + UG_ENDPOINT_MARGIN_TILES <= cx1 <= wx1 - UG_ENDPOINT_MARGIN_TILES)
+            and (wy0 + UG_ENDPOINT_MARGIN_TILES <= cy1 <= wy1 - UG_ENDPOINT_MARGIN_TILES)
+        ):
+            lines.append(
+                f'<circle cx="{px1:.1f}" cy="{py1:.1f}" r="3.2" fill="{PALETTE["cyan"]}"/>'
+            )
+        if (
+            end_in
+            and (wx0 + UG_ENDPOINT_MARGIN_TILES <= cx2 <= wx1 - UG_ENDPOINT_MARGIN_TILES)
+            and (wy0 + UG_ENDPOINT_MARGIN_TILES <= cy2 <= wy1 - UG_ENDPOINT_MARGIN_TILES)
+        ):
+            lines.append(
+                f'<circle cx="{px2:.1f}" cy="{py2:.1f}" r="3.2" fill="{PALETTE["bg"]}" stroke="{PALETTE["cyan"]}" stroke-width="1.6"/>'
+            )
 
 
 def build_router_3d_svg(
@@ -583,11 +809,15 @@ def build_router_3d_svg(
         prefer_pipes=True,
     )
     layers = extract_geometry_layers(bp_payload, cat_map)
+    clip_defs = (
+        f'<clipPath id="router-vp-clip"><rect x="{ROUTER_VP_X}" y="{ROUTER_VP_Y}" width="{ROUTER_VP_W}" height="{ROUTER_VP_H}"/></clipPath>',
+    )
     lines = _svg_open(
         SVG_W,
         SVG_H_STD,
         "Stage 3: Two-Stage 3D Multi-Layer Dual-Lane Maze Router and Underground Transitions",
         f"Left: real routed chassis slice [{wx0},{wy0}]..[{wx1},{wy1}] tiles | Right: z-layer PDK stack & negotiated congestion",
+        extra_defs=clip_defs,
     )
 
     # Left routed tile window
@@ -605,20 +835,21 @@ def build_router_3d_svg(
         f'<text x="{lx + lw - 84}" y="{ly + 22}" class="badge" style="fill:{PALETTE["emerald"]}">0 DRC</text>'
     )
 
-    vx, vy, vw, vh = lx + 14, ly + 36, 586, 390
+    vx, vy, vw, vh = ROUTER_VP_X, ROUTER_VP_Y, ROUTER_VP_W, ROUTER_VP_H
     scale_x = vw / ROUTER_WIN_W
     scale_y = vh / ROUTER_WIN_H
     lines.append(
         f'<rect x="{vx}" y="{vy}" width="{vw}" height="{vh}" fill="{PALETTE["bg"]}" stroke="{PALETTE["border"]}"/>'
     )
+    lines.append('<g id="router-viewport" clip-path="url(#router-vp-clip)">')
 
     # Tile gridlines
-    for gx in range(0, ROUTER_WIN_W + 1, 2):
+    for gx in range(2, ROUTER_WIN_W, 2):
         px = vx + gx * scale_x
         lines.append(
             f'<line x1="{px:.1f}" y1="{vy}" x2="{px:.1f}" y2="{vy + vh}" stroke="{PALETTE["grid"]}" stroke-width="0.6"/>'
         )
-    for gy in range(0, ROUTER_WIN_H + 1, 2):
+    for gy in range(2, ROUTER_WIN_H, 2):
         py = vy + gy * scale_y
         lines.append(
             f'<line x1="{vx}" y1="{py:.1f}" x2="{vx + vw}" y2="{py:.1f}" stroke="{PALETTE["grid"]}" stroke-width="0.6"/>'
@@ -632,63 +863,22 @@ def build_router_3d_svg(
         bx2 = min(float(blk["x2"]) / units, float(wx1))
         by2 = min(float(blk["y2"]) / units, float(wy1))
         if bx2 > bx1 and by2 > by1:
-            rx = vx + (bx1 - wx0) * scale_x
-            ry = vy + (by1 - wy0) * scale_y
-            rw = (bx2 - bx1) * scale_x
-            rh = (by2 - by1) * scale_y
+            rx, ry = _router_to_svg_coords(bx1, by1, wx0, wy0, scale_x, scale_y)
+            rw_px = (bx2 - bx1) * scale_x
+            rh_px = (by2 - by1) * scale_y
             lines.append(
-                f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{rw:.1f}" height="{rh:.1f}" fill="#334155" fill-opacity="0.35"/>'
+                f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{rw_px:.1f}" height="{rh_px:.1f}" fill="#334155" fill-opacity="0.35"/>'
             )
 
-    # Machines / macros in window
-    for ent in bp_payload.get("entities", ()):
-        pos = ent.get("position", {})
-        if not isinstance(pos, Mapping):
-            continue
-        ex, ey = float(pos.get("x", 0.0)), float(pos.get("y", 0.0))
-        if not (wx0 <= ex <= wx1 and wy0 <= ey <= wy1):
-            continue
-        cat = cat_map.get(str(ent.get("name", "")), "")
-        if cat in ("assembling-machine", "furnace", "boiler", "generator", "lab", "rocket-silo"):
-            half_dim = 2.4 if cat == "assembling-machine" or cat == "furnace" else 1.4
-            rx = vx + (ex - half_dim - wx0) * scale_x
-            ry = vy + (ey - half_dim - wy0) * scale_y
-            lines.append(
-                f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{half_dim * 2 * scale_x:.1f}" height="{half_dim * 2 * scale_y:.1f}" rx="3" fill="#1e293b" stroke="{PALETTE["teal"]}" stroke-width="1.2"/>'
-            )
-
-    # Pipes and pipe-to-ground
-    for x1, y1, x2, y2, is_ug in layers["pipes"]:
-        if _segment_in_window(x1, y1, x2, y2, wx0, wy0, wx1, wy1):
-            dash = ' stroke-dasharray="4 3"' if is_ug else ""
-            lines.append(
-                f'<line x1="{vx + (x1 - wx0) * scale_x:.1f}" y1="{vy + (y1 - wy0) * scale_y:.1f}" x2="{vx + (x2 - wx0) * scale_x:.1f}" y2="{vy + (y2 - wy0) * scale_y:.1f}" stroke="{PALETTE["violet"]}" stroke-width="2.2"{dash}/>'
-            )
-
-    # M1 Surface belts
-    for x1, y1, x2, y2, _dir in layers["belts"]:
-        if _segment_in_window(x1, y1, x2, y2, wx0, wy0, wx1, wy1):
-            lines.append(
-                f'<line x1="{vx + (x1 - wx0) * scale_x:.1f}" y1="{vy + (y1 - wy0) * scale_y:.1f}" x2="{vx + (x2 - wx0) * scale_x:.1f}" y2="{vy + (y2 - wy0) * scale_y:.1f}" stroke="{PALETTE["amber"]}" stroke-width="2.2" marker-end="url(#arr-amber)"/>'
-            )
-
-    # M2 Underground belt tunnels
-    for x1, y1, x2, y2 in layers["underground"]:
-        if _segment_in_window(x1, y1, x2, y2, wx0, wy0, wx1, wy1):
-            px1, py1 = vx + (x1 - wx0) * scale_x, vy + (y1 - wy0) * scale_y
-            px2, py2 = vx + (x2 - wx0) * scale_x, vy + (y2 - wy0) * scale_y
-            lines.append(
-                f'<line x1="{px1:.1f}" y1="{py1:.1f}" x2="{px2:.1f}" y2="{py2:.1f}" stroke="{PALETTE["cyan"]}" stroke-width="2.2" stroke-dasharray="5 3"/>'
-            )
-            lines.append(
-                f'<circle cx="{px1:.1f}" cy="{py1:.1f}" r="3.2" fill="{PALETTE["cyan"]}"/>'
-            )
-            lines.append(
-                f'<circle cx="{px2:.1f}" cy="{py2:.1f}" r="3.2" fill="{PALETTE["bg"]}" stroke="{PALETTE["cyan"]}" stroke-width="1.6"/>'
-            )
+    entities = [ent for ent in bp_payload.get("entities", ()) if isinstance(ent, Mapping)]
+    _append_routed_entities(lines, entities, cat_map, wx0, wy0, wx1, wy1, scale_x, scale_y)
+    _append_routed_pipes(lines, layers["pipes"], wx0, wy0, wx1, wy1, scale_x, scale_y)
+    _append_routed_belts(lines, layers["belts"], wx0, wy0, wx1, wy1, scale_x, scale_y)
+    _append_routed_underground(lines, layers["underground"], wx0, wy0, wx1, wy1, scale_x, scale_y)
+    lines.append("</g>")
 
     lines.append(
-        f'<text x="{lx + 14}" y="{ly + lh - 12}" class="dim">Amber: M1 surface belts | Cyan dashed: M2 tunnels | Violet: M3 fluid pipes</text>'
+        f'<text x="{lx + 14}" y="{ly + lh - 12}" class="dim">Teal: Macros | Amber: M1 belts | Cyan dashed: M2 tunnels | Violet: M3 pipes</text>'
     )
 
     # Right 3D stack & PathFinder panel
@@ -700,7 +890,10 @@ def build_router_3d_svg(
         f'<text x="{rx0 + 16}" y="{ry0 + 22}" class="hdr">3D Layer Stack &amp; Negotiated Congestion</text>'
     )
 
-    ug_summary = ", ".join(f"{k}={v}t" for k, v in sorted(max_ug_spans.items()))
+    ug_summary = ", ".join(
+        f"{k.replace('-underground-belt', '-ug').replace('underground-belt', 'ug')}={v}t"
+        for k, v in sorted(max_ug_spans.items())
+    )
     layer_cards = [
         (
             "Overhead (PDN + Circuit)",
@@ -714,7 +907,7 @@ def build_router_3d_svg(
         ),
         (
             "z = 1..N (M2 Tunnels)",
-            f"Prototype spans: {ug_summary}" if ug_summary else "Dynamic prototype spans",
+            f"Spans: {ug_summary}" if ug_summary else "Dynamic prototype spans",
             PALETTE["cyan"],
         ),
         (
@@ -732,7 +925,7 @@ def build_router_3d_svg(
             f'<text x="{rx0 + 36}" y="{cy + 33}" class="lbl" style="fill:{color};font-weight:700">{escape(head)}</text>'
         )
         lines.append(
-            f'<text x="{rx0 + 36}" y="{cy + 48}" class="dim">{escape(_short_label(desc, 62))}</text>'
+            f'<text x="{rx0 + 36}" y="{cy + 48}" class="dim">{escape(_short_label(desc, STACK_DESC_MAX_CHARS))}</text>'
         )
 
     eq_y = ry0 + 314
@@ -759,18 +952,52 @@ def build_router_3d_svg(
     return "\n".join(lines)
 
 
-def _segment_in_window(
+def _clip_segment_to_box(
     x1: float,
     y1: float,
     x2: float,
     y2: float,
-    wx0: int,
-    wy0: int,
-    wx1: int,
-    wy1: int,
-) -> bool:
-    """Return True if either endpoint or span lies inside `[wx0, wx1] x [wy0, wy1]`."""
-    return max(x1, x2) >= wx0 and min(x1, x2) <= wx1 and max(y1, y2) >= wy0 and min(y1, y2) <= wy1
+    bx0: float,
+    by0: float,
+    bx1: float,
+    by1: float,
+) -> tuple[float, float, float, float, bool, bool] | None:
+    """Clip segment `(x1, y1)->(x2, y2)` to `[bx0, bx1] x [by0, by1]` via Liang-Barsky."""
+    dx = x2 - x1
+    dy = y2 - y1
+    t0 = 0.0
+    t1 = 1.0
+    for p, q in (
+        (-dx, x1 - bx0),
+        (dx, bx1 - x1),
+        (-dy, y1 - by0),
+        (dy, by1 - y1),
+    ):
+        if abs(p) <= 1e-12:
+            if q < 0.0:
+                return None
+            continue
+        r = q / p
+        if p < 0.0:
+            if r > t1:
+                return None
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return None
+            if r < t1:
+                t1 = r
+
+    cx1 = x1 + t0 * dx
+    cy1 = y1 + t0 * dy
+    cx2 = x1 + t1 * dx
+    cy2 = y1 + t1 * dy
+    if math.hypot(cx2 - cx1, cy2 - cy1) < CLIP_MIN_WORLD_LEN:
+        return None
+    start_inside = t0 <= CLIP_T_EPS
+    end_inside = t1 >= 1.0 - CLIP_T_EPS
+    return (cx1, cy1, cx2, cy2, start_inside, end_inside)
 
 
 def build_verilog_campaign_svg(

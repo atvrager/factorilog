@@ -78,6 +78,9 @@ WIRE_ID_OUT_GREEN = 4
 WIRE_TUPLE_LEN = 4
 WINDOW_MIN_ENTITIES = 25
 SHA_SHORT_LEN = 7
+MACHINE_CATEGORY_KEYS: frozenset[str] = frozenset(
+    ("assembling-machine", "furnace", "boiler", "generator", "lab", "rocket-silo")
+)
 
 
 def load_prototype_catalog(
@@ -488,7 +491,7 @@ def select_street_straddle_window(
     if not candidates:
         candidates.append((0, 0))
 
-    best_score = -1.0
+    best_score = -math.inf
     best_win = (0, 0, win_w, win_h)
     for wx0, wy0 in candidates:
         wx1 = wx0 + win_w
@@ -498,6 +501,7 @@ def select_street_straddle_window(
         ug_count = 0
         pipe_count = 0
         split_count = 0
+        machine_count = 0
         ent_count = 0
         for ent in entities:
             pos = ent.get("position")
@@ -519,16 +523,24 @@ def select_street_straddle_window(
                 pipe_count += 1
             elif cat == "splitter":
                 split_count += 1
+            elif cat in MACHINE_CATEGORY_KEYS:
+                machine_count += 1
 
         if ent_count < WINDOW_MIN_ENTITIES:
             continue
         pipe_bonus = min(pipe_count, 35) * (3.0 if prefer_pipes else 1.0)
+        machine_bonus = (
+            ((60.0 if machine_count > 0 else 0.0) + min(machine_count, 8) * 40.0)
+            if prefer_pipes
+            else 0.0
+        )
         score = (
             len(recipes) * 18.0
             + len(cats) * 14.0
             + min(ug_count, 30) * 3.0
             + min(split_count, 20) * 2.5
             + pipe_bonus
+            + machine_bonus
             + min(ent_count, 500) * 0.25
         )
         if score > best_score:
