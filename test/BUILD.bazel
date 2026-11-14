@@ -521,3 +521,19 @@ py_test(
         "//foundry:pdk_lib",
     ],
 )
+
+py_test(
+    name = "showcase_site_test",
+    size = "small",
+    srcs = ["test_showcase_site.py"],
+    data = [
+        "//:README.md",
+        "//site:all_files",
+    ],
+    main = "test_showcase_site.py",
+    deps = [
+        "//foundry:pdk_lib",
+        "//tools:showcase_data_lib",
+        "@pip//pillow",
+    ],
+)

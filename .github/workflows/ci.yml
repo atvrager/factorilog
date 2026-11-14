@@ -7,14 +7,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   unit-and-lint:
-    name: Unit and Lint Tests
-    runs-on: ubuntu-latest
+    name: Unit, Lint, and Freshness Tests
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,10 +36,56 @@ jobs:
             bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'tools/requirements_lock.txt') }}-
             bazel-${{ runner.os }}-
 
-      - name: Run Unit and Lint Tests
+      - name: Run Unit, Lint, and Freshness Tests
         run: |
           bazel test //... \
             --build_tests_only \
             --test_tag_filters=-science,-openroad,-requires-game-data \
             --disk_cache=~/.cache/bazel-disk-cache \
             --repository_cache=~/.cache/bazel-repo-cache
+
+      - name: Build Fresh Showcase Pages Bundle
+        run: |
+          bazel build //site:pages_bundle \
+            --disk_cache=~/.cache/bazel-disk-cache \
+            --repository_cache=~/.cache/bazel-repo-cache
+          rm -rf dist
+          mkdir -p dist/site
+          cp -f bazel-bin/site/pages_bundle.tar.gz dist/factorilog-pages-bundle.tar.gz
+          tar -xzf dist/factorilog-pages-bundle.tar.gz -C dist/site
+
+      - name: Export Showcase Site Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: factorilog-pages-bundle
+          path: |
+            dist/factorilog-pages-bundle.tar.gz
+            dist/site/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Configure Pages
+        if: (github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.event_name == 'push')) && (vars.ENABLE_PAGES == 'true' || !github.event.repository.private)
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages Artifact
+        if: (github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.event_name == 'push')) && (vars.ENABLE_PAGES == 'true' || !github.event.repository.private)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/site
+
+  deploy-pages:
+    name: Deploy GitHub Pages
+    runs-on: ubuntu-24.04
+    needs: [unit-and-lint]
+    if: (github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.event_name == 'push')) && (vars.ENABLE_PAGES == 'true' || !github.event.repository.private)
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

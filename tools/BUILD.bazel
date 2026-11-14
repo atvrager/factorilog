@@ -1,6 +1,6 @@
 # Dev tooling: the ASD-STE100 prose linter, its rule regression tests, and
 # the Python lint and type checks.
-load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -59,6 +59,29 @@ py_binary(
     main = "inspect_cell.py",
     deps = [
         "//foundry:pdk_lib",
+    ],
+)
+
+py_library(
+    name = "showcase_data_lib",
+    srcs = [
+        "showcase_data.py",
+        "showcase_svg.py",
+        "showcase_template.py",
+    ],
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_binary(
+    name = "build_showcase_site",
+    srcs = ["build_showcase_site.py"],
+    main = "build_showcase_site.py",
+    deps = [
+        ":showcase_data_lib",
+        "//foundry:pdk_lib",
+        "@pip//pillow",
     ],
 )
 

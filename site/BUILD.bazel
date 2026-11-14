@@ -1,0 +1,12 @@
+# Static showcase site and committed visual artifacts for GitHub Pages and docs.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**/*"],
+        exclude = ["BUILD.bazel"],
+        allow_empty = True,
+    ),
+)
