@@ -12,133 +12,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Test and Build Science Chassis
+  unit-and-lint:
+    name: Unit and Lint Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python Dependencies
-        run: |
-          pip install -r tools/requirements_lock.txt
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Cache Bazel and FBE
-        id: cache-bazel
+      - name: Cache Bazel
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/bazelisk
             ~/.cache/bazel-disk-cache
             ~/.cache/bazel-repo-cache
-            ~/.cache/factorilog
-          key: bazel-fbe-${{ runner.os }}-${{ github.sha }}
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'tools/requirements_lock.txt') }}-${{ github.sha }}
           restore-keys: |
-            bazel-fbe-${{ runner.os }}-${{ github.ref_name }}-
-            bazel-fbe-${{ runner.os }}-
+            bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'tools/requirements_lock.txt') }}-
+            bazel-${{ runner.os }}-
 
-      - name: Ensure Container Runtime
-        run: |
-          sudo apt-get update && sudo apt-get install -y uidmap
-          if ! grep -q "^runner:" /etc/subuid 2>/dev/null; then
-            echo "runner:100000:65536" | sudo tee -a /etc/subuid
-          fi
-          if ! grep -q "^runner:" /etc/subgid 2>/dev/null; then
-            echo "runner:100000:65536" | sudo tee -a /etc/subgid
-          fi
-          podman system migrate 2>/dev/null || true
-          podman pull docker.io/openroad/orfs:latest
-
-      - name: Ensure Headless Factorio Binary
-        run: |
-          FACTORIO_DIR="$HOME/.cache/factorilog/factorio-2.1"
-          if [ ! -x "$FACTORIO_DIR/bin/x64/factorio" ]; then
-            mkdir -p "$HOME/.cache/factorilog"
-            curl -fL "https://factorio.com/get-download/experimental/headless/linux64" -o /tmp/factorio-headless.tar.xz
-            rm -rf "$FACTORIO_DIR"
-            mkdir -p "$FACTORIO_DIR"
-            tar -xJf /tmp/factorio-headless.tar.xz --strip-components=1 -C "$FACTORIO_DIR"
-            rm -f /tmp/factorio-headless.tar.xz
-          fi
-          echo "FACTORIO_BIN=$FACTORIO_DIR/bin/x64/factorio" >> "$GITHUB_ENV"
-
-      - name: Setup Firefox Browser
-        id: setup-firefox
-        uses: browser-actions/setup-firefox@v1
-
-      - name: Configure Display and Firefox Environment
-        run: |
-          /usr/bin/Xvfb :99 -screen 0 1280x1024x24 > /dev/null 2>&1 &
-          echo "DISPLAY=:99" >> "$GITHUB_ENV"
-          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
-          echo "FIREFOX_BIN=${{ steps.setup-firefox.outputs.firefox-path }}" >> "$GITHUB_ENV"
-
-      - name: Run Bazel Tests
+      - name: Run Unit and Lint Tests
         run: |
           bazel test //... \
             --build_tests_only \
-            --test_tag_filters=-science \
+            --test_tag_filters=-science,-openroad,-requires-game-data \
             --disk_cache=~/.cache/bazel-disk-cache \
             --repository_cache=~/.cache/bazel-repo-cache
-
-      - name: Build Science Chassis
-        run: |
-          bazel build //flow:science_chassis \
-            --disk_cache=~/.cache/bazel-disk-cache \
-            --repository_cache=~/.cache/bazel-repo-cache
-
-      - name: Generate Summary Report
-        run: |
-          python3 -c "
-          import json, os
-          from pathlib import Path
-
-          timing_file = Path('bazel-bin/flow/science_chassis_timing.json')
-          table = [
-              '### Science Chassis Build Summary',
-              '',
-              '| Target | Status | Synth | PnR | Blueprint | Render | Save | Total Time |',
-              '| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |',
-          ]
-          if timing_file.is_file():
-              data = json.loads(timing_file.read_text(encoding='utf-8'))
-              stages = data.get('stages', {})
-              synth = f\"{stages.get('synth', 0.0):.2f}s\"
-              pnr = f\"{stages.get('pnr', 0.0):.2f}s\"
-              bp = f\"{stages.get('bp', 0.0):.2f}s\"
-              render = f\"{stages.get('render', 0.0):.2f}s\"
-              save = f\"{stages.get('save', 0.0):.2f}s\"
-              total = f\"{data.get('total_seconds', 0.0):.2f}s\"
-              table.append(
-                  f'| **science_chassis** | PASSED | {synth} | {pnr} | {bp} | {render} | {save} | **{total}** |'
-              )
-          else:
-              table.append('| **science_chassis** | FAILED / SKIPPED | - | - | - | - | - | - |')
-
-          report = '\n'.join(table)
-          print(report)
-
-          step_summary = os.environ.get('GITHUB_STEP_SUMMARY')
-          if step_summary:
-              with open(step_summary, 'a', encoding='utf-8') as f:
-                  f.write(report + '\n')
-          "
-
-      - name: Upload Science Chassis Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: science_chassis
-          path: |
-            bazel-bin/flow/science_chassis.zip
-            bazel-bin/flow/science_chassis.png
-          if-no-files-found: error

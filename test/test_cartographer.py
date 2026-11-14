@@ -181,8 +181,9 @@ class CartographerTest(unittest.TestCase):
 
     def test_headless_factorio_cartographer_extraction_and_routing(self) -> None:
         """Verify live Factorio surface scanning via Lua snippet, cartographer ingestion, and routing."""
-        factorio_bin = find_factorio_binary()
-        if not factorio_bin:
+        try:
+            factorio_bin = find_factorio_binary()
+        except FileNotFoundError:
             self.skipTest("Factorio binary not available")
 
         scanner_lua = build_lua_cartography_scanner_snippet(radius=64)

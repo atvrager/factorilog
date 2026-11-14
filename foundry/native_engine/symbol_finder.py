@@ -9,13 +9,18 @@ import subprocess
 from pathlib import Path
 
 REAL_USER_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+ELF_MAGIC = b"\x7fELF"
+ELF_MAGIC_LEN = 4
 
 DEFAULT_CANDIDATE_PATHS = [
-    Path(os.environ.get("FACTORIO_BIN", "")),
     Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64_/factorio",
     Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio",
     REAL_USER_HOME / ".steam/steam/steamapps/common/Factorio/bin/x64_/factorio",
     REAL_USER_HOME / ".local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio",
+    Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64/factorio",
+    Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64/factorio",
+    REAL_USER_HOME / ".steam/steam/steamapps/common/Factorio/bin/x64/factorio",
+    REAL_USER_HOME / ".local/share/Steam/steamapps/common/Factorio/bin/x64/factorio",
     Path("/usr/bin/factorio"),
 ]
 
@@ -53,16 +58,35 @@ def _parse_nm_output(stdout: str) -> dict[str, int]:
     return raw_map
 
 
-def resolve_factorio_binary(custom_path: str | Path | None = None) -> Path | None:
-    """Find a readable Factorio executable on the system."""
-    if custom_path:
-        p = Path(custom_path).expanduser().resolve()
-        if p.is_file() and os.access(p, os.X_OK):
-            return p
+def _is_elf_binary(path: Path) -> bool:
+    """Return True when path is an executable ELF binary."""
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    try:
+        with path.open("rb") as f:
+            return f.read(ELF_MAGIC_LEN) == ELF_MAGIC
+    except OSError:
+        return False
 
-    for candidate in DEFAULT_CANDIDATE_PATHS:
-        if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
+
+def resolve_factorio_binary(custom_path: str | Path | None = None) -> Path | None:
+    """Find a readable Factorio ELF executable on the system."""
+    candidates: list[Path] = []
+    if custom_path:
+        candidates.append(Path(custom_path).expanduser())
+    env_bin = os.environ.get("FACTORIO_BIN")
+    if env_bin:
+        candidates.append(Path(env_bin).expanduser())
+    candidates.extend(DEFAULT_CANDIDATE_PATHS)
+
+    for candidate in candidates:
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if _is_elf_binary(candidate):
             return candidate.resolve()
+        alt_elf = candidate.resolve().parent.parent / "x64_" / "factorio"
+        if _is_elf_binary(alt_elf):
+            return alt_elf.resolve()
 
     return None
 

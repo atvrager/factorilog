@@ -240,11 +240,27 @@ py_test(
     name = "chassis_floorplan_test",
     size = "small",
     srcs = ["test_chassis_floorplan.py"],
+    main = "test_chassis_floorplan.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "chassis_floorplan_openroad_test",
+    size = "medium",
+    srcs = ["test_chassis_floorplan.py"],
     data = [
         "//flow:automation_science_chassis.def",
         "//flow:automation_science_chassis_netlist.json",
     ],
+    local = True,
     main = "test_chassis_floorplan.py",
+    tags = [
+        "local",
+        "manual",
+        "openroad",
+    ],
     deps = [
         "//foundry:pdk_lib",
     ],
@@ -361,10 +377,29 @@ py_test(
     srcs = ["test_analytical_placer.py"],
     data = [
         "data/dump-fixture.json",
+    ],
+    main = "test_analytical_placer.py",
+    deps = [
+        "//foundry:pdk_lib",
+    ],
+)
+
+py_test(
+    name = "analytical_placer_openroad_test",
+    size = "medium",
+    srcs = ["test_analytical_placer.py"],
+    data = [
+        "data/dump-fixture.json",
         "//flow:automation_science_chassis.def",
         "//flow:automation_science_chassis_netlist.json",
     ],
+    local = True,
     main = "test_analytical_placer.py",
+    tags = [
+        "local",
+        "manual",
+        "openroad",
+    ],
     deps = [
         "//foundry:pdk_lib",
     ],

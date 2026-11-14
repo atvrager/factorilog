@@ -529,8 +529,9 @@ class BotAgentTest(unittest.TestCase):
             get_pole_supply_radius,
         )
 
-        factorio_bin = find_factorio_binary()
-        if not factorio_bin:
+        try:
+            factorio_bin = find_factorio_binary()
+        except FileNotFoundError:
             self.skipTest("Factorio binary not available")
 
         scanner_lua = build_lua_cartography_scanner_snippet(radius=64)

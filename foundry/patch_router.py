@@ -51,6 +51,11 @@ SECONDS_PER_MINUTE: float = 60.0
 COORD_PRECISION: int = 2
 BOX_EPSILON: float = 1e-6
 HALF_DIVISOR: float = 2.0
+DOMINANT_RAW_MIN_RATE: float = 90.0
+FUEL_RAW_MIN_RATE: float = 60.0
+DEFAULT_RAW_MIN_RATE: float = 30.0
+FUEL_OUTPUT_FANOUT: int = 2
+DEFAULT_OUTPUT_FANOUT: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,6 +460,7 @@ def _try_build_patch_row(
     output_fanout: int,
     obstacles: set[TileCoord],
     tier: TechTierSpec,
+    reserve_smelter_clearance: bool = False,
 ) -> PatchArrayResult | None:
     """Attempt to place drills on one or both sides of a straight collection belt line."""
     dw = tier.drill_width
@@ -506,10 +512,16 @@ def _try_build_patch_row(
                 continue
             if not (fp & patch_tiles):
                 continue
-            if commodity == "iron-ore":
-                sm_x = cx + 2.5 * step_x + (0.5 if step_x == 0 else 0.0)
-                sm_y = cy + 2.5 * step_y + (0.5 if step_y == 0 else 0.0)
-                sm_fp = _footprint_tiles(sm_x, sm_y, 2, 2)
+            if reserve_smelter_clearance:
+                fw_f, fh_f = entity_size(tier.furnace_name)
+                fw, fh = int(fw_f), int(fh_f)
+                sm_x = (
+                    cx + ((dw + fw) / HALF_DIVISOR) * step_x + (TILE_HALF if step_x == 0 else 0.0)
+                )
+                sm_y = (
+                    cy + ((dh + fh) / HALF_DIVISOR) * step_y + (TILE_HALF if step_y == 0 else 0.0)
+                )
+                sm_fp = _footprint_tiles(sm_x, sm_y, fw, fh)
                 if sm_fp & obstacles or sm_fp & occupied:
                     continue
             placed_drills.append(
@@ -613,6 +625,7 @@ def synthesize_patch_miner_array(
     data: solve.Data,
     tier: TechTierSpec,
     output_fanout: int = 1,
+    reserve_smelter_clearance: bool = False,
 ) -> PatchArrayResult:
     """Synthesize a non-overlapping mining drill array and collection bus over patch_tiles."""
     if not patch_tiles:
@@ -648,6 +661,7 @@ def synthesize_patch_miner_array(
                 output_fanout=output_fanout,
                 obstacles=obstacles,
                 tier=tier,
+                reserve_smelter_clearance=reserve_smelter_clearance,
             )
             if cand is None:
                 continue
@@ -1274,12 +1288,22 @@ def route_patch_to_base(
         | set(base_core.occupied_tiles)
     )
 
+    non_fuel_comms = [c for c in base_core.input_terminals if c != tier.fuel_commodity]
+    dominant_raw_comm = (
+        max(non_fuel_comms, key=lambda c: (float(raw.get(c, 0.0)), c)) if non_fuel_comms else None
+    )
+
     for comm, base_term in sorted(base_core.input_terminals.items()):
         if comm not in primary_patches:
             raise ValueError(f"Required resource patch '{comm}' not present on map surface")
         is_fuel = comm == tier.fuel_commodity
-        fanout = 2 if is_fuel else 1
-        min_rate = 90.0 if comm == "iron-ore" else (60.0 if is_fuel else 30.0)
+        is_dominant = comm == dominant_raw_comm
+        fanout = FUEL_OUTPUT_FANOUT if is_fuel else DEFAULT_OUTPUT_FANOUT
+        min_rate = (
+            DOMINANT_RAW_MIN_RATE
+            if is_dominant
+            else (FUEL_RAW_MIN_RATE if is_fuel else DEFAULT_RAW_MIN_RATE)
+        )
         target_rate = max(min_rate, float(raw.get(comm, min_rate)))
         p_array = synthesize_patch_miner_array(
             commodity=comm,
@@ -1290,6 +1314,7 @@ def route_patch_to_base(
             data=data,
             tier=tier,
             output_fanout=fanout,
+            reserve_smelter_clearance=is_dominant,
         )
         patch_arrays[comm] = p_array
         placed_obstacles.update(p_array.occupied_tiles)
