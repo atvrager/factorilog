@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="100%" height="auto" role="img" aria-label="Stage 3: Two-Stage 3D Multi-Layer Dual-Lane Maze Router and Underground Transitions">
+<defs>
+<marker id="arr-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#38bdf8"/></marker>
+<marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f59e0b"/></marker>
+<marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#34d399"/></marker>
+<marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f472b6"/></marker>
+</defs>
+<rect width="1200" height="540" rx="10" fill="#0b0e14" stroke="#232c3b"/>
+<style>text{font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;fill:#e2e8f0;}.title{font-size:15px;font-weight:700;fill:#f8fafc;}.sub{font-size:11px;fill:#94a3b8;}.hdr{font-size:12px;font-weight:700;fill:#38bdf8;}.lbl{font-size:10px;fill:#e2e8f0;}.dim{font-size:9px;fill:#94a3b8;}.badge{font-size:10px;font-weight:700;}</style>
+<rect x="16" y="14" width="1168" height="38" rx="6" fill="#111620" stroke="#232c3b"/>
+<text x="28" y="32" class="title">Stage 3: Two-Stage 3D Multi-Layer Dual-Lane Maze Router and Underground Transitions</text>
+<text x="28" y="45" class="sub">Left: real routed chassis slice [188,182]..[236,218] tiles | Right: z-layer PDK stack &amp; negotiated congestion</text>
+<rect x="16" y="64" width="614" height="460" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="30" y="86" class="hdr">Routed Block-to-Street Detail (48x36 tiles)</text>
+<rect x="534" y="72" width="82" height="20" rx="4" fill="#34d399" fill-opacity="0.16" stroke="#34d399"/>
+<text x="546" y="86" class="badge" style="fill:#34d399">0 DRC</text>
+<rect x="30" y="100" width="586" height="390" fill="#0b0e14" stroke="#232c3b"/>
+<line x1="30.0" y1="100" x2="30.0" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="54.4" y1="100" x2="54.4" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="78.8" y1="100" x2="78.8" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="103.2" y1="100" x2="103.2" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="127.7" y1="100" x2="127.7" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="152.1" y1="100" x2="152.1" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="176.5" y1="100" x2="176.5" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="200.9" y1="100" x2="200.9" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="225.3" y1="100" x2="225.3" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="249.8" y1="100" x2="249.8" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="274.2" y1="100" x2="274.2" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="298.6" y1="100" x2="298.6" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="323.0" y1="100" x2="323.0" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="347.4" y1="100" x2="347.4" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="371.8" y1="100" x2="371.8" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="396.2" y1="100" x2="396.2" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="420.7" y1="100" x2="420.7" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="445.1" y1="100" x2="445.1" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="469.5" y1="100" x2="469.5" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="493.9" y1="100" x2="493.9" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="518.3" y1="100" x2="518.3" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="542.8" y1="100" x2="542.8" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="567.2" y1="100" x2="567.2" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="591.6" y1="100" x2="591.6" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="616.0" y1="100" x2="616.0" y2="490" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="100.0" x2="616" y2="100.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="121.7" x2="616" y2="121.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="143.3" x2="616" y2="143.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="165.0" x2="616" y2="165.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="186.7" x2="616" y2="186.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="208.3" x2="616" y2="208.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="230.0" x2="616" y2="230.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="251.7" x2="616" y2="251.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="273.3" x2="616" y2="273.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="295.0" x2="616" y2="295.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="316.7" x2="616" y2="316.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="338.3" x2="616" y2="338.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="360.0" x2="616" y2="360.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="381.7" x2="616" y2="381.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="403.3" x2="616" y2="403.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="425.0" x2="616" y2="425.0" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="446.7" x2="616" y2="446.7" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="468.3" x2="616" y2="468.3" stroke="#1c2432" stroke-width="0.6"/>
+<line x1="30" y1="490.0" x2="616" y2="490.0" stroke="#1c2432" stroke-width="0.6"/>
+<rect x="30.0" y="262.5" width="586.0" height="65.0" fill="#334155" fill-opacity="0.35"/>
+<rect x="30.0" y="100.0" width="109.9" height="162.5" fill="#334155" fill-opacity="0.35"/>
+<rect x="139.9" y="100.0" width="73.2" height="390.0" fill="#334155" fill-opacity="0.35"/>
+<line x1="194.8" y1="137.9" x2="243.6" y2="137.9" stroke="#a78bfa" stroke-width="2.2"/>
+<line x1="524.4" y1="137.9" x2="670.9" y2="137.9" stroke="#a78bfa" stroke-width="2.2"/>
+<line x1="194.8" y1="137.9" x2="194.8" y2="300.4" stroke="#a78bfa" stroke-width="2.2"/>
+<line x1="194.8" y1="430.4" x2="194.8" y2="538.8" stroke="#a78bfa" stroke-width="2.2"/>
+<line x1="512.2" y1="137.9" x2="390.1" y2="137.9" stroke="#a78bfa" stroke-width="2.2" stroke-dasharray="4 3"/>
+<line x1="377.9" y1="137.9" x2="255.9" y2="137.9" stroke="#a78bfa" stroke-width="2.2" stroke-dasharray="4 3"/>
+<line x1="194.8" y1="311.2" x2="194.8" y2="419.6" stroke="#a78bfa" stroke-width="2.2" stroke-dasharray="4 3"/>
+<line x1="158.2" y1="267.9" x2="158.2" y2="-620.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="158.2" y1="419.6" x2="158.2" y2="343.8" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="170.4" y1="267.9" x2="170.4" y2="-620.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="170.4" y1="430.4" x2="170.4" y2="343.8" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="182.6" y1="928.8" x2="182.6" y2="441.2" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="219.2" y1="257.1" x2="219.2" y2="181.2" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="426.8" y1="376.2" x2="426.8" y2="267.9" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="-1013.8" y1="322.1" x2="182.6" y2="322.1" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="268.1" y1="322.1" x2="377.9" y2="322.1" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="390.1" y1="376.2" x2="390.1" y2="376.2" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="414.6" y1="376.2" x2="414.6" y2="376.2" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="414.6" y1="387.1" x2="414.6" y2="387.1" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="-476.6" y1="419.6" x2="146.0" y2="419.6" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="-476.6" y1="430.4" x2="121.6" y2="430.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="133.8" y1="430.4" x2="133.8" y2="885.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="207.0" y1="473.8" x2="207.0" y2="625.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="390.1" y1="322.1" x2="390.1" y2="365.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="426.8" y1="387.1" x2="426.8" y2="462.9" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="426.8" y1="257.1" x2="231.4" y2="257.1" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="182.6" y1="430.4" x2="182.6" y2="430.4" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="426.8" y1="473.8" x2="219.2" y2="473.8" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="402.4" y1="376.2" x2="402.4" y2="387.1" stroke="#f59e0b" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+<line x1="194.8" y1="322.1" x2="255.9" y2="322.1" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="5 3"/>
+<circle cx="194.8" cy="322.1" r="3.2" fill="#38bdf8"/>
+<circle cx="255.9" cy="322.1" r="3.2" fill="#0b0e14" stroke="#38bdf8" stroke-width="1.6"/>
+<line x1="219.2" y1="170.4" x2="219.2" y2="72.9" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="5 3"/>
+<circle cx="219.2" cy="170.4" r="3.2" fill="#38bdf8"/>
+<circle cx="219.2" cy="72.9" r="3.2" fill="#0b0e14" stroke="#38bdf8" stroke-width="1.6"/>
+<line x1="170.4" y1="332.9" x2="170.4" y2="278.8" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="5 3"/>
+<circle cx="170.4" cy="332.9" r="3.2" fill="#38bdf8"/>
+<circle cx="170.4" cy="278.8" r="3.2" fill="#0b0e14" stroke="#38bdf8" stroke-width="1.6"/>
+<line x1="158.2" y1="332.9" x2="158.2" y2="278.8" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="5 3"/>
+<circle cx="158.2" cy="332.9" r="3.2" fill="#38bdf8"/>
+<circle cx="158.2" cy="278.8" r="3.2" fill="#0b0e14" stroke="#38bdf8" stroke-width="1.6"/>
+<text x="30" y="512" class="dim">Amber: M1 surface belts | Cyan dashed: M2 tunnels | Violet: M3 fluid pipes</text>
+<rect x="644" y="64" width="540" height="460" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="660" y="86" class="hdr">3D Layer Stack &amp; Negotiated Congestion</text>
+<polygon points="672,122 1150,122 1134,164 660,164" fill="#f472b6" fill-opacity="0.14" stroke="#f472b6" stroke-width="1.2"/>
+<text x="680" y="141" class="lbl" style="fill:#f472b6;font-weight:700">Overhead (PDN + Circuit)</text>
+<text x="680" y="156" class="dim">Copper MST poles + 1-to-40 tile red/green circuit links</text>
+<polygon points="672,184 1150,184 1134,226 660,226" fill="#f59e0b" fill-opacity="0.14" stroke="#f59e0b" stroke-width="1.2"/>
+<text x="680" y="203" class="lbl" style="fill:#f59e0b;font-weight:700">z = 0 (M1 Surface)</text>
+<text x="680" y="218" class="dim">Assembling machines, inserters, splitters, dual-lane belts</text>
+<polygon points="672,246 1150,246 1134,288 660,288" fill="#38bdf8" fill-opacity="0.14" stroke="#38bdf8" stroke-width="1.2"/>
+<text x="680" y="265" class="lbl" style="fill:#38bdf8;font-weight:700">z = 1..N (M2 Tunnels)</text>
+<text x="680" y="280" class="dim">Prototype spans: express-underground-belt=9t, fast-undergrou..</text>
+<polygon points="672,308 1150,308 1134,350 660,350" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.2"/>
+<text x="680" y="327" class="lbl" style="fill:#a78bfa;font-weight:700">Fluid Grid (M3 Pipes)</text>
+<text x="680" y="342" class="dim">Pressure-aware surface pipes, pumps, underground jumps</text>
+<rect x="660" y="378" width="508" height="128" rx="6" fill="#111620" stroke="#232c3b"/>
+<text x="672" y="402" class="lbl" style="fill:#34d399">Hierarchical PathFinder Rip-Up-and-Reroute</text>
+<text x="672" y="424" class="lbl">cost(e) = (base_cost(e) + history(e)) * present_congestion(e)</text>
+<text x="672" y="448" class="dim">Stage 1: Route intra-block 94x94 cores with underground lane jumps</text>
+<text x="672" y="466" class="dim">Stage 2: Route global trunks inside 6-tile chassis street channels</text>
+<text x="672" y="484" class="dim">Signoff: Prune dead ends, insert pumps, verify zero tile overlaps</text>
+</svg>

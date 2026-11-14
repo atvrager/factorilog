@@ -1,25 +1,31 @@
 # factorilog
 
-A Foundry PDK for Factorio. Place and route with OpenROAD, build with the
-game's own blueprint format.
+Factorilog compiles Factorio factories as digital integrated circuits. It links LP recipe synthesis, OpenROAD placement, and 3D maze routing.
 
-Factorio factories and IC designs share a shape:
+Explore the compiled `1200x1200` die and scaling charts on the showcase page.
+
+**[Interactive Die Explorer and Benchmarks](https://atvrager.github.io/factorilog/)**
+
+![Full 7-science chassis](site/assets/science_chassis.webp)
+
+![Native 32 px/tile street close-up](site/assets/science_chassis_crop.webp)
+
+Factorio factories match integrated circuits in structure and layout constraints.
 
 | IC | Factorio |
 | --- | --- |
-| cell | building, specialized by recipe |
-| cell library | the PDK: every (building, recipe) macro |
-| cell delay | craft time: energy_required over crafting_speed |
-| cell area | tile footprint, and one day the material build cost |
-| capacitance | the load a machine puts on its feed belt |
-| capacitor | a chest: capacity in slots times stack size |
-| routing layer | surface, underground tunnel pair, pipe run |
-| layer change | one underground-belt or pipe-to-ground pair |
-| track | belt, pipe, rail |
-| corners | beacon and module settings: no beacons is the slow corner |
-| power grid | pole and substation network |
-| netlist | recipe graph, one wire per material |
-| tape-out | blueprint exchange string |
+| `cell` | `building` specialized by recipe |
+| `cell library` | `PDK` containing each machine and recipe macro |
+| `cell delay` | `energy_required / crafting_speed` craft time |
+| `cell area` | `tile` footprint and material build cost |
+| `capacitance` | belt load that a machine draws from feeds |
+| `capacitor` | chest buffer sized by slots and stack limit |
+| `routing layer` | `M1` surface belt, `M2` tunnel, `M3` pipe |
+| `via` | underground belt or pipe-to-ground transition |
+| `track` | `belt`, `pipe`, or `rail` |
+| `RTL control` | SystemVerilog FSM lowered to combinators |
+| `DRC and STA` | overlap check and native C++ ELF timing probe |
+| `tape-out` | `blueprint` exchange string and save archive |
 
 ## The flow
 
@@ -27,119 +33,102 @@ Factorio factories and IC designs share a shape:
 graph LR
   D[dump JSON<br/>factorio --dump-data] --> P[PDK<br/>tech.lef, tech.lib]
   D --> S[netlister<br/>LP over recipe graph]
-  S --> N[netlist.v<br/>flat, LEF masters]
-  P --> F[OpenROAD floorplan<br/>die, rows, tracks]
+  S --> N[netlist.v<br/>macros, chassis grid]
+  P --> F[OpenROAD<br/>floorplan, io, place]
   N --> F
-  F --> I[io<br/>inputs and outputs on the edge]
-  I --> G[place<br/>global, legalize, check]
-  G --> DEF[factory.def]
-  DEF --> V[verify<br/>reload, recheck]
-  DEF --> B[bridge<br/>DEF to entities]
-  B --> E[blueprint string]
-  E --> H[game]
+  F --> DEF[factory.def]
+  DEF --> R[3D router<br/>M1 belt, M2 ug, M3 pipe]
+  V[Verilog FSM] --> R
+  R --> B[blueprint + DRC]
+  B --> H[save + render]
 ```
 
-1.  Synthesis. The netlister reads the prototype dump and solves a linear
-    program over the recipe graph. Demand in, recipe rates and machine
-    counts out. This is the Yosys step of the flow.
-2.  The PDK. One library of macros: footprint, ports, power, timing, per
-    (building, recipe). Layer stack: M1 surface, M2 tunnel pairs, M3
-    fluids. Game-measured numbers: belt capacity, tunnel span, inserter
-    reach, pole reach. No invented constants.
-3.  Floorplan, io, place. OpenROAD. The die holds the block area at 28
-    percent fill, the rows sit on the tile grid, and legalization keeps
-    a two tile lane between block columns, enough for one belt and one
-    inserter. The placement check is fatal on any violation.
-4.  Verify. The flow reads `factory.def` back and repeats the checks, so
-    the bridge never consumes a file OpenROAD cannot reload.
-5.  Route. Not yet. The next stage: belts, tunnels, and pipes on the
-    three layers.
-6.  The bridge. DEF placement and routes become game entities. The
-    blueprint codec is 40 lines: JSON, zlib, base64.
+1. **Synthesis.** `foundry/solve.py` solves a linear program over the recipe graph. Demand rates enter, and balanced machine counts exit.
+2. **The PDK.** `foundry/pdk.py` measures Factorio prototypes at runtime. It extracts footprints, speeds, reaches, and fluid curves without hardcoded tables.
+3. **Placement.** `foundry/analytical_placer.py` and OpenROAD arrange macros onto `100x100` city-block chassis tiles. Quadratic wirelength optimization compacts dense clusters before legalization.
+4. **3D Routing.** `foundry/router/` executes PathFinder rip-up-and-reroute across three routing layers. `M1` carries surface belts, `M2` carries tunnels, and `M3` carries fluid pipes.
+5. **RTL Control.** `foundry/circuit_synth.py` compiles SystemVerilog state machines into combinator circuits. Telemetry panels report belt starvation and hysteresis states in game ticks.
+6. **Bridge and Verification.** `foundry/def2bp.py` lowers placed cells and routes into blueprint strings (`foundry/blueprint.py`). `foundry/native_engine/` runs DRC and C++ ELF timing probes against compiled binaries.
+7. **Autonomous Bootstrap.** `foundry/patch_router.py` and `foundry/campaign/` construct Freeplay starter bases without console cheat commands.
+
+![LP recipe DAG and treemap](site/assets/pipeline_lp_dag.svg)
+
+![Placement HPWL comparison](site/assets/pipeline_placement.svg)
+
+![3D router layers and window](site/assets/pipeline_router_3d.svg)
+
+![Controlled 1-science factory](site/assets/automation_controlled_science.webp)
+
+![SystemVerilog FSM and Freeplay campaign](site/assets/pipeline_verilog_campaign.svg)
+
+![Autonomous starter base](site/assets/starter_base.webp)
+
+## Benchmarks
+
+Benchmarks measured at commit [`44b6c0f`](https://github.com/atvrager/factorilog/commit/44b6c0f0e55656296b50095cc8fb050f127a9fc3) (`2026-11-13`) on `AMD Ryzen 5 7600X 6-Core Processor`. Host hardware provides `6` physical cores and `12` logical threads. OpenROAD `pnr` uses `12` threads (`set_thread_count`). Python `synth`, Python `bp`, `render`, and `save` use `1` thread each.
+
+| Target | Packs | Die | Macros | Cells | Entities | Wires | DRC | Synth | PnR | Route + BP | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `automation_science` | `1` | `202x120` | `38` | `9` | `1,642` | `159` | `0` | `0.5s` | `1.4s` | `2.3s` | `10.5s` |
+| `automation_controlled_science` | `1` | `248x122` | `56` | `14` | `1,810` | `424` | `0` | `1.1s` | `1.0s` | `2.5s` | `11.2s` |
+| `automation_science_chassis` | `1` | `300x300` | `46` | `9` | `2,503` | `755` | `0` | `0.9s` | `1.1s` | `2.1s` | `12.6s` |
+| `automation_logistic_chassis` | `2` | `300x300` | `119` | `14` | `6,488` | `1,048` | `0` | `5.7s` | `0.8s` | `3.7s` | `17.9s` |
+| `automation_logistic_military_chassis` | `3` | `300x300` | `244` | `21` | `11,386` | `1,284` | `0` | `6.2s` | `0.7s` | `6.3s` | `19.9s` |
+| `automation_logistic_military_chemical_chassis` | `4` | `400x400` | `580` | `30` | `26,227` | `2,537` | `0` | `0.9s` | `0.3s` | `17.7s` | `25.8s` |
+| `automation_logistic_military_chemical_production_chassis` | `5` | `700x700` | `1,521` | `35` | `68,224` | `7,679` | `0` | `7.2s` | `1.1s` | `27.0s` | `46.0s` |
+| `automation_logistic_military_chemical_production_utility_chassis` | `6` | `900x900` | `2,439` | `43` | `116,339` | `12,359` | `0` | `16.1s` | `1.0s` | `104.4s` | `138.0s` |
+| `science_chassis` | `7` | `1200x1200` | `3,824` | `51` | `188,786` | `20,153` | `0` | `111.2s` | `1.6s` | `86.6s` | `229.2s` |
+
+The full provenance record and per-target timings live in [`site/data/benchmarks.json`](site/data/benchmarks.json).
 
 ## Layout
 
 | Path | Content |
 | --- | --- |
-| `foundry/solve.py` | The netlister. Recipe graph to LP to rates. |
-| `foundry/pdk.py` | The tech layer: cells, layers, measured numbers. |
-| `foundry/blueprint.py` | The exchange-string codec. |
-| `foundry/netlist.py` | Plan to instances and nets, flat Verilog, cell stubs. |
-| `foundry/lef.py` | LEF writer: macros, layers, vias, checker. |
-| `foundry/liberty.py` | Liberty stubs: area, pins, power, timing arcs. |
-| `foundry/netbuild.py` | Dump and demand to `netlist.v`, `cells.v`, `tech.lef`, `tech.lib`. |
-| `flow/factorilog.tcl` | The OpenROAD stages: floorplan, io, place, write DEF. |
-| `flow/verify_def.tcl` | Reads the DEF back and repeats the checks. |
-| `flow/orfs.sh` | Runs a stage in the `openroad/orfs` Podman container. |
-| `foundry/make_fixture.py` | Shrinks a real dump to the test fixture. |
-| `foundry/test_solve.py` | Solver tests on the fixture. |
-| `foundry/test_pdk.py` | Smoke test: dump to plan to cells to blueprint. |
-| `reference/` | Prior art from the research phase. Not in the build. |
-| `test/data/dump-fixture.json` | The hermetic dump subset. |
-| `tools/` | STE linter, ruff, ty. |
+| `foundry/solve.py` | `LP` netlister converting recipe graphs into rates |
+| `foundry/pdk.py` | Runtime prototype PDK layers, footprints, and capacities |
+| `foundry/analytical_placer.py` | Quadratic wirelength optimization and SCC legalization |
+| `foundry/chassis.py` | Hierarchical `100x100` city-block floorplan generator |
+| `foundry/router/` | `3D` PathFinder maze router (`M1`, `M2`, `M3`) |
+| `foundry/circuit_synth.py` | SystemVerilog FSM synthesis to combinator circuits |
+| `foundry/def2bp.py` | `DEF` placement and routes lowered to blueprints |
+| `foundry/native_engine/` | `dlopen` C++ binary verifier and timing probe |
+| `foundry/campaign/` | Autonomous Freeplay bot agent and map cartographer |
+| `foundry/patch_router.py` | Resource patch mining and smelt bootstrap layout |
+| `foundry/render_bp.py` | Game-sprite PNG blueprint compositor |
+| `flow/` | OpenROAD Tcl scripts, Bazel macros, and `power_sequencer.v` |
+| `site/` | GitHub Pages bundle, die explorer, and `pages_bundle` |
+| `test/data/dump-fixture.json` | Hermetic prototype dump subset |
+| `tools/` | Showcase generator, STE linter, ruff, and ty checks |
 
 ## Use
 
-```
-bazel test //...                                  # the whole suite
-bazel run //foundry:solve -- item electronic-circuit 3000 \
-    --dump test/data/dump-fixture.json            # a plan
-bazel run //foundry:solve -- tech rocket-silo 60 \
-    --dump test/data/dump-fixture.json            # science for a run
-bazel run //foundry:netbuild -- test/data/dump-fixture.json --spc 60
-                                                  # netlist.v + sidecar
-flow/orfs.sh                        # floorplan, io, place
-flow/orfs.sh flow/verify_def.tcl    # read the DEF back
-python3 foundry/make_fixture.py \
-    ~/.factorio/script-output/data-raw-dump.json \
-    test/data/dump-fixture.json                   # refresh the fixture
+```bash
+bazel test //... --build_tests_only --test_tag_filters=-science,-openroad,-requires-game-data
+bazel build //flow:automation_science_chassis_render
+bazel build //site:pages_bundle
+bazel run //tools:build_showcase_site -- --refresh-hermetic
+bazel run //foundry:solve -- tech rocket-silo 60 --dump test/data/dump-fixture.json
+./flow/orfs.sh
+python3 foundry/make_fixture.py ~/.factorio/script-output/data-raw-dump.json test/data/dump-fixture.json
 ```
 
-The fixture comes from one `factorio --dump-data` run. `bazel test` needs
-no game and no network.
-
-`netbuild` writes `foundry/netlist.v`, `foundry/cells.v`, `foundry/tech.lef`,
-and `foundry/tech.lib`. Git ignores all of them. The Verilog feeds
-OpenROAD, the LEF holds the masters, the Liberty stubs hold the timing
-view, and the JSON sidecar carries the rates and lane data that
-place-and-route reads.
+The hermetic test suite needs no Factorio installation and no network access.
 
 ## Regenerating the PDK
 
-Two inputs feed one command. A new game version reruns both.
+Two inputs feed one command. A new Factorio version reruns both.
 
-1.  `factorio --dump-data` writes the prototype dump. Nearly every PDK
-    number comes from here: footprints, belt speeds, tunnel spans, pole
-    reach, machine speed and power, splitter geometry.
-2.  The probe mod measures the four numbers the dump lacks. Those are
-    the pipe-to-ground span, the inserter swing rate under load, fluid
-    flow against pipe length, and train acceleration. They live in one
-    measurements file with a game version stamp.
-3.  `bazel run //foundry:netbuild` merges the two and writes the PDK and
-    the netlist. The PDK is a build product, never a hand-edited file.
+1. `factorio --dump-data` writes the prototype dump. Nearly all PDK constants come from here, such as footprints, speeds, spans, and reaches.
+2. The probe mod measures pipe-to-ground length flow, inserter swing throughput, and fluid curves.
+3. `bazel run //foundry:netbuild` merges both inputs into `tech.lef`, `tech.lib`, and `netlist.v`.
 
-The OpenROAD stage runs in the prebuilt `openroad/orfs` Podman container,
-no build step:
+The OpenROAD stage runs inside the `openroad/orfs` container image:
 
+```bash
+./flow/orfs.sh
 ```
-flow/orfs.sh    # read_liberty, read_lef, read_verilog, link, place, route
-```
-
-## Status
-
-Working: synthesis, placement, routing, and static timing analysis
-on the hermetic fixture. A 60 packs-per-minute demand solves with zero
-balance error and lowers to a flat netlist: 1220 instances, 1248 nets, 12
-ports. The PDK carries 39 masters with LEF geometry and Liberty timing
-arcs based on recipe craft duration. OpenROAD places all 1220 blocks on
-the tile grid with no overlap. The native 3D maze router routes all nets
-across three layers with zero DRC violations. OpenSTA reports critical
-path timing and slack across the full combinational factory.
-
-Next: the DEF-to-entities bridge with blueprint strings, and trains as a
-track layer.
 
 ## Prose
 
-All prose follows ASD-STE100. The linter runs as a pre-commit hook on the
-added lines and on commit messages. Disable with `STE_LINT_DISABLE=1`.
+All prose follows ASD-STE100. The pre-commit hook runs `tools/ste-lint.py` on added lines and commit messages. Override the check with `STE_LINT_DISABLE=1`.

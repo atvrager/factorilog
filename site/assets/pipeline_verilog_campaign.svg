@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="100%" height="auto" role="img" aria-label="Stage 4: SystemVerilog Controller Synthesis, Native ELF Signoff, and Freeplay Campaign">
+<defs>
+<marker id="arr-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#38bdf8"/></marker>
+<marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f59e0b"/></marker>
+<marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#34d399"/></marker>
+<marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f472b6"/></marker>
+</defs>
+<rect width="1200" height="560" rx="10" fill="#0b0e14" stroke="#232c3b"/>
+<style>text{font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;fill:#e2e8f0;}.title{font-size:15px;font-weight:700;fill:#f8fafc;}.sub{font-size:11px;fill:#94a3b8;}.hdr{font-size:12px;font-weight:700;fill:#38bdf8;}.lbl{font-size:10px;fill:#e2e8f0;}.dim{font-size:9px;fill:#94a3b8;}.badge{font-size:10px;font-weight:700;}</style>
+<rect x="16" y="14" width="1168" height="38" rx="6" fill="#111620" stroke="#232c3b"/>
+<text x="28" y="32" class="title">Stage 4: SystemVerilog Controller Synthesis, Native ELF Signoff, and Freeplay Campaign</text>
+<text x="28" y="45" class="sub">Top: power_sequencer.v -&gt; 10 combinators &amp; 13 circuit wires | Bottom: zero-cheat UDP lockstep starter base</text>
+<rect x="16" y="64" width="1168" height="240" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="30" y="86" class="hdr">Behavioral Verilog FSM (power_sequencer.v) -> Combinator Netlist -> Native ELF Signoff</text>
+<rect x="52" y="140" width="176" height="58" rx="8" fill="#111620" stroke="#34d399" stroke-width="1.6"/>
+<text x="64" y="164" class="lbl" style="fill:#34d399;font-weight:700">STATE_NORMAL</text>
+<text x="64" y="182" class="dim">Switch=1, Backup=0</text>
+<rect x="290" y="140" width="176" height="58" rx="8" fill="#111620" stroke="#f59e0b" stroke-width="1.6"/>
+<text x="302" y="164" class="lbl" style="fill:#f59e0b;font-weight:700">STATE_THROTTLED</text>
+<text x="302" y="182" class="dim">Switch=1, Backup=1</text>
+<rect x="528" y="140" width="176" height="58" rx="8" fill="#111620" stroke="#f472b6" stroke-width="1.6"/>
+<text x="540" y="164" class="lbl" style="fill:#f472b6;font-weight:700">STATE_EMERGENCY</text>
+<text x="540" y="182" class="dim">Switch=0, Backup=1</text>
+<path d="M228,156 L290,156" stroke="#f59e0b" stroke-width="1.6" marker-end="url(#arr-amber)"/>
+<text x="234" y="148" class="dim">&lt;30%</text>
+<path d="M290,182 L228,182" stroke="#34d399" stroke-width="1.6" marker-end="url(#arr-emerald)"/>
+<text x="234" y="198" class="dim">&gt;70%</text>
+<path d="M466,156 L528,156" stroke="#f472b6" stroke-width="1.6" marker-end="url(#arr-rose)"/>
+<text x="472" y="148" class="dim">&lt;10%</text>
+<path d="M528,182 L466,182" stroke="#f59e0b" stroke-width="1.6" marker-end="url(#arr-amber)"/>
+<text x="472" y="198" class="dim">&gt;20%</text>
+<rect x="744" y="114" width="200" height="104" rx="6" fill="#111620" stroke="#38bdf8"/>
+<text x="756" y="136" class="lbl" style="fill:#38bdf8">Combinator Netlist</text>
+<text x="756" y="156" class="dim">4 inputs -> 3 outputs</text>
+<text x="756" y="174" class="dim">10 arithmetic/decider cells</text>
+<text x="756" y="192" class="dim">13 red/green circuit links</text>
+<path d="M704,169 L744,169" stroke="#38bdf8" stroke-width="1.6" marker-end="url(#arr-cyan)"/>
+<rect x="974" y="114" width="194" height="104" rx="6" fill="#111620" stroke="#a78bfa"/>
+<text x="986" y="136" class="lbl" style="fill:#a78bfa">Native ELF Verifier</text>
+<text x="986" y="156" class="dim">Patch PT_INTERP &amp; dlopen</text>
+<text x="986" y="174" class="dim">TransportLine::move</text>
+<text x="986" y="192" class="dim">FluidBuffer::getFlowRate</text>
+<path d="M944,169 L974,169" stroke="#38bdf8" stroke-width="1.6" marker-end="url(#arr-cyan)"/>
+<text x="52" y="256" class="dim">Circuit signals drive physical power switches, backup steam pumps, and 7-segment displays placed directly onto chassis macro cores.</text>
+<text x="52" y="274" class="dim">Closed-loop verification probes real Factorio binary state without Lua script cheats or manual coordinate tables.</text>
+<rect x="16" y="320" width="1168" height="224" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="30" y="344" class="hdr">Zero-Cheat Autonomous Freeplay Campaign (Procedural Terrain to Starter Base)</text>
+<rect x="34" y="368" width="258" height="122" rx="6" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="48" y="396" class="lbl" style="fill:#38bdf8;font-weight:700">1. Map Cartographer</text>
+<text x="48" y="424" class="dim">Scan water shorelines, ore patches,</text>
+<text x="48" y="442" class="dim">cliff keepouts, and clearable trees.</text>
+<line x1="292" y1="429" x2="318" y2="429" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arr-cyan)"/>
+<rect x="318" y="368" width="258" height="122" rx="6" fill="#111620" stroke="#34d399" stroke-width="1.4"/>
+<text x="332" y="396" class="lbl" style="fill:#34d399;font-weight:700">2. Patch &amp; Mall Router</text>
+<text x="332" y="424" class="dim">Place lakeside boilers, drill rows,</text>
+<text x="332" y="442" class="dim">smelting columns, and red-science mall.</text>
+<line x1="576" y1="429" x2="602" y2="429" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arr-cyan)"/>
+<rect x="602" y="368" width="258" height="122" rx="6" fill="#111620" stroke="#f59e0b" stroke-width="1.4"/>
+<text x="616" y="396" class="lbl" style="fill:#f59e0b;font-weight:700">3. A* Navigation</text>
+<text x="616" y="424" class="dim">Plan collision-free walking vectors</text>
+<text x="616" y="442" class="dim">under strict reach and latency bounds.</text>
+<line x1="860" y1="429" x2="886" y2="429" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arr-cyan)"/>
+<rect x="886" y="368" width="258" height="122" rx="6" fill="#111620" stroke="#f472b6" stroke-width="1.4"/>
+<text x="900" y="396" class="lbl" style="fill:#f472b6;font-weight:700">4. UDP Lockstep Proxy</text>
+<text x="900" y="424" class="dim">Stream deterministic input packets</text>
+<text x="900" y="442" class="dim">directly to a live Factorio host.</text>
+<text x="34" y="520" class="dim">Verified end-to-end by test/test_patch_router.py and test/test_bot_agent.py without Lua command cheats.</text>
+</svg>

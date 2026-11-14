@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import tarfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,12 +17,13 @@ from PIL import Image
 
 from foundry.circuit_synth import synthesize_power_sequencer
 from tools.showcase_svg import build_verilog_campaign_svg
+from tools.showcase_template import render_showcase_html
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SITE_DIR = REPO_ROOT / "site"
+RUNFILES_ROOT = Path(__file__).parent.parent
+SITE_DIR = RUNFILES_ROOT / "site"
 ASSETS_DIR = SITE_DIR / "assets"
 DATA_DIR = SITE_DIR / "data"
-README_PATH = REPO_ROOT / "README.md"
+README_PATH = RUNFILES_ROOT / "README.md"
 
 EXPECTED_WEBPS: tuple[str, ...] = (
     "science_chassis.webp",
@@ -70,8 +72,7 @@ class ShowcaseSiteTest(unittest.TestCase):
     def test_generated_site_bundle(self) -> None:
         """Verify committed WebP renders, SVGs, JSON provenance, HTML, and README links."""
         benchmarks_path = DATA_DIR / "benchmarks.json"
-        if not benchmarks_path.is_file():
-            self.skipTest("Showcase site bundle not generated yet.")
+        self.assertTrue(benchmarks_path.is_file(), f"Missing benchmarks JSON: {benchmarks_path}")
 
         for webp_name in EXPECTED_WEBPS:
             webp_path = ASSETS_DIR / webp_name
@@ -122,17 +123,50 @@ class ShowcaseSiteTest(unittest.TestCase):
         self.assertTrue(die_doc["pipes"])
         self.assertTrue(die_doc["copper_wires"])
 
-        html_text = (SITE_DIR / "index.html").read_text(encoding="utf-8")
+        html_path = SITE_DIR / "index.html"
+        html_text = html_path.read_text(encoding="utf-8")
+        self.assertEqual(html_text, render_showcase_html(benchmarks))
         self.assertNotIn("/home/", html_text)
         self.assertNotIn("file://", html_text)
         for rel_path in REL_SITE_REF_RE.findall(html_text):
             self.assertTrue((SITE_DIR / rel_path).is_file(), f"Broken HTML link: {rel_path}")
 
+        verilog_src = (RUNFILES_ROOT / "flow" / "controllers" / "power_sequencer.v").read_text(
+            encoding="utf-8"
+        )
+        expected_verilog_svg = build_verilog_campaign_svg(synthesize_power_sequencer(), verilog_src)
+        self.assertEqual(
+            (ASSETS_DIR / "pipeline_verilog_campaign.svg").read_text(encoding="utf-8"),
+            expected_verilog_svg,
+        )
+
+        bundle_path = SITE_DIR / "pages_bundle.tar.gz"
+        self.assertTrue(bundle_path.is_file(), f"Missing packaged site bundle: {bundle_path}")
+        expected_members = {
+            ".nojekyll",
+            "index.html",
+            "styles.css",
+            "app.js",
+            "data/benchmarks.json",
+            "data/die_science_chassis.json",
+            *(f"assets/{name}" for name in EXPECTED_WEBPS),
+            *(f"assets/{name}" for name in EXPECTED_SVGS),
+            *(f"data/blueprints/{name}" for name in EXPECTED_BLUEPRINTS),
+        }
+        with tarfile.open(bundle_path, "r:gz") as tf:
+            member_names = set(tf.getnames())
+            missing = expected_members - member_names
+            self.assertEqual(missing, set(), f"Missing pages_bundle members: {sorted(missing)}")
+            index_member = tf.extractfile("index.html")
+            self.assertIsNotNone(index_member)
+            assert index_member is not None
+            self.assertEqual(index_member.read().decode("utf-8"), html_text)
+
         readme_text = README_PATH.read_text(encoding="utf-8")
         self.assertNotIn("/home/", readme_text)
         self.assertNotIn("file://", readme_text)
         for rel_path in README_ASSET_REF_RE.findall(readme_text):
-            self.assertTrue((REPO_ROOT / rel_path).is_file(), f"Broken README link: {rel_path}")
+            self.assertTrue((RUNFILES_ROOT / rel_path).is_file(), f"Broken README link: {rel_path}")
 
 
 if __name__ == "__main__":

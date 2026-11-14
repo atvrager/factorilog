@@ -528,7 +528,9 @@ py_test(
     srcs = ["test_showcase_site.py"],
     data = [
         "//:README.md",
+        "//flow:controllers/power_sequencer.v",
         "//site:all_files",
+        "//site:pages_bundle",
     ],
     main = "test_showcase_site.py",
     deps = [

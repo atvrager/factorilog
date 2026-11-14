@@ -1,0 +1,257 @@
+{
+  "provenance": {
+    "git_commit_short": "44b6c0f",
+    "git_commit_full": "44b6c0f0e55656296b50095cc8fb050f127a9fc3",
+    "git_commit_date": "2026-11-13",
+    "repo_url": "https://github.com/atvrager/factorilog",
+    "cpu_model": "AMD Ryzen 5 7600X 6-Core Processor",
+    "physical_cores": 6,
+    "logical_threads": 12,
+    "stage_concurrency": {
+      "synth": "1 thread (Python LP solver and netlister)",
+      "pnr": "12 threads (OpenROAD set_thread_count [exec nproc])",
+      "bp": "1 thread (Python 3D maze router and MST power grid)",
+      "render": "1 thread (Python Pillow sprite compositor)",
+      "save": "1 thread (Headless Factorio save serializer)"
+    }
+  },
+  "targets": [
+    {
+      "target": "automation_science",
+      "sciences_count": 1,
+      "demand_packs": [
+        "automation-science-pack"
+      ],
+      "die_w": 202,
+      "die_h": 120,
+      "die_tiles": 24240,
+      "macro_instances": 38,
+      "pdk_cells": 9,
+      "bp_entities": 1642,
+      "bp_wires": 159,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 0.513,
+        "pnr": 1.426,
+        "bp": 2.272,
+        "render": 1.326,
+        "save": 4.996
+      },
+      "compile_sec": 4.211,
+      "total_sec": 10.533
+    },
+    {
+      "target": "automation_controlled_science",
+      "sciences_count": 1,
+      "demand_packs": [
+        "automation-science-pack"
+      ],
+      "die_w": 248,
+      "die_h": 122,
+      "die_tiles": 30256,
+      "macro_instances": 56,
+      "pdk_cells": 14,
+      "bp_entities": 1810,
+      "bp_wires": 424,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 1.131,
+        "pnr": 1.013,
+        "bp": 2.461,
+        "render": 1.668,
+        "save": 4.914
+      },
+      "compile_sec": 4.605,
+      "total_sec": 11.187
+    },
+    {
+      "target": "automation_science_chassis",
+      "sciences_count": 1,
+      "demand_packs": [
+        "automation-science-pack"
+      ],
+      "die_w": 300,
+      "die_h": 300,
+      "die_tiles": 90000,
+      "macro_instances": 46,
+      "pdk_cells": 9,
+      "bp_entities": 2503,
+      "bp_wires": 755,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 0.943,
+        "pnr": 1.052,
+        "bp": 2.082,
+        "render": 3.784,
+        "save": 4.751
+      },
+      "compile_sec": 4.077,
+      "total_sec": 12.612
+    },
+    {
+      "target": "automation_logistic_chassis",
+      "sciences_count": 2,
+      "demand_packs": [
+        "automation-science-pack",
+        "logistic-science-pack"
+      ],
+      "die_w": 300,
+      "die_h": 300,
+      "die_tiles": 90000,
+      "macro_instances": 119,
+      "pdk_cells": 14,
+      "bp_entities": 6488,
+      "bp_wires": 1048,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 5.701,
+        "pnr": 0.772,
+        "bp": 3.733,
+        "render": 3.805,
+        "save": 3.906
+      },
+      "compile_sec": 10.206,
+      "total_sec": 17.917
+    },
+    {
+      "target": "automation_logistic_military_chassis",
+      "sciences_count": 3,
+      "demand_packs": [
+        "automation-science-pack",
+        "logistic-science-pack",
+        "military-science-pack"
+      ],
+      "die_w": 300,
+      "die_h": 300,
+      "die_tiles": 90000,
+      "macro_instances": 244,
+      "pdk_cells": 21,
+      "bp_entities": 11386,
+      "bp_wires": 1284,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 6.158,
+        "pnr": 0.746,
+        "bp": 6.296,
+        "render": 3.312,
+        "save": 3.423
+      },
+      "compile_sec": 13.2,
+      "total_sec": 19.935
+    },
+    {
+      "target": "automation_logistic_military_chemical_chassis",
+      "sciences_count": 4,
+      "demand_packs": [
+        "automation-science-pack",
+        "chemical-science-pack",
+        "logistic-science-pack",
+        "military-science-pack"
+      ],
+      "die_w": 400,
+      "die_h": 400,
+      "die_tiles": 160000,
+      "macro_instances": 580,
+      "pdk_cells": 30,
+      "bp_entities": 26227,
+      "bp_wires": 2537,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 0.854,
+        "pnr": 0.344,
+        "bp": 17.668,
+        "render": 3.462,
+        "save": 3.458
+      },
+      "compile_sec": 18.866,
+      "total_sec": 25.786
+    },
+    {
+      "target": "automation_logistic_military_chemical_production_chassis",
+      "sciences_count": 5,
+      "demand_packs": [
+        "automation-science-pack",
+        "chemical-science-pack",
+        "logistic-science-pack",
+        "military-science-pack",
+        "production-science-pack"
+      ],
+      "die_w": 700,
+      "die_h": 700,
+      "die_tiles": 490000,
+      "macro_instances": 1521,
+      "pdk_cells": 35,
+      "bp_entities": 68224,
+      "bp_wires": 7679,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 7.159,
+        "pnr": 1.106,
+        "bp": 26.957,
+        "render": 4.288,
+        "save": 6.5
+      },
+      "compile_sec": 35.222,
+      "total_sec": 46.01
+    },
+    {
+      "target": "automation_logistic_military_chemical_production_utility_chassis",
+      "sciences_count": 6,
+      "demand_packs": [
+        "automation-science-pack",
+        "chemical-science-pack",
+        "logistic-science-pack",
+        "military-science-pack",
+        "production-science-pack",
+        "utility-science-pack"
+      ],
+      "die_w": 900,
+      "die_h": 900,
+      "die_tiles": 810000,
+      "macro_instances": 2439,
+      "pdk_cells": 43,
+      "bp_entities": 116339,
+      "bp_wires": 12359,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 16.05,
+        "pnr": 0.952,
+        "bp": 104.412,
+        "render": 5.486,
+        "save": 11.141
+      },
+      "compile_sec": 121.414,
+      "total_sec": 138.041
+    },
+    {
+      "target": "science_chassis",
+      "sciences_count": 7,
+      "demand_packs": [
+        "automation-science-pack",
+        "chemical-science-pack",
+        "logistic-science-pack",
+        "military-science-pack",
+        "production-science-pack",
+        "space-science-pack",
+        "utility-science-pack"
+      ],
+      "die_w": 1200,
+      "die_h": 1200,
+      "die_tiles": 1440000,
+      "macro_instances": 3824,
+      "pdk_cells": 51,
+      "bp_entities": 188786,
+      "bp_wires": 20153,
+      "drc_violations": 0,
+      "stages_sec": {
+        "synth": 111.231,
+        "pnr": 1.64,
+        "bp": 86.608,
+        "render": 8.578,
+        "save": 21.169
+      },
+      "compile_sec": 199.479,
+      "total_sec": 229.226
+    }
+  ]
+}

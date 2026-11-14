@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 540" width="100%" height="auto" role="img" aria-label="Stage 1: LP Rate Solver DAG and 7-Science Chassis Cell Treemap">
+<defs>
+<marker id="arr-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#38bdf8"/></marker>
+<marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f59e0b"/></marker>
+<marker id="arr-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#34d399"/></marker>
+<marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#f472b6"/></marker>
+</defs>
+<rect width="1200" height="540" rx="10" fill="#0b0e14" stroke="#232c3b"/>
+<style>text{font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;fill:#e2e8f0;}.title{font-size:15px;font-weight:700;fill:#f8fafc;}.sub{font-size:11px;fill:#94a3b8;}.hdr{font-size:12px;font-weight:700;fill:#38bdf8;}.lbl{font-size:10px;fill:#e2e8f0;}.dim{font-size:9px;fill:#94a3b8;}.badge{font-size:10px;font-weight:700;}</style>
+<rect x="16" y="14" width="1168" height="38" rx="6" fill="#111620" stroke="#232c3b"/>
+<text x="28" y="32" class="title">Stage 1: LP Rate Solver DAG and 7-Science Chassis Cell Treemap</text>
+<text x="28" y="45" class="sub">Left: topological recipe graph from logistic-science-pack=60/m | Right: tile footprint of 3,824 placed chassis instances</text>
+<rect x="16" y="64" width="584" height="460" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="30" y="86" class="hdr">Recipe Hypergraph &amp; Synthesized Binary Splitters</text>
+<path d="M128.0,183.2 C250.5,183.2 250.5,345.6 373.0,345.6" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M128.0,426.8 C250.5,426.8 250.5,345.6 373.0,345.6" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.75" stroke-dasharray="4 3" marker-end="url(#arr-cyan)"/>
+<path d="M243.0,305.0 C250.5,305.0 250.5,264.4 258.0,264.4" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M128.0,264.4 C135.5,264.4 135.5,305.0 143.0,305.0" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M358.0,183.2 C308.0,183.2 308.0,426.8 258.0,426.8" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M358.0,264.4 C308.0,264.4 308.0,426.8 258.0,426.8" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.75" stroke-dasharray="4 3" marker-end="url(#arr-cyan)"/>
+<path d="M358.0,183.2 C365.5,183.2 365.5,264.4 373.0,264.4" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M358.0,345.6 C365.5,345.6 365.5,264.4 373.0,264.4" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M358.0,426.8 C365.5,426.8 365.5,264.4 373.0,264.4" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.75" stroke-dasharray="4 3" marker-end="url(#arr-cyan)"/>
+<path d="M358.0,183.2 C308.0,183.2 308.0,345.6 258.0,345.6" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M128.0,345.6 C193.0,345.6 193.0,183.2 258.0,183.2" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M473.0,183.2 C480.5,183.2 480.5,305.0 488.0,305.0" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M473.0,264.4 C480.5,264.4 480.5,305.0 488.0,305.0" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M473.0,345.6 C423.0,345.6 423.0,426.8 373.0,426.8" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.75" stroke-dasharray="4 3" marker-end="url(#arr-cyan)"/>
+<path d="M358.0,183.2 C365.5,183.2 365.5,183.2 373.0,183.2" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<path d="M358.0,345.6 C365.5,345.6 365.5,183.2 373.0,183.2" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-opacity="0.75" marker-end="url(#arr-amber)"/>
+<rect x="28.0" y="164.2" width="100" height="38" rx="5" fill="#111620" stroke="#34d399" stroke-width="1.4"/>
+<text x="34.0" y="179.2" class="lbl">coal</text>
+<text x="34.0" y="193.2" class="dim">176/m raw</text>
+<rect x="28.0" y="245.4" width="100" height="38" rx="5" fill="#111620" stroke="#34d399" stroke-width="1.4"/>
+<text x="34.0" y="260.4" class="lbl">copper-ore</text>
+<text x="34.0" y="274.4" class="dim">90/m raw</text>
+<rect x="28.0" y="326.6" width="100" height="38" rx="5" fill="#111620" stroke="#34d399" stroke-width="1.4"/>
+<text x="34.0" y="341.6" class="lbl">iron-ore</text>
+<text x="34.0" y="355.6" class="dim">330/m raw</text>
+<rect x="28.0" y="407.8" width="100" height="38" rx="5" fill="#111620" stroke="#34d399" stroke-width="1.4"/>
+<text x="34.0" y="422.8" class="lbl">water</text>
+<text x="34.0" y="436.8" class="dim">2340/m raw</text>
+<rect x="143.0" y="286.0" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="149.0" y="301.0" class="lbl">copper-plate</text>
+<text x="149.0" y="315.0" class="dim">3x electric (9..</text>
+<rect x="258.0" y="164.2" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="264.0" y="179.2" class="lbl">iron-plate</text>
+<text x="264.0" y="193.2" class="dim">16x electric (..</text>
+<rect x="258.0" y="245.4" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="264.0" y="260.4" class="lbl">copper-cable</text>
+<text x="264.0" y="274.4" class="dim">1x assembli (9..</text>
+<rect x="258.0" y="326.6" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="264.0" y="341.6" class="lbl">iron-gear-wheel</text>
+<text x="264.0" y="355.6" class="dim">1x assembli (9..</text>
+<rect x="258.0" y="407.8" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="264.0" y="422.8" class="lbl">electronic-ci..</text>
+<text x="264.0" y="436.8" class="dim">1x assembli (6..</text>
+<rect x="373.0" y="164.2" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="379.0" y="179.2" class="lbl">transport-belt</text>
+<text x="379.0" y="193.2" class="dim">1x assembli (3..</text>
+<rect x="373.0" y="245.4" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="379.0" y="260.4" class="lbl">inserter</text>
+<text x="379.0" y="274.4" class="dim">1x assembli (6..</text>
+<rect x="373.0" y="326.6" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="379.0" y="341.6" class="lbl">boiler-steam</text>
+<text x="379.0" y="355.6" class="dim">7x boiler (390..</text>
+<rect x="373.0" y="407.8" width="100" height="38" rx="5" fill="#111620" stroke="#38bdf8" stroke-width="1.4"/>
+<text x="379.0" y="422.8" class="lbl">steam-power</text>
+<text x="379.0" y="436.8" class="dim">13x steam-en (..</text>
+<rect x="488.0" y="286.0" width="100" height="38" rx="5" fill="#111620" stroke="#f472b6" stroke-width="1.4"/>
+<text x="494.0" y="301.0" class="lbl">logistic-scie..</text>
+<text x="494.0" y="315.0" class="dim">8x assembli (6..</text>
+<text x="28" y="518" class="dim">Solid amber = synthesized 2-to-2 splitter tree | Dashed cyan = direct feed | Zero LP balance error</text>
+<rect x="614" y="64" width="570" height="460" rx="8" fill="#141a23" stroke="#232c3b"/>
+<text x="628" y="86" class="hdr">PDK Cell Area Treemap (3824 instances, 51 cells)</text>
+<rect x="628.0" y="104.0" width="297.6" height="206.1" rx="3" fill="#2dd4bf" fill-opacity="0.22" stroke="#2dd4bf" stroke-width="1"/>
+<text x="633.0" y="118.0" class="lbl">steam-power</text>
+<text x="633.0" y="130.0" class="dim">407x | 14245t2</text>
+<rect x="628.0" y="311.6" width="190.7" height="164.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<text x="633.0" y="325.6" class="lbl">merge2</text>
+<text x="633.0" y="337.6" class="dim">815x | 7335t2</text>
+<rect x="820.2" y="311.6" width="105.4" height="164.9" rx="3" fill="#2dd4bf" fill-opacity="0.22" stroke="#2dd4bf" stroke-width="1"/>
+<text x="825.2" y="325.6" class="lbl">boiler-steam</text>
+<text x="825.2" y="337.6" class="dim">204x | 4080t2</text>
+<rect x="927.1" y="104.0" width="146.8" height="107.0" rx="3" fill="#f472b6" fill-opacity="0.22" stroke="#f472b6" stroke-width="1"/>
+<text x="932.1" y="118.0" class="lbl">iron-plate</text>
+<text x="932.1" y="130.0" class="dim">246x | 3690t2</text>
+<rect x="927.1" y="212.5" width="146.8" height="103.9" rx="3" fill="#f472b6" fill-opacity="0.22" stroke="#f472b6" stroke-width="1"/>
+<text x="932.1" y="226.5" class="lbl">copper-plate</text>
+<text x="932.1" y="238.5" class="dim">239x | 3585t2</text>
+<rect x="1075.5" y="104.0" width="93.0" height="129.3" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<text x="1080.5" y="118.0" class="lbl">split2</text>
+<text x="1080.5" y="130.0" class="dim">1418x | 2836t2</text>
+<rect x="1075.5" y="234.8" width="93.0" height="81.5" rx="3" fill="#f472b6" fill-opacity="0.22" stroke="#f472b6" stroke-width="1"/>
+<text x="1080.5" y="248.8" class="lbl">steel-plate</text>
+<text x="1080.5" y="260.8" class="dim">120x | 1800t2</text>
+<rect x="927.1" y="317.8" width="88.3" height="48.5" rx="3" fill="#2dd4bf" fill-opacity="0.22" stroke="#2dd4bf" stroke-width="1"/>
+<text x="932.1" y="331.8" class="lbl">advanced-o..</text>
+<text x="932.1" y="343.8" class="dim">21x | 1029t2</text>
+<rect x="927.1" y="367.8" width="88.3" height="48.3" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<text x="932.1" y="381.8" class="lbl">advanced-c..</text>
+<text x="932.1" y="393.8" class="dim">41x | 1025t2</text>
+<rect x="1017.0" y="317.8" width="33.5" height="98.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="927.1" y="417.6" width="45.4" height="58.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="974.0" y="417.6" width="43.9" height="58.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1019.5" y="417.6" width="31.0" height="58.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1051.9" y="317.8" width="33.5" height="45.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1087.0" y="317.8" width="31.2" height="45.2" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1051.9" y="364.5" width="35.2" height="37.1" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1088.6" y="364.5" width="29.5" height="37.1" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1119.7" y="317.8" width="24.9" height="44.0" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1146.0" y="317.8" width="22.5" height="44.0" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1119.7" y="363.3" width="25.9" height="38.3" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1147.0" y="363.3" width="21.5" height="38.3" rx="3" fill="#f472b6" fill-opacity="0.22" stroke="#f472b6" stroke-width="1"/>
+<rect x="1051.9" y="403.1" width="32.2" height="21.8" rx="3" fill="#f472b6" fill-opacity="0.22" stroke="#f472b6" stroke-width="1"/>
+<rect x="1051.9" y="426.4" width="32.2" height="17.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1085.6" y="403.1" width="29.1" height="19.8" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1085.6" y="424.5" width="29.1" height="19.8" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1051.9" y="445.8" width="15.4" height="30.7" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1068.9" y="445.8" width="15.4" height="30.7" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1085.8" y="445.8" width="29.0" height="16.4" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1085.8" y="463.7" width="29.0" height="12.8" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1116.3" y="403.1" width="15.5" height="24.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1133.3" y="403.1" width="15.5" height="24.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1116.3" y="428.9" width="32.4" height="11.4" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1150.2" y="403.1" width="18.3" height="15.0" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1150.2" y="419.7" width="18.3" height="9.5" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1150.2" y="430.7" width="18.3" height="9.5" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1116.3" y="441.7" width="17.7" height="9.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1116.3" y="453.1" width="17.7" height="9.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1135.5" y="441.7" width="6.6" height="21.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1116.3" y="464.4" width="8.1" height="12.1" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1125.9" y="464.4" width="8.1" height="12.1" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1135.5" y="464.4" width="6.5" height="12.1" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1143.6" y="441.7" width="6.4" height="12.2" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1151.5" y="441.7" width="6.4" height="12.2" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1143.6" y="455.5" width="14.4" height="5.4" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1159.4" y="441.7" width="9.1" height="8.8" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1159.4" y="452.0" width="9.1" height="8.8" rx="3" fill="#34d399" fill-opacity="0.22" stroke="#34d399" stroke-width="1"/>
+<rect x="1143.6" y="462.3" width="12.4" height="6.3" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1143.6" y="470.2" width="12.4" height="6.3" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1157.5" y="462.3" width="4.8" height="8.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1163.7" y="462.3" width="4.8" height="8.9" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<rect x="1157.5" y="472.8" width="11.0" height="3.7" rx="3" fill="#818cf8" fill-opacity="0.22" stroke="#818cf8" stroke-width="1"/>
+<text x="628" y="496" class="dim">Total cell halo area: 46,492 tiles2 across 51 cells</text>
+<rect x="628" y="504" width="9" height="9" rx="2" fill="#2dd4bf" fill-opacity="0.6" stroke="#2dd4bf"/>
+<text x="641" y="512" class="dim">steam-engine</text>
+<rect x="738" y="504" width="9" height="9" rx="2" fill="#818cf8" fill-opacity="0.6" stroke="#818cf8"/>
+<text x="751" y="512" class="dim">splitter</text>
+<rect x="848" y="504" width="9" height="9" rx="2" fill="#2dd4bf" fill-opacity="0.6" stroke="#2dd4bf"/>
+<text x="861" y="512" class="dim">boiler</text>
+<rect x="958" y="504" width="9" height="9" rx="2" fill="#f472b6" fill-opacity="0.6" stroke="#f472b6"/>
+<text x="971" y="512" class="dim">electric-furn..</text>
+<rect x="1068" y="504" width="9" height="9" rx="2" fill="#2dd4bf" fill-opacity="0.6" stroke="#2dd4bf"/>
+<text x="1081" y="512" class="dim">oil-refinery</text>
+</svg>

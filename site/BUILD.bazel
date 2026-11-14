@@ -4,9 +4,24 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "all_files",
-    srcs = glob(
+    srcs = [".nojekyll"] + glob(
         ["**/*"],
-        exclude = ["BUILD.bazel"],
+        exclude = [
+            "BUILD.bazel",
+            ".nojekyll",
+            "*.tar.gz",
+        ],
         allow_empty = True,
     ),
+)
+
+genrule(
+    name = "pages_bundle",
+    srcs = [
+        ":all_files",
+        "//flow:controllers/power_sequencer.v",
+    ],
+    outs = ["pages_bundle.tar.gz"],
+    cmd = "$(execpath //tools:build_showcase_site) --site-dir site --verilog $(execpath //flow:controllers/power_sequencer.v) --package-tar $@",
+    tools = ["//tools:build_showcase_site"],
 )
