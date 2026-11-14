@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import os
+import pwd
 import re
 import subprocess
 from pathlib import Path
+
+REAL_USER_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 DEFAULT_CANDIDATE_PATHS = [
     Path(os.environ.get("FACTORIO_BIN", "")),
     Path.home() / ".steam/steam/steamapps/common/Factorio/bin/x64_/factorio",
     Path.home() / ".local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio",
-    Path("/home/atv/.steam/steam/steamapps/common/Factorio/bin/x64_/factorio"),
-    Path("/home/atv/.local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio"),
+    REAL_USER_HOME / ".steam/steam/steamapps/common/Factorio/bin/x64_/factorio",
+    REAL_USER_HOME / ".local/share/Steam/steamapps/common/Factorio/bin/x64_/factorio",
     Path("/usr/bin/factorio"),
 ]
 

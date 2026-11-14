@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary & North Star Objective
 
-This document specifies the **Autonomous Campaign Solver & Phased Base Architecture** for [`factorilog`](file:///home/atv/src/factorilog).
+This document specifies the **Autonomous Campaign Solver & Phased Base Architecture** for [`factorilog`](../README.md).
 
 ### 1.1 The North Star Goal
 The system achieves all 59 vanilla Factorio base-game achievements in one continuous campaign on an unmodded multiplayer server. The system connects an autonomous bot client to the server and executes every physical action without human intervention. It mines raw resources, navigates water and cliffs, and researches the technology tree. It also defends against hostile biters and scales production through a rocket launch and megabase targets.
@@ -14,7 +14,7 @@ The system achieves all 59 vanilla Factorio base-game achievements in one contin
    - The bot performs all movement, mining, placement, logistics, and combat actions.
 2. **Dynamic Prototype Ground Truth**.
    - The solver reads recipes, technologies, dimensions, speeds, spans, pollution values, and achievement rules from the prototype dump.
-   - This logic builds on [`solve.py`](file:///home/atv/src/factorilog/foundry/solve.py) and [`pdk.py`](file:///home/atv/src/factorilog/foundry/pdk.py).
+   - This logic builds on [`solve.py`](../foundry/solve.py) and [`pdk.py`](../foundry/pdk.py).
    - The codebase forbids hardcoded prototype constants and excludes Space Age expansion prototypes.
 3. **Seed-Agnostic Terrain Adaptation**.
    - The system starts with only the spawn area visible.
@@ -33,7 +33,7 @@ The system achieves all 59 vanilla Factorio base-game achievements in one contin
 
 ## 2. Base-Game Achievement Taxonomy & Temporal Partitioning
 
-The solver extracts all 59 achievement definitions from [`achievements.lua`](file:///home/atv/.steam/steam/steamapps/common/Factorio/data/base/prototypes/achievements.lua) at runtime and partitions them into two sequential epochs. (The expansion file `data/space-age/prototypes/achievements.lua` defines 29 additional achievements, which this base-game flow excludes.)
+The solver extracts all 59 achievement definitions from `$HOME/.steam/steam/steamapps/common/Factorio/data/base/prototypes/achievements.lua` at runtime and partitions them into two sequential epochs. (The expansion file `data/space-age/prototypes/achievements.lua` defines 29 additional achievements, which this base-game flow excludes.)
 
 ```mermaid
 flowchart LR
@@ -135,7 +135,7 @@ Every prototype below loads directly from `data/base/prototypes/achievements.lua
 
 ## 3. Master Grid & In-Place Phased Base Architecture
 
-The floorplanner establishes a unified **Master Chassis Grid** anchored at the spawn origin $(0, 0)$ (see [`chassis_layout_architecture.md`](file:///home/atv/src/factorilog/docs/chassis_layout_architecture.md)). Each $100 \times 100$ tile city block ($94 \times 94$ core with 6-tile streets) receives a phase role.
+The floorplanner establishes a unified **Master Chassis Grid** anchored at the spawn origin $(0, 0)$ (see [`chassis_layout_architecture.md`](chassis_layout_architecture.md)). Each $100 \times 100$ tile city block ($94 \times 94$ core with 6-tile streets) receives a phase role.
 
 ```
 +-----------------------+-----------------------+-----------------------+
@@ -173,11 +173,11 @@ The floorplanner establishes a unified **Master Chassis Grid** anchored at the s
 
 ### 3.3 Phase 2: Main Bus Base & 8-Hour Rocket Launch (1.5 to 8 Hours)
 - **Footprint**: Extends along the primary axis through Blocks $(1, 0)$, $(2, 0)$, $(0, 1)$, and $(1, 1)$. Block $(-1, 1)$ hosts oil refineries and chemical plants, and Block $(1, -1)$ hosts the `rocket-silo`.
-- **Objective**: Synthesize military, chemical, production, and utility science at rates solved through [`solve.py`](file:///home/atv/src/factorilog/foundry/solve.py). Launch a fish-carrying rocket within 8 hours (`there-is-no-spoon`) and finish the first `space-science-pack` technology (`logistic-network-embargo`).
+- **Objective**: Synthesize military, chemical, production, and utility science at rates solved through [`solve.py`](../foundry/solve.py). Launch a fish-carrying rocket within 8 hours (`there-is-no-spoon`) and finish the first `space-science-pack` technology (`logistic-network-embargo`).
 - **In-Place Design**:
-  - The 6-tile chassis streets between blocks carry the main bus lanes, routed by the 3D multi-layer maze router ([`native_router_architecture.md`](file:///home/atv/src/factorilog/docs/native_router_architecture.md)).
+  - The 6-tile chassis streets between blocks carry the main bus lanes, routed by the 3D multi-layer maze router ([`native_router_architecture.md`](native_router_architecture.md)).
   - As technology advances, the bot upgrades yellow belts to red belts, `stone-furnace` to `steel-furnace`, and `assembling-machine-1` to `assembling-machine-2` in place.
-  - These upgrades require zero rerouting because the tiers share identical tile footprints in the PDK ([`factorio_pdk_architecture.md`](file:///home/atv/src/factorilog/docs/factorio_pdk_architecture.md)).
+  - These upgrades require zero rerouting because the tiers share identical tile footprints in the PDK ([`factorio_pdk_architecture.md`](factorio_pdk_architecture.md)).
   - Construction bots (`roboport`, `passive-provider-chest`, and `storage-chest`) come online during chemical science to stamp blueprints while respecting `logistic-network-embargo`.
 
 ### 3.4 Phase 3: City Block Megabase & Achievement Sweep (Post-8 Hours)
@@ -205,7 +205,7 @@ flowchart TD
 
 ### 4.1 Autonomous Scouting & Cartography Loop
 1. **Initial Survey**: At $t = 0$, the bot scans charted chunks to find iron, copper, coal, stone, and water.
-2. **Radar Sweep**: The chassis places `radar` entities at block corners ([`chassis_layout_architecture.md`](file:///home/atv/src/factorilog/docs/chassis_layout_architecture.md)). Each radar charts nearby sectors and periodically reveals distant chunks.
+2. **Radar Sweep**: The chassis places `radar` entities at block corners ([`chassis_layout_architecture.md`](chassis_layout_architecture.md)). Each radar charts nearby sectors and periodically reveals distant chunks.
 3. **Active Reconnaissance**: The solver triggers reconnaissance when a phase requires undiscovered `crude-oil`, `uranium-ore`, or secondary ore patches. The bot drives a vehicle or walks along a spiral frontier until the required resource prototypes enter charted space.
 
 ### 4.2 Handling Terrain Obstacles (Cliffs, Water, and Trees)
@@ -216,7 +216,7 @@ flowchart TD
    - Dense forests outside the base remain standing to absorb pollution until Phase 4 targets them for `pyromaniac` and `run-forrest-run`.
 2. **Cliffs (Hard Keepouts until Cliff Explosives)**.
    - Before `cliff-explosives` unlock, the Cartographer queries every cliff collision box from the prototype data.
-   - It marks each cliff as a surface blockage ($z = 0$) in OpenROAD DEF and the 3D router grid ([`foundry/router/grid.py`](file:///home/atv/src/factorilog/foundry/router/grid.py)).
+   - It marks each cliff as a surface blockage ($z = 0$) in OpenROAD DEF and the 3D router grid ([`foundry/router/grid.py`](../foundry/router/grid.py)).
    - Subterranean layers ($z \ge 1$) tunnel underneath cliffs wherever the cliff width fits within the dynamic prototype `max_distance` span.
    - Once chemical science unlocks `cliff-explosives`, the bot demolishes obstructing cliffs (`terraformer`) and reclaims the blocked tiles.
 3. **Water Bodies (Source Pin & Hard Obstacle until Landfill)**.
@@ -275,7 +275,7 @@ Once the rocket launches and `artillery` unlocks:
 
 ## 6. Campaign Solver & Runtime Execution Architecture
 
-The Campaign System adds a high-level **Temporal & Spatial Executive** above the existing [`foundry/`](file:///home/atv/src/factorilog/foundry) synthesis, placement, and routing pipeline.
+The Campaign System adds a high-level **Temporal & Spatial Executive** above the existing [`foundry/`](../foundry) synthesis, placement, and routing pipeline.
 
 ```mermaid
 flowchart TD
@@ -290,7 +290,7 @@ flowchart TD
 ```
 
 ### 6.1 Stage 1: Temporal Campaign Planner (MILP / CP-SAT)
-[`foundry/solve.py`](file:///home/atv/src/factorilog/foundry/solve.py) solves steady-state item flows for one target. The **Temporal Campaign Planner** solves a discrete-time Mixed-Integer Linear Program (MILP) over horizon $T = \{t_0, t_1, \dots, t_K\}$.
+[`foundry/solve.py`](../foundry/solve.py) solves steady-state item flows for one target. The **Temporal Campaign Planner** solves a discrete-time Mixed-Integer Linear Program (MILP) over horizon $T = \{t_0, t_1, \dots, t_K\}$.
 - **State Variables**:
   - $\mathcal{R}_t$: Set of researched technologies at step $t$.
   - $I_t(m)$: Installed count of machine macro $m$ at step $t$.
@@ -309,9 +309,9 @@ The floorplanner and router execute three steps whenever the Temporal Planner ad
 1. **Block Allocation**: The floorplanner assigns the new sub-netlist to its reserved coordinates on the Master Chassis Grid.
 2. **Obstacle Injection**: The Cartographer injects water tiles, un-demolished cliffs, and existing Phase 0/1 entities into the placement grid.
 3. **Incremental Place & Route**:
-   - The analytical placer ([`foundry/analytical_placer.py`](file:///home/atv/src/factorilog/foundry/analytical_placer.py)) places new machine cells in unobstructed core sites.
-   - The 3D Maze Router ([`foundry/router/maze_router.py`](file:///home/atv/src/factorilog/foundry/router/maze_router.py)) routes belts and pipes around cliffs and existing tracks to bus taps.
-   - The [`NativeLayoutVerifier`](file:///home/atv/src/factorilog/foundry/native_engine/verifier.py#L90) verifies zero DRC/LVS violations and confirms full item delivery before the bot receives the blueprint.
+   - The analytical placer ([`foundry/analytical_placer.py`](../foundry/analytical_placer.py)) places new machine cells in unobstructed core sites.
+   - The 3D Maze Router ([`foundry/router/maze_router.py`](../foundry/router/maze_router.py)) routes belts and pipes around cliffs and existing tracks to bus taps.
+   - The [`NativeLayoutVerifier`](../foundry/native_engine/verifier.py) verifies zero DRC/LVS violations and confirms full item delivery before the bot receives the blueprint.
 
 ### 6.3 Stage 3: Autonomous Bot Client & Action Scheduler
 The **Autonomous Bot Executive** translates approved entity graphs into physical actions on the multiplayer server.

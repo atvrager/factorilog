@@ -8,8 +8,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 1. Assembling Machine 1
 - **Recipe**: `iron-gear-wheel`
 - **Output**: `iron-gear-wheel`
-- **Image**: [assembling-machine-1.png](file:///home/atv/src/factorilog/docs/cells/assembling-machine-1.png)
-- **Blueprint String**: [assembling-machine-1.bp.txt](file:///home/atv/src/factorilog/docs/cells/assembling-machine-1.bp.txt)
+- **Image**: [assembling-machine-1.png](assembling-machine-1.png)
+- **Blueprint String**: [assembling-machine-1.bp.txt](assembling-machine-1.bp.txt)
 
 ![Assembling Machine 1](assembling-machine-1.png)
 
@@ -18,8 +18,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 2. Assembling Machine 2
 - **Recipe**: `electronic-circuit`
 - **Output**: `electronic-circuit`
-- **Image**: [assembling-machine-2.png](file:///home/atv/src/factorilog/docs/cells/assembling-machine-2.png)
-- **Blueprint String**: [assembling-machine-2.bp.txt](file:///home/atv/src/factorilog/docs/cells/assembling-machine-2.bp.txt)
+- **Image**: [assembling-machine-2.png](assembling-machine-2.png)
+- **Blueprint String**: [assembling-machine-2.bp.txt](assembling-machine-2.bp.txt)
 
 ![Assembling Machine 2](assembling-machine-2.png)
 
@@ -28,8 +28,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 3. Assembling Machine 3
 - **Recipe**: `automation-science-pack`
 - **Output**: `automation-science-pack`
-- **Image**: [assembling-machine-3.png](file:///home/atv/src/factorilog/docs/cells/assembling-machine-3.png)
-- **Blueprint String**: [assembling-machine-3.bp.txt](file:///home/atv/src/factorilog/docs/cells/assembling-machine-3.bp.txt)
+- **Image**: [assembling-machine-3.png](assembling-machine-3.png)
+- **Blueprint String**: [assembling-machine-3.bp.txt](assembling-machine-3.bp.txt)
 
 ![Assembling Machine 3](assembling-machine-3.png)
 
@@ -38,8 +38,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 4. Stone Furnace
 - **Recipe**: `copper-plate`
 - **Output**: `copper-plate`
-- **Image**: [stone-furnace.png](file:///home/atv/src/factorilog/docs/cells/stone-furnace.png)
-- **Blueprint String**: [stone-furnace.bp.txt](file:///home/atv/src/factorilog/docs/cells/stone-furnace.bp.txt)
+- **Image**: [stone-furnace.png](stone-furnace.png)
+- **Blueprint String**: [stone-furnace.bp.txt](stone-furnace.bp.txt)
 
 ![Stone Furnace](stone-furnace.png)
 
@@ -48,8 +48,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 5. Steel Furnace
 - **Recipe**: `iron-plate`
 - **Output**: `iron-plate`
-- **Image**: [steel-furnace.png](file:///home/atv/src/factorilog/docs/cells/steel-furnace.png)
-- **Blueprint String**: [steel-furnace.bp.txt](file:///home/atv/src/factorilog/docs/cells/steel-furnace.bp.txt)
+- **Image**: [steel-furnace.png](steel-furnace.png)
+- **Blueprint String**: [steel-furnace.bp.txt](steel-furnace.bp.txt)
 
 ![Steel Furnace](steel-furnace.png)
 
@@ -58,8 +58,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 6. Electric Furnace
 - **Recipe**: `iron-plate`
 - **Output**: `iron-plate`
-- **Image**: [electric-furnace.png](file:///home/atv/src/factorilog/docs/cells/electric-furnace.png)
-- **Blueprint String**: [electric-furnace.bp.txt](file:///home/atv/src/factorilog/docs/cells/electric-furnace.bp.txt)
+- **Image**: [electric-furnace.png](electric-furnace.png)
+- **Blueprint String**: [electric-furnace.bp.txt](electric-furnace.bp.txt)
 
 ![Electric Furnace](electric-furnace.png)
 
@@ -68,8 +68,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 7. Chemical Plant
 - **Recipe**: `plastic-bar`
 - **Output**: `plastic-bar`
-- **Image**: [chemical-plant.png](file:///home/atv/src/factorilog/docs/cells/chemical-plant.png)
-- **Blueprint String**: [chemical-plant.bp.txt](file:///home/atv/src/factorilog/docs/cells/chemical-plant.bp.txt)
+- **Image**: [chemical-plant.png](chemical-plant.png)
+- **Blueprint String**: [chemical-plant.bp.txt](chemical-plant.bp.txt)
 
 ![Chemical Plant](chemical-plant.png)
 
@@ -78,8 +78,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 8. Oil Refinery
 - **Recipe**: `basic-oil-processing`
 - **Output**: `petroleum-gas`
-- **Image**: [oil-refinery.png](file:///home/atv/src/factorilog/docs/cells/oil-refinery.png)
-- **Blueprint String**: [oil-refinery.bp.txt](file:///home/atv/src/factorilog/docs/cells/oil-refinery.bp.txt)
+- **Image**: [oil-refinery.png](oil-refinery.png)
+- **Blueprint String**: [oil-refinery.bp.txt](oil-refinery.bp.txt)
 
 ![Oil Refinery](oil-refinery.png)
 
@@ -88,8 +88,8 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 9. Centrifuge
 - **Recipe**: `uranium-processing`
 - **Output**: `uranium-238`
-- **Image**: [centrifuge.png](file:///home/atv/src/factorilog/docs/cells/centrifuge.png)
-- **Blueprint String**: [centrifuge.bp.txt](file:///home/atv/src/factorilog/docs/cells/centrifuge.bp.txt)
+- **Image**: [centrifuge.png](centrifuge.png)
+- **Blueprint String**: [centrifuge.bp.txt](centrifuge.bp.txt)
 
 ![Centrifuge](centrifuge.png)
 
@@ -98,7 +98,7 @@ The cell layouts are generated through logic synthesis, OpenROAD placement and r
 ### 10. Rocket Silo
 - **Recipe**: `rocket-part`
 - **Output**: `rocket-part`
-- **Image**: [rocket-silo.png](file:///home/atv/src/factorilog/docs/cells/rocket-silo.png)
-- **Blueprint String**: [rocket-silo.bp.txt](file:///home/atv/src/factorilog/docs/cells/rocket-silo.bp.txt)
+- **Image**: [rocket-silo.png](rocket-silo.png)
+- **Blueprint String**: [rocket-silo.bp.txt](rocket-silo.bp.txt)
 
 ![Rocket Silo](rocket-silo.png)

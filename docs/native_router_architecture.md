@@ -2,10 +2,10 @@
 
 ## 1. Executive Summary & Core Concept
 
-This document specifies the **Native Simulation Oracle & Router Architecture** for [`factorilog`](file:///home/atv/src/factorilog).
+This document specifies the **Native Simulation Oracle & Router Architecture** for [`factorilog`](../README.md).
 
 ### 1.1 The Routing Problem in Factorilog
-The current routing flow in [`3_route.tcl`](file:///home/atv/src/factorilog/flow/3_route.tcl) uses OpenROAD TritonRoute. TritonRoute routes electrical metal tracks for integrated circuits. 
+The current routing flow in [`3_route.tcl`](../flow/3_route.tcl) uses OpenROAD TritonRoute. TritonRoute routes electrical metal tracks for integrated circuits. 
 
 Electrical wires and Factorio logistics have incompatible physics:
 1. **Directionality**: Electrical tracks conduct current in all directions. Factorio belts and pipes flow strictly in one direction.
@@ -14,10 +14,10 @@ Electrical wires and Factorio logistics have incompatible physics:
 4. **Commodity Contamination**: Electrical nets carry voltage signals. Belts carry heterogeneous items. An illegal physical merge permanently contaminates downstream production machines.
 5. **Fluid Segments**: Factorio 2.0 pipes form continuous fluid segments with uniform pressure, not resistive networks.
 
-The current workaround in [`jumper.py`](file:///home/atv/src/factorilog/foundry/jumper.py) attempts to post-process electrical wires into belts by inserting underground jumpers. This process creates crossed lines, backwards belts, and throughput deadlocks. The manual checks in [`belt_drc.py`](file:///home/atv/src/factorilog/foundry/belt_drc.py) cannot verify whether items actually flow through the network.
+The current workaround in `foundry/jumper.py` attempts to post-process electrical wires into belts by inserting underground jumpers. This process creates crossed lines, backwards belts, and throughput deadlocks. The manual checks in [`belt_drc.py`](../foundry/belt_drc.py) cannot verify whether items actually flow through the network.
 
 ### 1.2 The Native Oracle Solution
-Instead of approximating Factorio simulation with manual heuristics, this architecture uses the user-supplied [`factorio`](file:///home/atv/.steam/steam/steamapps/common/Factorio/bin/x64_/factorio) executable directly as a **Native Physical Oracle**:
+Instead of approximating Factorio simulation with manual heuristics, this architecture uses the user-supplied `$HOME/.steam/steam/steamapps/common/Factorio/bin/x64_/factorio` executable directly as a **Native Physical Oracle**:
 
 ```
 +--------------------------+     +--------------------------+
@@ -45,8 +45,8 @@ Instead of approximating Factorio simulation with manual heuristics, this archit
 ### 2.1 ELF PIE Transformation
 The Factorio Linux binary is an unstripped Position Independent Executable (`ET_DYN`). Standard `dlopen` rejects PIE binaries because of the `PT_INTERP` header and the `DF_1_PIE` dynamic tag in `DT_FLAGS_1`.
 
-The loader in [`factorio_engine.py`](file:///tmp/f/factorio_engine.py) prepares the binary:
-1. Copies the binary to a cache directory ([`factorio_lib.so`](file:///tmp/f/factorio_lib.so)).
+The loader in [`engine.py`](../foundry/native_engine/engine.py) prepares the binary:
+1. Copies the binary to a cache directory (`factorio_lib.so`).
 2. Changes the `PT_INTERP` program header type from `0x03` to `0x00` (`PT_NULL`).
 3. Clears the `DF_1_PIE` bit (`0x08000000`) in `DT_FLAGS_1`.
 4. Loads `libsteam_api.so` into global scope.
@@ -58,12 +58,12 @@ When game updates occur, memory addresses change. The system discovers offsets a
 
 | Routine | Demangled Pattern | Target Mechanism |
 | :--- | :--- | :--- |
-| [`TransportLine::update`](file:///tmp/f/decompiled/belt_TransportLine_update.cpp) | `^TransportLine::update\(MapTick, unsigned int\)$` | Belt tick processing & propagation |
-| [`TransportLine::move`](file:///tmp/f/decompiled/belt_TransportLine_move.cpp) | `^TransportLine::move\(` | Item spacing ($0.25$ tiles) & transfers |
-| [`TransportLine::unsquash`](file:///tmp/f/decompiled/belt_TransportLine_unsquash.cpp) | `^TransportLine::unsquash\(` | Deque item spacing restoration |
-| [`SplitterLogic::resolveSplitting`](file:///tmp/f/decompiled/belt_SplitterLogic_resolveSplitting.cpp) | `^SplitterLogic::resolveSplitting\(` | 2x2 lane balancing & priority filtering |
-| [`FluidBuffer::getFlowRate`](file:///tmp/f/decompiled/pipe_FluidBuffer_getFlowRate.cpp) | `^FluidBuffer::getFlowRate\(` | 24-bit fixed point flow rate calculation |
-| [`FluidSegmentManager::buildNewSegment`](file:///tmp/f/decompiled/pipe_FluidSegmentManager_buildNewSegment.cpp) | `^FluidSegmentManager::buildNewSegment\(` | Factorio 2.0 pipe segment grouping |
+| `TransportLine::update` | `^TransportLine::update\(MapTick, unsigned int\)$` | Belt tick processing & propagation |
+| `TransportLine::move` | `^TransportLine::move\(` | Item spacing ($0.25$ tiles) & transfers |
+| `TransportLine::unsquash` | `^TransportLine::unsquash\(` | Deque item spacing restoration |
+| `SplitterLogic::resolveSplitting` | `^SplitterLogic::resolveSplitting\(` | 2x2 lane balancing & priority filtering |
+| `FluidBuffer::getFlowRate` | `^FluidBuffer::getFlowRate\(` | 24-bit fixed point flow rate calculation |
+| `FluidSegmentManager::buildNewSegment` | `^FluidSegmentManager::buildNewSegment\(` | Factorio 2.0 pipe segment grouping |
 
 Fallback discovery uses instruction signatures:
 - Spacing constant `0x40` (64 fixed point units = 0.25 tiles).
@@ -164,7 +164,7 @@ flowchart TD
 ```
 
 ### 4.1 Phase 1: Global Channel Assignment
-Assigns nets to street channels defined in [`chassis_layout_architecture.md`](file:///home/atv/src/factorilog/docs/chassis_layout_architecture.md). Orders nets to reduce crossings.
+Assigns nets to street channels defined in [`chassis_layout_architecture.md`](chassis_layout_architecture.md). Orders nets to reduce crossings.
 
 ### 4.2 Phase 2: Multi-Layer Negotiated Congestion Router (PathFinder)
 Replaces TritonRoute with a negotiated congestion router across the 3D multi-layer graph:
@@ -204,8 +204,8 @@ The engine validates the candidate blueprint before acceptance:
    - Verifies fluid isolation across independent pipe networks.
 2. **Native Simulation LVS**:
    - Injects items at source pins and runs simulation for 120 ticks.
-   - Validates discrete item movement using [`TransportLine::move`](file:///tmp/f/decompiled/belt_TransportLine_move.cpp).
-   - Validates fluid pressures using [`FluidBuffer::getFlowRate`](file:///tmp/f/decompiled/pipe_FluidBuffer_getFlowRate.cpp).
+   - Validates discrete item movement using `TransportLine::move`.
+   - Validates fluid pressures using `FluidBuffer::getFlowRate`.
    - Confirms arrival of all required items at target sinks.
    - Confirms zero commodity contamination.
 3. **Closed-Loop Feedback**:
@@ -217,15 +217,15 @@ The engine validates the candidate blueprint before acceptance:
 ## 5. Implementation Roadmap & File Layout
 
 ### Milestone 1: Native Engine Module (`foundry/native_engine/`) [Complete]
-- Ported engine loader into [`foundry/native_engine/engine.py`](file:///home/atv/src/factorilog/foundry/native_engine/engine.py).
-- Automated binary preparation and symbol resolution in [`foundry/native_engine/symbol_finder.py`](file:///home/atv/src/factorilog/foundry/native_engine/symbol_finder.py).
-- Implemented 18 comprehensive simulation unit tests in [`test/test_native_engine.py`](file:///home/atv/src/factorilog/test/test_native_engine.py).
+- Ported engine loader into [`foundry/native_engine/engine.py`](../foundry/native_engine/engine.py).
+- Automated binary preparation and symbol resolution in [`foundry/native_engine/symbol_finder.py`](../foundry/native_engine/symbol_finder.py).
+- Implemented 18 comprehensive simulation unit tests in [`test/test_native_engine.py`](../test/test_native_engine.py).
 
 ### Milestone 2: Ground-Truth LVS/DRC Testbench [Complete]
-- Implemented [`NativeLayoutVerifier`](file:///home/atv/src/factorilog/foundry/native_engine/verifier.py#L90) in [`foundry/native_engine/verifier.py`](file:///home/atv/src/factorilog/foundry/native_engine/verifier.py).
+- Implemented [`NativeLayoutVerifier`](../foundry/native_engine/verifier.py) in [`foundry/native_engine/verifier.py`](../foundry/native_engine/verifier.py).
 - Added dynamic prototype loading without hardcoded constants.
 - Added multi-tier underground belt and pipe weaving support.
-- Implemented 14 layout verification tests in [`test/test_layout_verifier.py`](file:///home/atv/src/factorilog/test/test_layout_verifier.py).
+- Implemented 14 layout verification tests in [`test/test_layout_verifier.py`](../test/test_layout_verifier.py).
 
 ### Milestone 3: Dual-Lane Directed Maze Router (`foundry/router/`) [Active]
 - Build `foundry/router/types.py`:
@@ -239,11 +239,11 @@ The engine validates the candidate blueprint before acceptance:
 - Build `foundry/router/blueprint_builder.py`:
   - Translates abstract routed graphs into concrete Factorio blueprint entities.
 - Build `foundry/router/maze_router.py`:
-  - Top-level router orchestrator with closed-loop [`NativeLayoutVerifier`](file:///home/atv/src/factorilog/foundry/native_engine/verifier.py#L90) feedback.
+  - Top-level router orchestrator with closed-loop [`NativeLayoutVerifier`](../foundry/native_engine/verifier.py) feedback.
 - Build `test/test_router.py`:
   - Unit and integration tests for multi-tier weaving, dual-lane packing, and closed-loop routing.
 
 ### Milestone 4: Flow Integration
-- Integrate `foundry/router/` into [`foundry/chassis.py`](file:///home/atv/src/factorilog/foundry/chassis.py) and [`flow/3_route.tcl`](file:///home/atv/src/factorilog/flow/3_route.tcl).
-- Deprecate [`foundry/jumper.py`](file:///home/atv/src/factorilog/foundry/jumper.py).
+- Integrate `foundry/router/` into [`foundry/chassis.py`](../foundry/chassis.py) and [`flow/3_route.tcl`](../flow/3_route.tcl).
+- Deprecate `foundry/jumper.py`.
 - Verify end-to-end blueprint generation for multi-block factory designs.

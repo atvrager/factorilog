@@ -4,7 +4,7 @@
 
 Factorio multiplayer operates over UDP (default port `34197` for game traffic and `34196` for LAN broadcast). The engine uses a deterministic lockstep model. The server does not stream entity coordinates, inventory contents, or world deltas to connected clients. Instead, a joining client downloads a snapshot of the map archive (`TransferBlock`). The client then exchanges per-tick `TickClosure` messages that contain deterministic `InputAction` commands.
 
-This document specifies the binary wire format of the Factorio Game Protocol (`2.1.23`). It also explains headless and offscreen execution and defines the UDP Lockstep Proxy architecture for [`factorilog`](file:///home/atv/src/factorilog).
+This document specifies the binary wire format of the Factorio Game Protocol (`2.1.23`). It also explains headless and offscreen execution and defines the UDP Lockstep Proxy architecture for [`factorilog`](../README.md).
 
 ---
 
@@ -186,7 +186,7 @@ Each `savedIDMapping` table in the zlib-decompressed `level.dat0` stream has the
      - `prototype_name: String` (`length: uint32v`, followed by `length` UTF-8 bytes, such as `"automate-this"` or `"assembling-machine-1"`).
      - `prototype_id: uint16` (`<H`).
 
-The function [`extract_save_id_mappings`](file:///home/atv/src/factorilog/foundry/mp_proxy.py) parses these tables from a Factorio save `.zip` archive. This lets [`factorilog`](file:///home/atv/src/factorilog) resolve all wire IDs dynamically at runtime without hardcoded constants.
+The function [`extract_save_id_mappings`](../foundry/mp_proxy.py) parses these tables from a Factorio save `.zip` archive. This lets [`factorilog`](../README.md) resolve all wire IDs dynamically at runtime without hardcoded constants.
 
 ### 6.5 Native Achievement Unlock Conditions (`AchievementStats::allowed` and `Achievement::onGainedLocal`)
 
