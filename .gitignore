@@ -12,12 +12,14 @@ foundry/factory.def
 foundry/route_drc.rpt
 foundry/factory.blueprint
 *.blueprint
+!site/data/blueprints/*.blueprint
 
 # Rendered machine cell assets and blueprints
 *.bp.txt
 *.png
 *.zip
 /scratch/
+/dist/
 
 __pycache__/
 *.pyc
